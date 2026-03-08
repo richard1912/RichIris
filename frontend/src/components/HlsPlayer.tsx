@@ -1,6 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
 import Hls from 'hls.js'
 import { getStreamUrl } from '../api'
+
+export interface HlsPlayerHandle {
+  getVideoElement: () => HTMLVideoElement | null
+}
 
 interface Props {
   cameraId?: number
@@ -12,12 +16,19 @@ interface Props {
   onEnded?: () => void
 }
 
-export default function HlsPlayer({ cameraId, src, muted = true, className, rotation = 0, startTime = 0, onEnded }: Props) {
+const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
+  { cameraId, src, muted = true, className, rotation = 0, startTime = 0, onEnded },
+  ref,
+) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
 
   const url = src ?? (cameraId != null ? getStreamUrl(cameraId) : '')
   const isLive = !src
+
+  useImperativeHandle(ref, () => ({
+    getVideoElement: () => videoRef.current,
+  }))
 
   useEffect(() => {
     const video = videoRef.current
@@ -95,4 +106,6 @@ export default function HlsPlayer({ cameraId, src, muted = true, className, rota
       style={rotationStyle}
     />
   )
-}
+})
+
+export default HlsPlayer

@@ -308,17 +308,29 @@ async def _launch_live(info: StreamInfo, config: AppConfig) -> None:
 
 
 async def _read_stderr(info: StreamInfo, label: str) -> None:
-    """Read ffmpeg stderr output for logging."""
+    """Read ffmpeg stderr output for logging.
+
+    Uses a large read buffer and chunked reads to avoid LimitOverrunError
+    when ffmpeg outputs long progress lines without newlines.
+    """
     proc = info.rec_process if label == "rec" else info.live_process
     if not proc or not proc.stderr:
         return
-    while True:
-        line = await proc.stderr.readline()
-        if not line:
-            break
-        decoded = line.decode("utf-8", errors="replace").strip()
-        if decoded:
-            logger.debug(f"ffmpeg-{label}", extra={"camera_id": info.camera_id, "output": decoded})
+    try:
+        while True:
+            # Use raw read instead of readline to avoid LimitOverrunError
+            # on ffmpeg's long progress lines (no newline separators)
+            chunk = await proc.stderr.read(8192)
+            if not chunk:
+                break
+            decoded = chunk.decode("utf-8", errors="replace").strip()
+            if decoded:
+                # Only log first 500 chars to avoid log spam from progress lines
+                if len(decoded) > 500:
+                    decoded = decoded[:500] + "..."
+                logger.debug(f"ffmpeg-{label}", extra={"camera_id": info.camera_id, "output": decoded})
+    except Exception:
+        logger.exception(f"ffmpeg-{label} stderr reader failed", extra={"camera_id": info.camera_id})
 
 
 async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:

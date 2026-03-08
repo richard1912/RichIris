@@ -8,7 +8,6 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo Restarting RichIris service...
-net stop RichIris
-net start RichIris
+nssm restart RichIris
 echo Done.
 pause

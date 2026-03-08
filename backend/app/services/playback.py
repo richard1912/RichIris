@@ -1,4 +1,4 @@
-"""On-demand playback transcoder: HEVC recordings → H.264 HLS for browser playback."""
+"""On-demand playback: HEVC recordings → MP4 remux (no transcode) for browser playback."""
 
 import asyncio
 import logging
@@ -23,7 +23,6 @@ class PlaybackSession:
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
     ready: bool = False
-    seek_seconds: float = 0.0
 
 
 class PlaybackManager:
@@ -39,7 +38,7 @@ class PlaybackManager:
         self, session_id: str, segment_paths: list[str],
         seek_seconds: float = 0.0, duration_limit: float = 1800.0,
     ) -> PlaybackSession:
-        """Start a playback transcoding session."""
+        """Start a playback remux session (no transcode, just repackage to MP4)."""
         # Return existing session if still valid
         if session_id in self._sessions:
             session = self._sessions[session_id]
@@ -51,41 +50,46 @@ class PlaybackManager:
         output_dir = PLAYBACK_DIR / session_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        session = PlaybackSession(session_id=session_id, output_dir=output_dir, seek_seconds=seek_seconds)
+        session = PlaybackSession(session_id=session_id, output_dir=output_dir)
         self._sessions[session_id] = session
 
-        # Launch ffmpeg transcode using concat protocol with fast seek
         config = get_config()
-        playlist_path = output_dir / "playback.m3u8"
+        output_path = output_dir / "playback.mp4"
 
-        # Build concat protocol input (byte-level concatenation of .ts files)
-        concat_input = "|".join(p.replace("\\", "/") for p in segment_paths)
+        # For single file: direct input with fast seek (-ss before -i)
+        # For multiple files: use concat demuxer (no seek support, use -ss after -i)
+        if len(segment_paths) == 1:
+            cmd = [
+                config.ffmpeg.path, "-y",
+                "-ss", str(seek_seconds),
+                "-i", segment_paths[0],
+                "-t", str(duration_limit),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output_path),
+            ]
+        else:
+            # Write concat demuxer list file
+            concat_list_path = output_dir / "concat_list.txt"
+            with open(concat_list_path, "w") as f:
+                f.write("ffconcat version 1.0\n")
+                for p in segment_paths:
+                    escaped = p.replace("\\", "/").replace("'", "'\\''")
+                    f.write(f"file '{escaped}'\n")
 
-        cmd = [
-            config.ffmpeg.path, "-y",
-            "-ss", str(seek_seconds),
-            "-hwaccel", "cuda",
-            "-i", f"concat:{concat_input}",
-            "-t", str(duration_limit),
-            "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-b:v", "4M",
-            "-maxrate", "5M",
-            "-bufsize", "8M",
-            "-vf", "scale=1920:-2",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-f", "hls",
-            "-hls_time", "4",
-            "-hls_list_size", "0",
-            "-hls_playlist_type", "event",
-            "-hls_flags", "temp_file+append_list",
-            "-hls_segment_filename", str(output_dir / "seg_%04d.ts"),
-            str(playlist_path),
-        ]
+            cmd = [
+                config.ffmpeg.path, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list_path),
+                "-ss", str(seek_seconds),
+                "-t", str(duration_limit),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output_path),
+            ]
 
         logger.info(
-            "Starting playback transcode",
+            "Starting playback remux",
             extra={"session_id": session_id, "segments": len(segment_paths), "seek_seconds": seek_seconds},
         )
 
@@ -95,28 +99,33 @@ class PlaybackManager:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Monitor for readiness in background
+        # Wait for completion (remux is near-instant, typically < 1 second)
         asyncio.create_task(self._wait_ready(session))
 
         return session
 
     async def _wait_ready(self, session: PlaybackSession) -> None:
-        """Wait for the playlist file to appear, then mark session ready."""
-        playlist = session.output_dir / "playback.m3u8"
-        for _ in range(120):  # up to 60 seconds
-            await asyncio.sleep(0.5)
-            if playlist.exists() and playlist.stat().st_size > 0:
-                session.ready = True
-                logger.info("Playback session ready", extra={"session_id": session.session_id})
-                return
+        """Wait for the remux to complete, then mark session ready."""
+        if not session.process:
+            return
 
-        # If we get here, transcode likely failed
-        if session.process:
+        try:
+            await asyncio.wait_for(session.process.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.error("Playback remux timed out", extra={"session_id": session.session_id})
+            return
+
+        output_path = session.output_dir / "playback.mp4"
+        if output_path.exists() and output_path.stat().st_size > 0:
+            session.ready = True
+            logger.info("Playback session ready", extra={"session_id": session.session_id})
+        else:
             stderr = await session.process.stderr.read() if session.process.stderr else b""
             logger.error(
-                "Playback transcode failed to produce playlist",
+                "Playback remux failed",
                 extra={
                     "session_id": session.session_id,
+                    "returncode": session.process.returncode,
                     "stderr": stderr.decode("utf-8", errors="replace")[-500:],
                 },
             )

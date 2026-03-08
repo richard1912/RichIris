@@ -84,6 +84,19 @@ class RetentionResult(BaseModel):
     freed_bytes: int
 
 
+class ThumbnailSpriteInfo(BaseModel):
+    recording_id: int
+    start_time: datetime
+    end_time: datetime
+    duration: float
+    sprite_url: str
+    interval: int
+    cols: int
+    rows: int
+    thumb_width: int
+    thumb_height: int
+
+
 class ClipExportCreate(BaseModel):
     camera_id: int
     start_time: datetime

@@ -84,7 +84,7 @@ export function getStreamUrl(cameraId: number): string {
 }
 
 export interface PlaybackSession {
-  playlist_url: string
+  playback_url: string
   window_end: string
   has_more: boolean
 }
@@ -99,7 +99,7 @@ export async function startPlaybackSession(cameraId: number, start: string): Pro
     throw new Error(err.detail || 'Playback failed')
   }
   const data = await res.json()
-  return { playlist_url: data.playlist_url, window_end: data.window_end, has_more: data.has_more }
+  return { playback_url: data.playback_url, window_end: data.window_end, has_more: data.has_more }
 }
 
 export async function fetchRecordingDates(cameraId: number): Promise<string[]> {
@@ -111,6 +111,25 @@ export async function fetchRecordingDates(cameraId: number): Promise<string[]> {
 export async function fetchSegments(cameraId: number, date: string): Promise<RecordingSegment[]> {
   const res = await fetch(`/api/recordings/${cameraId}/segments?date=${date}`)
   if (!res.ok) throw new Error('Failed to fetch segments')
+  return res.json()
+}
+
+export interface ThumbnailSpriteInfo {
+  recording_id: number
+  start_time: string
+  end_time: string
+  duration: number
+  sprite_url: string
+  interval: number
+  cols: number
+  rows: number
+  thumb_width: number
+  thumb_height: number
+}
+
+export async function fetchThumbnails(cameraId: number, date: string): Promise<ThumbnailSpriteInfo[]> {
+  const res = await fetch(`/api/recordings/${cameraId}/thumbnails?date=${date}`)
+  if (!res.ok) return []
   return res.json()
 }
 
