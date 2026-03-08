@@ -8,9 +8,11 @@ interface Props {
   muted?: boolean
   className?: string
   rotation?: number
+  startTime?: number
+  onEnded?: () => void
 }
 
-export default function HlsPlayer({ cameraId, src, muted = true, className, rotation = 0 }: Props) {
+export default function HlsPlayer({ cameraId, src, muted = true, className, rotation = 0, startTime = 0, onEnded }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
 
@@ -45,6 +47,9 @@ export default function HlsPlayer({ cameraId, src, muted = true, className, rota
     hls.loadSource(url)
     hls.attachMedia(video)
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      if (startTime > 0) {
+        video.currentTime = startTime
+      }
       video.play().catch(() => {})
     })
 
@@ -64,7 +69,15 @@ export default function HlsPlayer({ cameraId, src, muted = true, className, rota
       hls.destroy()
       hlsRef.current = null
     }
-  }, [url, isLive])
+  }, [url, isLive, startTime])
+
+  // Attach onEnded handler
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !onEnded) return
+    video.addEventListener('ended', onEnded)
+    return () => video.removeEventListener('ended', onEnded)
+  }, [onEnded])
 
   const isRotated = rotation === 90 || rotation === 270
   const rotationStyle = rotation ? {

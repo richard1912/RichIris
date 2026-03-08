@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -69,24 +69,29 @@ async def list_segments(
     return segments
 
 
+PLAYBACK_WINDOW = 1800  # 30 minutes
+
+
 @router.post("/{camera_id}/playback")
 async def start_playback_session(
     camera_id: int,
     start: datetime = Query(..., description="Start time ISO format"),
-    end: datetime = Query(..., description="End time ISO format"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Start a transcoded playback session. Returns the session playlist URL."""
+    """Start a windowed transcoded playback session (30-min window from start)."""
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
+    window_end = start + timedelta(seconds=PLAYBACK_WINDOW)
+
+    # Segments overlapping [start, window_end]
     result = await db.execute(
         select(Recording)
         .where(
             Recording.camera_id == camera_id,
-            Recording.start_time >= start,
-            Recording.start_time <= end,
+            Recording.start_time < window_end,
+            Recording.end_time > start,
         )
         .order_by(Recording.start_time)
     )
@@ -99,11 +104,37 @@ async def start_playback_session(
     if not segment_paths:
         raise HTTPException(status_code=404, detail="Recording files missing")
 
-    key = f"{camera_id}:{start.isoformat()}:{end.isoformat()}"
+    # Calculate seek offset if start is mid-segment
+    seek_seconds = 0.0
+    first_seg = segments[0]
+    if first_seg.start_time < start:
+        seek_seconds = (start - first_seg.start_time).total_seconds()
+
+    # Calculate actual duration to transcode (may be less than full window)
+    last_seg = segments[-1]
+    last_end = last_seg.end_time or (last_seg.start_time + timedelta(seconds=last_seg.duration or 900))
+    actual_end = min(window_end, last_end)
+    duration_limit = (actual_end - start).total_seconds()
+
+    # Check if more recordings exist beyond this window
+    has_more_result = await db.execute(
+        select(Recording.id)
+        .where(
+            Recording.camera_id == camera_id,
+            Recording.start_time >= window_end,
+        )
+        .limit(1)
+    )
+    has_more = has_more_result.first() is not None
+
+    key = f"{camera_id}:{start.isoformat()}"
     session_id = hashlib.md5(key.encode()).hexdigest()[:12]
 
     mgr = get_playback_manager()
-    session = await mgr.start_session(session_id, segment_paths)
+    session = await mgr.start_session(
+        session_id, segment_paths,
+        seek_seconds=seek_seconds, duration_limit=duration_limit,
+    )
 
     # Wait for playlist to become available
     for _ in range(30):
@@ -113,6 +144,8 @@ async def start_playback_session(
             return {
                 "session_id": session_id,
                 "playlist_url": f"/api/recordings/playback/{session_id}/playback.m3u8",
+                "window_end": actual_end.isoformat(),
+                "has_more": has_more,
             }
 
     raise HTTPException(status_code=503, detail="Transcoding in progress, retry shortly")

@@ -17,14 +17,18 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [playbackError, setPlaybackError] = useState<string | null>(null)
+  const [windowEnd, setWindowEnd] = useState<string | null>(null)
+  const [hasMore, setHasMore] = useState(false)
 
   const handlePlayback = useCallback(
-    async (start: string, end: string) => {
+    async (start: string) => {
       setPlaybackLoading(true)
       setPlaybackError(null)
       try {
-        const url = await startPlaybackSession(camera.id, start, end)
-        setPlaybackUrl(url)
+        const { playlist_url, window_end, has_more } = await startPlaybackSession(camera.id, start)
+        setPlaybackUrl(playlist_url)
+        setWindowEnd(window_end)
+        setHasMore(has_more)
         setMode('playback')
       } catch (e) {
         setPlaybackError(e instanceof Error ? e.message : 'Playback failed')
@@ -34,6 +38,12 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
     },
     [camera.id],
   )
+
+  const handleEnded = useCallback(() => {
+    if (hasMore && windowEnd) {
+      handlePlayback(windowEnd)
+    }
+  }, [hasMore, windowEnd, handlePlayback])
 
   const handleLive = useCallback(() => {
     setMode('live')
@@ -105,6 +115,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
             src={playbackUrl}
             muted
             rotation={rot}
+            onEnded={handleEnded}
             className="max-h-[calc(100vh-8rem)] w-full object-contain"
           />
         ) : null}

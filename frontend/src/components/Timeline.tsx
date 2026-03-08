@@ -4,7 +4,7 @@ import { fetchSegments, createClipExport } from '../api'
 
 interface Props {
   cameraId: number | null
-  onPlayback: (start: string, end: string) => void
+  onPlayback: (start: string) => void
   onLive: () => void
   isLive: boolean
   onPause?: () => void
@@ -66,7 +66,8 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
   const pctToLabel = (pct: number): string => {
     const hour = Math.floor(pct * 24)
     const minute = Math.floor((pct * 24 - hour) * 60)
-    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+    const second = Math.floor(((pct * 24 - hour) * 60 - minute) * 60)
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
   }
 
   const getBarPct = useCallback(
@@ -86,24 +87,8 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
       const second = Math.floor(((pct * 24 - hour) * 60 - minute) * 60)
 
       const clickTime = `${selectedDate}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
-      const clickDate = new Date(clickTime)
 
-      let targetIdx = -1
-      for (let i = segments.length - 1; i >= 0; i--) {
-        if (new Date(segments[i].start_time) <= clickDate) {
-          targetIdx = i
-          break
-        }
-      }
-      if (targetIdx === -1) targetIdx = 0
-
-      const startSeg = segments[targetIdx]
-      const endSeg = segments[segments.length - 1]
-      const endMs = new Date(endSeg.start_time).getTime() + (endSeg.duration || 900) * 1000
-      const endDt = new Date(endMs)
-      const endTime = `${endDt.getFullYear()}-${String(endDt.getMonth() + 1).padStart(2, '0')}-${String(endDt.getDate()).padStart(2, '0')}T${String(endDt.getHours()).padStart(2, '0')}:${String(endDt.getMinutes()).padStart(2, '0')}:${String(endDt.getSeconds()).padStart(2, '0')}`
-
-      onPlayback(startSeg.start_time, endTime)
+      onPlayback(clickTime)
     },
     [segments, selectedDate, onPlayback],
   )

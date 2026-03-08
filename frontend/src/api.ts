@@ -83,13 +83,15 @@ export function getStreamUrl(cameraId: number): string {
   return `/api/streams/${cameraId}/index.m3u8`
 }
 
-export function getPlaybackUrl(cameraId: number, start: string, end: string): string {
-  return `/api/recordings/${cameraId}/playback.m3u8?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+export interface PlaybackSession {
+  playlist_url: string
+  window_end: string
+  has_more: boolean
 }
 
-export async function startPlaybackSession(cameraId: number, start: string, end: string): Promise<string> {
+export async function startPlaybackSession(cameraId: number, start: string): Promise<PlaybackSession> {
   const res = await fetch(
-    `/api/recordings/${cameraId}/playback?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+    `/api/recordings/${cameraId}/playback?start=${encodeURIComponent(start)}`,
     { method: 'POST' },
   )
   if (!res.ok) {
@@ -97,7 +99,7 @@ export async function startPlaybackSession(cameraId: number, start: string, end:
     throw new Error(err.detail || 'Playback failed')
   }
   const data = await res.json()
-  return data.playlist_url
+  return { playlist_url: data.playlist_url, window_end: data.window_end, has_more: data.has_more }
 }
 
 export async function fetchRecordingDates(cameraId: number): Promise<string[]> {
