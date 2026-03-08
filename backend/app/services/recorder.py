@@ -57,13 +57,20 @@ async def scan_new_segments(session: AsyncSession, camera_id: int, camera_name: 
     new_segments = _find_new_segments(rec_dir, existing)
 
     registered = 0
+    new_recordings = []
     for seg_path in new_segments:
         recording = await _register_segment(session, camera_id, seg_path, config, camera_name)
         if recording:
             registered += 1
+            new_recordings.append(recording)
 
     if registered > 0:
         await session.commit()
+        # Enqueue thumbnail generation for new recordings
+        from app.services.thumbnail import get_thumbnail_generator
+        gen = get_thumbnail_generator()
+        for rec in new_recordings:
+            gen.enqueue(rec.id)
         logger.info(
             "Registered new segments",
             extra={"camera_id": camera_id, "count": registered},
@@ -101,8 +108,12 @@ async def _register_segment(
 
         # Rename to human-readable format if still using old naming
         if seg_path.stem.startswith("rec_") and camera_name and duration:
-            seg_path = _rename_segment(seg_path, camera_name, start_time, duration)
-            file_size = seg_path.stat().st_size
+            try:
+                seg_path = _rename_segment(seg_path, camera_name, start_time, duration)
+                file_size = seg_path.stat().st_size
+            except PermissionError:
+                # ffmpeg still has the file locked; skip and retry next scan
+                return None
 
         recording = Recording(
             camera_id=camera_id,

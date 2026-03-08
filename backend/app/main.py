@@ -20,6 +20,7 @@ from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
 from app.services.playback import get_playback_manager
 from app.services.stream_manager import get_stream_manager
+from app.services.thumbnail import get_thumbnail_generator
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
@@ -42,17 +43,23 @@ async def lifespan(app: FastAPI):
 
     await _start_enabled_cameras()
 
+    thumb_gen = get_thumbnail_generator()
+    thumb_gen.start()
+
     scan_task = asyncio.create_task(_periodic_scan())
     retention_task = asyncio.create_task(_periodic_retention())
+    backfill_task = asyncio.create_task(_backfill_thumbnails())
     yield
     scan_task.cancel()
     retention_task.cancel()
+    backfill_task.cancel()
 
     logger.info("RichIris NVR shutting down")
     mgr = get_stream_manager()
     await mgr.stop_all()
     pb = get_playback_manager()
     await pb.stop_all()
+    await thumb_gen.stop()
     await close_db()
 
 
@@ -84,6 +91,35 @@ async def _periodic_retention() -> None:
         except Exception:
             logger.exception("Retention cycle failed")
         await asyncio.sleep(6 * 3600)  # Every 6 hours
+
+
+async def _backfill_thumbnails() -> None:
+    """Backfill thumbnail sprites for existing recordings without them."""
+    await asyncio.sleep(120)  # Delay to let system stabilize
+    config = get_config()
+    if not config.trickplay.enabled:
+        return
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            from app.models import Recording
+            result = await session.execute(
+                select(Recording)
+                .where(Recording.has_thumbnail == False)
+                .order_by(Recording.start_time.asc())
+            )
+            recordings = result.scalars().all()
+
+        if not recordings:
+            logger.info("No recordings need thumbnail backfill")
+            return
+
+        logger.info("Starting thumbnail backfill", extra={"count": len(recordings)})
+        gen = get_thumbnail_generator()
+        for rec in recordings:
+            gen.enqueue(rec.id)
+    except Exception:
+        logger.exception("Thumbnail backfill failed")
 
 
 async def _start_enabled_cameras() -> None:

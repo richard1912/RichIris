@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from pathlib import Path
 
 import structlog
 
@@ -50,14 +51,33 @@ def _get_renderer(json_output: bool) -> structlog.types.Processor:
 
 
 def _configure_root_logger(formatter: logging.Formatter, level: int) -> None:
-    """Set up the root logger with a stream handler."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-
+    """Set up the root logger with stream and file handlers."""
     root = logging.getLogger()
     root.handlers.clear()
-    root.addHandler(handler)
     root.setLevel(level)
+
+    # Console output (for dev mode) - force UTF-8 to avoid cp1252 errors on Windows
+    stdout_stream = open(sys.stdout.fileno(), mode="w", encoding="utf-8", closefd=False)
+    stdout_handler = logging.StreamHandler(stdout_stream)
+    stdout_handler.setFormatter(formatter)
+    root.addHandler(stdout_handler)
+
+    # File output (for service running in background)
+    log_dir = Path(__file__).parent.parent.parent / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "richiris.log"
+
+    try:
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,  # Keep 5 old files
+        )
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+    except Exception as e:
+        root.warning(f"Failed to set up file logging: {e}")
 
 
 def _silence_noisy_loggers() -> None:

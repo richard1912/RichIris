@@ -60,6 +60,15 @@ async def init_db() -> None:
             logger.info("Migration: added rotation column to cameras")
         except Exception:
             pass  # Column already exists
+    # Migrate: add has_thumbnail column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE recordings ADD COLUMN has_thumbnail BOOLEAN NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added has_thumbnail column to recordings")
+        except Exception:
+            pass  # Column already exists
     logger.info("Database tables created")
 
 

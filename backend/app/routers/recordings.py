@@ -7,14 +7,16 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_config
 from app.database import get_db
 from app.models import Camera, Recording
-from app.schemas import RecordingResponse
+from app.schemas import RecordingResponse, ThumbnailSpriteInfo
 from app.services.playback import get_playback_manager
+from app.services.thumbnail import get_thumbnail_generator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
@@ -78,7 +80,7 @@ async def start_playback_session(
     start: datetime = Query(..., description="Start time ISO format"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Start a windowed transcoded playback session (30-min window from start)."""
+    """Start a playback session (instant MP4 remux, no transcode)."""
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -110,7 +112,7 @@ async def start_playback_session(
     if first_seg.start_time < start:
         seek_seconds = (start - first_seg.start_time).total_seconds()
 
-    # Calculate actual duration to transcode (may be less than full window)
+    # Calculate actual duration to remux (may be less than full window)
     last_seg = segments[-1]
     last_end = last_seg.end_time or (last_seg.start_time + timedelta(seconds=last_seg.duration or 900))
     actual_end = min(window_end, last_end)
@@ -136,61 +138,33 @@ async def start_playback_session(
         seek_seconds=seek_seconds, duration_limit=duration_limit,
     )
 
-    # Wait for playlist to become available
-    for _ in range(30):
-        await asyncio.sleep(0.5)
-        playlist = session.output_dir / "playback.m3u8"
-        if playlist.exists() and playlist.stat().st_size > 0:
+    # Wait for MP4 to be ready (remux is near-instant, typically < 1 second)
+    for _ in range(20):
+        await asyncio.sleep(0.25)
+        if session.ready:
             return {
                 "session_id": session_id,
-                "playlist_url": f"/api/recordings/playback/{session_id}/playback.m3u8",
+                "playback_url": f"/api/recordings/playback/{session_id}/playback.mp4",
                 "window_end": actual_end.isoformat(),
                 "has_more": has_more,
             }
 
-    raise HTTPException(status_code=503, detail="Transcoding in progress, retry shortly")
+    raise HTTPException(status_code=503, detail="Remux in progress, retry shortly")
 
 
-@router.get("/playback/{session_id}/playback.m3u8")
-async def get_playback_session_playlist(session_id: str):
-    """Serve the evolving playback HLS playlist (for HLS.js polling)."""
+@router.get("/playback/{session_id}/playback.mp4")
+async def get_playback_mp4(session_id: str):
+    """Serve the remuxed playback MP4 file."""
     mgr = get_playback_manager()
     session = mgr.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Playback session not found")
 
-    playlist = session.output_dir / "playback.m3u8"
-    if not playlist.exists():
-        raise HTTPException(status_code=404, detail="Playlist not ready")
+    mp4_path = session.output_dir / "playback.mp4"
+    if not mp4_path.exists():
+        raise HTTPException(status_code=404, detail="Playback not ready")
 
-    content = playlist.read_text()
-    lines = []
-    for line in content.split("\n"):
-        if line.startswith("seg_"):
-            lines.append(f"/api/recordings/playback/{session_id}/{line}")
-        else:
-            lines.append(line)
-
-    return Response(
-        content="\n".join(lines),
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-cache, no-store"},
-    )
-
-
-@router.get("/playback/{session_id}/{filename}")
-async def get_playback_segment(session_id: str, filename: str):
-    """Serve a transcoded playback HLS segment."""
-    mgr = get_playback_manager()
-    session = mgr.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Playback session not found")
-
-    file_path = session.output_dir / filename
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Segment not found")
-
-    return FileResponse(file_path, media_type="video/mp2t")
+    return FileResponse(mp4_path, media_type="video/mp4")
 
 
 @router.get("/segment/{recording_id}")
@@ -205,3 +179,75 @@ async def get_segment_file(recording_id: int, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=404, detail="Segment file missing")
 
     return FileResponse(path, media_type="video/mp2t")
+
+
+@router.get("/{camera_id}/thumbnails", response_model=list[ThumbnailSpriteInfo])
+async def list_thumbnails(
+    camera_id: int,
+    date: date = Query(..., description="Date in YYYY-MM-DD format"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List thumbnail sprite metadata for all segments on a date."""
+    config = get_config()
+    if not config.trickplay.enabled:
+        return []
+
+    camera = await db.get(Camera, camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    start = datetime.combine(date, datetime.min.time())
+    end = datetime.combine(date, datetime.max.time())
+
+    result = await db.execute(
+        select(Recording)
+        .where(
+            Recording.camera_id == camera_id,
+            Recording.start_time >= start,
+            Recording.start_time <= end,
+            Recording.has_thumbnail == True,
+        )
+        .order_by(Recording.start_time)
+    )
+    recordings = result.scalars().all()
+
+    tp = config.trickplay
+    sprites = []
+    for rec in recordings:
+        duration = rec.duration or 900.0
+        frame_count = max(1, int(duration / tp.interval))
+        cols = min(frame_count, 10)
+        import math
+        rows = math.ceil(frame_count / cols)
+        sprites.append(ThumbnailSpriteInfo(
+            recording_id=rec.id,
+            start_time=rec.start_time,
+            end_time=rec.end_time or rec.start_time,
+            duration=duration,
+            sprite_url=f"/api/recordings/thumbnail/{rec.id}",
+            interval=tp.interval,
+            cols=cols,
+            rows=rows,
+            thumb_width=tp.thumb_width,
+            thumb_height=tp.thumb_height,
+        ))
+    return sprites
+
+
+@router.get("/thumbnail/{recording_id}")
+async def get_thumbnail_sprite(recording_id: int, db: AsyncSession = Depends(get_db)):
+    """Serve a thumbnail sprite JPEG."""
+    recording = await db.get(Recording, recording_id)
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    gen = get_thumbnail_generator()
+    path = gen.get_sprite_path(recording.camera_id, recording_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

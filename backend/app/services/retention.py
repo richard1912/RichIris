@@ -115,6 +115,9 @@ async def _delete_by_storage(session: AsyncSession, max_storage_gb: int) -> tupl
 
 def _delete_recordings(recordings: list[Recording]) -> tuple[int, int]:
     """Delete recording files from disk. Returns (count_deleted, bytes_freed)."""
+    from app.services.thumbnail import get_thumbnail_generator
+    gen = get_thumbnail_generator()
+
     deleted = 0
     freed = 0
     for rec in recordings:
@@ -131,6 +134,8 @@ def _delete_recordings(recordings: list[Recording]) -> tuple[int, int]:
         else:
             # File already gone, still count for DB cleanup
             deleted += 1
+        # Also delete thumbnail sprite if exists
+        gen.delete_sprite(rec.camera_id, rec.id)
 
     # Clean up empty date directories
     _cleanup_empty_dirs()

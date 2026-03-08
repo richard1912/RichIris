@@ -7,9 +7,8 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-echo === Removing RichIris Windows Service ===
-net stop RichIris 2>nul
-cd /d "C:\01-Self-Hosting\RichIris\backend"
-python service.py remove
+echo === Removing RichIris Service ===
+nssm stop RichIris
+nssm remove RichIris confirm
 echo Service removed.
 pause

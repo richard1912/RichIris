@@ -42,6 +42,14 @@ class RetentionConfig:
 
 
 @dataclass
+class TrickplayConfig:
+    enabled: bool = True
+    interval: int = 60
+    thumb_width: int = 192
+    thumb_height: int = 108
+
+
+@dataclass
 class LoggingConfig:
     level: str = "DEBUG"
     json_output: bool = False
@@ -60,6 +68,7 @@ class AppConfig:
     storage: StorageConfig = field(default_factory=StorageConfig)
     ffmpeg: FFmpegConfig = field(default_factory=FFmpegConfig)
     retention: RetentionConfig = field(default_factory=RetentionConfig)
+    trickplay: TrickplayConfig = field(default_factory=TrickplayConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
@@ -85,6 +94,7 @@ def build_config(data: dict) -> AppConfig:
         storage=StorageConfig(**data.get("storage", {})),
         ffmpeg=FFmpegConfig(**data.get("ffmpeg", {})),
         retention=RetentionConfig(**data.get("retention", {})),
+        trickplay=TrickplayConfig(**data.get("trickplay", {})),
         logging=LoggingConfig(**data.get("logging", {})),
         cameras=parse_cameras(data.get("cameras")),
     )
