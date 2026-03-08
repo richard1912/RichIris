@@ -50,7 +50,7 @@ export default function App() {
   }, [selectedCamera])
 
   const handlePlayback = useCallback(
-    (_start: string, _end: string) => {
+    (_start: string) => {
       if (!selectedCamera) return
       setFullscreenCamera(selectedCamera)
     },

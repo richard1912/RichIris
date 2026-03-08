@@ -23,6 +23,7 @@ class PlaybackSession:
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
     ready: bool = False
+    seek_seconds: float = 0.0
 
 
 class PlaybackManager:
@@ -35,7 +36,8 @@ class PlaybackManager:
             self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
     async def start_session(
-        self, session_id: str, segment_paths: list[str]
+        self, session_id: str, segment_paths: list[str],
+        seek_seconds: float = 0.0, duration_limit: float = 1800.0,
     ) -> PlaybackSession:
         """Start a playback transcoding session."""
         # Return existing session if still valid
@@ -49,26 +51,22 @@ class PlaybackManager:
         output_dir = PLAYBACK_DIR / session_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write concat file
-        concat_file = output_dir / "concat.txt"
-        with open(concat_file, "w") as f:
-            for seg_path in segment_paths:
-                escaped = seg_path.replace("\\", "/").replace("'", "'\\''")
-                f.write(f"file '{escaped}'\n")
-
-        session = PlaybackSession(session_id=session_id, output_dir=output_dir)
+        session = PlaybackSession(session_id=session_id, output_dir=output_dir, seek_seconds=seek_seconds)
         self._sessions[session_id] = session
 
-        # Launch ffmpeg transcode
+        # Launch ffmpeg transcode using concat protocol with fast seek
         config = get_config()
         playlist_path = output_dir / "playback.m3u8"
 
+        # Build concat protocol input (byte-level concatenation of .ts files)
+        concat_input = "|".join(p.replace("\\", "/") for p in segment_paths)
+
         cmd = [
-            config.ffmpeg.path,
-            "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
+            config.ffmpeg.path, "-y",
+            "-ss", str(seek_seconds),
+            "-hwaccel", "cuda",
+            "-i", f"concat:{concat_input}",
+            "-t", str(duration_limit),
             "-c:v", "h264_nvenc",
             "-preset", "p4",
             "-b:v", "4M",
@@ -88,7 +86,7 @@ class PlaybackManager:
 
         logger.info(
             "Starting playback transcode",
-            extra={"session_id": session_id, "segments": len(segment_paths)},
+            extra={"session_id": session_id, "segments": len(segment_paths), "seek_seconds": seek_seconds},
         )
 
         session.process = await asyncio.create_subprocess_exec(
