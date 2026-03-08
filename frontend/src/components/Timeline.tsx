@@ -7,6 +7,8 @@ interface Props {
   onPlayback: (start: string, end: string) => void
   onLive: () => void
   isLive: boolean
+  onPause?: () => void
+  isPaused?: boolean
 }
 
 function todayStr(): string {
@@ -20,11 +22,19 @@ function shiftDate(dateStr: string, days: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props) {
+export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause, isPaused }: Props) {
   const [selectedDate, setSelectedDate] = useState<string>(todayStr())
   const [segments, setSegments] = useState<RecordingSegment[]>([])
   const [loading, setLoading] = useState(false)
   const barRef = useRef<HTMLDivElement>(null)
+
+  // Playhead state
+  const [playheadPct, setPlayheadPct] = useState<number | null>(null)
+  const [draggingPlayhead, setDraggingPlayhead] = useState(false)
+  const draggingRef = useRef(false)
+
+  // Hover tooltip state
+  const [hoverPct, setHoverPct] = useState<number | null>(null)
 
   // Clip export state
   const [exportMode, setExportMode] = useState(false)
@@ -68,36 +78,14 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
     [],
   )
 
-  const handleBarClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (exportMode) {
-        // In export mode, set start/end range
-        const pct = getBarPct(e)
-        if (exportStart === null || (exportStart !== null && exportEnd !== null)) {
-          // First click or reset
-          setExportStart(pct)
-          setExportEnd(null)
-          setExportError(null)
-        } else {
-          // Second click
-          if (pct > exportStart) {
-            setExportEnd(pct)
-          } else {
-            setExportEnd(exportStart)
-            setExportStart(pct)
-          }
-        }
-        return
-      }
-
-      // Normal playback click
-      if (!barRef.current || segments.length === 0) return
-      const rect = barRef.current.getBoundingClientRect()
-      const pct = (e.clientX - rect.left) / rect.width
+  const triggerPlaybackAtPct = useCallback(
+    (pct: number) => {
+      if (segments.length === 0) return
       const hour = Math.floor(pct * 24)
       const minute = Math.floor((pct * 24 - hour) * 60)
+      const second = Math.floor(((pct * 24 - hour) * 60 - minute) * 60)
 
-      const clickTime = `${selectedDate}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`
+      const clickTime = `${selectedDate}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
       const clickDate = new Date(clickTime)
 
       let targetIdx = -1
@@ -113,12 +101,70 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
       const endSeg = segments[segments.length - 1]
       const endMs = new Date(endSeg.start_time).getTime() + (endSeg.duration || 900) * 1000
       const endDt = new Date(endMs)
-      // Format as local ISO without timezone (matches DB format)
       const endTime = `${endDt.getFullYear()}-${String(endDt.getMonth() + 1).padStart(2, '0')}-${String(endDt.getDate()).padStart(2, '0')}T${String(endDt.getHours()).padStart(2, '0')}:${String(endDt.getMinutes()).padStart(2, '0')}:${String(endDt.getSeconds()).padStart(2, '0')}`
 
       onPlayback(startSeg.start_time, endTime)
     },
-    [segments, selectedDate, onPlayback, exportMode, exportStart, exportEnd, getBarPct],
+    [segments, selectedDate, onPlayback],
+  )
+
+  // Playhead drag handlers
+  const handlePlayheadDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      e.preventDefault()
+      draggingRef.current = true
+      setDraggingPlayhead(true)
+
+      const onMove = (ev: MouseEvent) => {
+        if (!draggingRef.current) return
+        const pct = getBarPct(ev)
+        setPlayheadPct(pct)
+      }
+      const onUp = (ev: MouseEvent) => {
+        if (!draggingRef.current) return
+        draggingRef.current = false
+        setDraggingPlayhead(false)
+        const pct = getBarPct(ev)
+        setPlayheadPct(pct)
+        if (!exportMode && segments.length > 0) {
+          triggerPlaybackAtPct(pct)
+        }
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [getBarPct, exportMode, segments, triggerPlaybackAtPct],
+  )
+
+  const handleBarClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (exportMode) {
+        const pct = getBarPct(e)
+        if (exportStart === null || (exportStart !== null && exportEnd !== null)) {
+          setExportStart(pct)
+          setExportEnd(null)
+          setExportError(null)
+        } else {
+          if (pct > exportStart) {
+            setExportEnd(pct)
+          } else {
+            setExportEnd(exportStart)
+            setExportStart(pct)
+          }
+        }
+        return
+      }
+
+      // Set playhead and trigger playback
+      if (!barRef.current || segments.length === 0) return
+      const pct = getBarPct(e)
+      setPlayheadPct(pct)
+      triggerPlaybackAtPct(pct)
+    },
+    [segments, triggerPlaybackAtPct, exportMode, exportStart, exportEnd, getBarPct],
   )
 
   const handleExport = useCallback(async () => {
@@ -182,19 +228,61 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
       />
     ) : null
 
+  // Playhead line
+  const playheadLine =
+    playheadPct !== null && !exportMode ? (
+      <div
+        className="absolute top-0 bottom-0 z-10"
+        style={{ left: `${playheadPct * 100}%`, transform: 'translateX(-50%)' }}
+      >
+        {/* Wider invisible hit area for easy grabbing */}
+        <div
+          className="absolute -top-3 -bottom-1 w-5 cursor-grab active:cursor-grabbing"
+          style={{ left: '50%', transform: 'translateX(-50%)' }}
+          onMouseDown={handlePlayheadDown}
+        />
+        {/* Visible line */}
+        <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none" style={{ left: '50%', transform: 'translateX(-50%)' }} />
+        {/* Top handle */}
+        <div className="absolute -top-2 w-3.5 h-3.5 rounded-full bg-red-500 border-2 border-red-300 shadow pointer-events-none" style={{ left: '50%', transform: 'translateX(-50%)' }} />
+        {/* Time tooltip while dragging */}
+        {draggingPlayhead && (
+          <div className="absolute -top-9 left-1/2 -translate-x-1/2 pointer-events-none">
+            <div className="bg-red-600 text-white text-sm font-medium px-2.5 py-1 rounded shadow-lg whitespace-nowrap">
+              {pctToLabel(playheadPct)}
+            </div>
+            <div className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-red-600 mx-auto" />
+          </div>
+        )}
+      </div>
+    ) : null
+
   return (
     <div className="bg-neutral-900/90 backdrop-blur border-t border-neutral-800 px-4 py-3">
       <div className="flex items-center gap-3 mb-2">
         <button
           onClick={onLive}
           className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-            isLive
+            isLive && !isPaused
               ? 'bg-red-600 text-white'
               : 'bg-neutral-800 text-neutral-400 hover:text-white'
           }`}
         >
           LIVE
         </button>
+
+        {isLive && onPause && (
+          <button
+            onClick={onPause}
+            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+              isPaused
+                ? 'bg-yellow-600 text-white'
+                : 'bg-neutral-800 text-neutral-400 hover:text-white'
+            }`}
+          >
+            {isPaused ? 'Resume' : 'Pause Feed'}
+          </button>
+        )}
 
         <div className="flex items-center gap-1">
           <button
@@ -280,17 +368,41 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
         </div>
       )}
 
-      <div className="relative pt-4 pb-1">
+      <div className="relative pt-5 pb-1">
         <div
           ref={barRef}
-          className={`relative h-6 bg-neutral-800 rounded cursor-pointer overflow-hidden ${
+          className={`relative h-10 bg-neutral-800 rounded cursor-pointer ${
             exportMode ? 'ring-1 ring-green-500/50' : ''
           }`}
           onClick={handleBarClick}
+          onMouseMove={(e) => {
+            if (!draggingRef.current) setHoverPct(getBarPct(e))
+          }}
+          onMouseLeave={() => setHoverPct(null)}
         >
           {hourMarkers}
           {segmentBars}
           {rangeOverlay}
+          {playheadLine}
+          {/* Hover time tooltip */}
+          {hoverPct !== null && !draggingPlayhead && (
+            <div
+              className="absolute z-20 pointer-events-none"
+              style={{ left: `${hoverPct * 100}%`, top: '-28px', transform: 'translateX(-50%)' }}
+            >
+              <div className="bg-neutral-700 text-white text-xs px-2 py-1 rounded shadow-lg whitespace-nowrap">
+                {pctToLabel(hoverPct)}
+              </div>
+              <div className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-neutral-700 mx-auto" />
+            </div>
+          )}
+          {/* Hover vertical guide line */}
+          {hoverPct !== null && !draggingPlayhead && (
+            <div
+              className="absolute top-0 bottom-0 w-px bg-white/20 pointer-events-none"
+              style={{ left: `${hoverPct * 100}%` }}
+            />
+          )}
         </div>
         <div className="flex justify-between mt-1">
           <span className="text-[10px] text-neutral-600">00:00</span>

@@ -11,7 +11,7 @@ from app.services.ffmpeg import build_live_command, build_recording_command, san
 
 logger = logging.getLogger(__name__)
 
-LIVE_IDLE_TIMEOUT = 30  # seconds of no viewer activity before stopping live process
+LIVE_IDLE_TIMEOUT = 15  # seconds of no viewer activity before stopping live process
 
 
 @dataclass
