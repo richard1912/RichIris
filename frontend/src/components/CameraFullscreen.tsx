@@ -13,6 +13,7 @@ interface Props {
 export default function CameraFullscreen({ camera, stream, onBack }: Props) {
   const running = stream?.running ?? false
   const [mode, setMode] = useState<'live' | 'playback'>('live')
+  const [paused, setPaused] = useState(false)
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null)
   const [playbackLoading, setPlaybackLoading] = useState(false)
   const [playbackError, setPlaybackError] = useState<string | null>(null)
@@ -36,8 +37,13 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
 
   const handleLive = useCallback(() => {
     setMode('live')
+    setPaused(false)
     setPlaybackUrl(null)
     setPlaybackError(null)
+  }, [])
+
+  const handlePause = useCallback(() => {
+    setPaused(p => !p)
   }, [])
 
   const isLive = mode === 'live'
@@ -58,10 +64,13 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
             running ? 'bg-green-500' : 'bg-yellow-500'
           }`}
         />
-        {isLive && stream?.uptime_seconds != null && (
+        {isLive && !paused && stream?.uptime_seconds != null && (
           <span className="text-xs text-neutral-500 ml-auto">
             Up {formatUptime(stream.uptime_seconds)}
           </span>
+        )}
+        {isLive && paused && (
+          <span className="text-xs text-yellow-400 ml-auto">Paused</span>
         )}
         {!isLive && (
           <span className="text-xs text-blue-400 ml-auto">Playback</span>
@@ -76,7 +85,9 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
           <div className="text-red-400 text-sm">{playbackError}</div>
         )}
         {!playbackLoading && !playbackError && isLive ? (
-          running ? (
+          paused ? (
+            <div className="text-yellow-500 text-sm">Feed paused</div>
+          ) : running ? (
             <HlsPlayer
               cameraId={camera.id}
               muted
@@ -104,6 +115,8 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
         onPlayback={handlePlayback}
         onLive={handleLive}
         isLive={isLive}
+        onPause={handlePause}
+        isPaused={paused}
       />
     </div>
   )

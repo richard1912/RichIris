@@ -8,9 +8,10 @@ interface Props {
   onEdit: (camera: Camera) => void
   onAdd: () => void
   selectedId: number | null
+  paused?: boolean
 }
 
-export default function CameraGrid({ cameras, streams, onSelect, onEdit, onAdd, selectedId }: Props) {
+export default function CameraGrid({ cameras, streams, onSelect, onEdit, onAdd, selectedId, paused }: Props) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
       {cameras.map(cam => (
@@ -21,6 +22,7 @@ export default function CameraGrid({ cameras, streams, onSelect, onEdit, onAdd, 
           onClick={() => onSelect(cam)}
           onEdit={() => onEdit(cam)}
           selected={cam.id === selectedId}
+          paused={paused}
         />
       ))}
       <button

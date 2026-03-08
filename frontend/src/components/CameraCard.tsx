@@ -7,9 +7,10 @@ interface Props {
   onClick: () => void
   onEdit: () => void
   selected?: boolean
+  paused?: boolean
 }
 
-export default function CameraCard({ camera, stream, onClick, onEdit, selected }: Props) {
+export default function CameraCard({ camera, stream, onClick, onEdit, selected, paused }: Props) {
   const running = stream?.running ?? false
   const rot = camera.rotation || 0
   const isRotated = rot === 90 || rot === 270
@@ -30,7 +31,9 @@ export default function CameraCard({ camera, stream, onClick, onEdit, selected }
             transform: `rotate(${rot}deg)${isRotated ? ' scale(0.5625)' : ''}`,
           } : undefined}
         >
-          {running ? (
+          {paused ? (
+            <div className="text-yellow-500 text-sm">Paused</div>
+          ) : running ? (
             <HlsPlayer cameraId={camera.id} muted />
           ) : (
             <div className="text-neutral-600 text-sm">
