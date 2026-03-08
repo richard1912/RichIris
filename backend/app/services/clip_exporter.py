@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_config
 from app.models import Camera, ClipExport, Recording
 from app.services.ffmpeg import sanitize_camera_name
+from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ async def export_clip(clip_id: int, session_factory) -> None:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
+                assign_to_job(proc.pid)
                 _, stderr = await proc.communicate()
 
                 if proc.returncode != 0:

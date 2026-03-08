@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import get_config
+from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ class PlaybackManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        assign_to_job(session.process.pid)
 
         # Wait for completion (remux is near-instant, typically < 1 second)
         asyncio.create_task(self._wait_ready(session))

@@ -16,6 +16,7 @@ from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
 from app.routers import cameras, clips, recordings, streams, system
+from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
 from app.services.playback import get_playback_manager
@@ -33,6 +34,9 @@ async def lifespan(app: FastAPI):
     config = get_config()
     setup_logging(level=config.logging.level, json_output=config.logging.json_output)
     logger.info("RichIris NVR starting up")
+
+    create_job_object()
+    _kill_orphaned_ffmpeg()
 
     await init_db()
 
@@ -120,6 +124,36 @@ async def _backfill_thumbnails() -> None:
             gen.enqueue(rec.id)
     except Exception:
         logger.exception("Thumbnail backfill failed")
+
+
+def _kill_orphaned_ffmpeg() -> None:
+    """Kill any ffmpeg processes left over from a previous run."""
+    import os
+    if os.name != "nt":
+        return
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["tasklist", "/fi", "imagename eq ffmpeg.exe", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=10,
+        )
+        pids = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2:
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        if not pids:
+            return
+        logger.warning("Killing orphaned ffmpeg processes from previous run", extra={"pids": pids, "count": len(pids)})
+        subprocess.run(
+            ["taskkill", "/F"] + [arg for pid in pids for arg in ("/PID", str(pid))],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        logger.exception("Failed to clean up orphaned ffmpeg processes")
 
 
 async def _start_enabled_cameras() -> None:
