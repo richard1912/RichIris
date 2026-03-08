@@ -27,7 +27,7 @@ export default function CameraCard({ camera, stream, onClick, onEdit, selected }
         <div
           className="absolute inset-0 flex items-center justify-center"
           style={rot ? {
-            transform: `rotate(${rot}deg)${isRotated ? ' scale(1.78)' : ''}`,
+            transform: `rotate(${rot}deg)${isRotated ? ' scale(0.5625)' : ''}`,
           } : undefined}
         >
           {running ? (
