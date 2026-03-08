@@ -99,8 +99,8 @@ def build_full_command(camera_name: str, rtsp_url: str, config: AppConfig) -> li
 
 
 def sanitize_camera_name(name: str) -> str:
-    """Convert camera name to a filesystem-safe string."""
-    return name.lower().replace(" ", "_").replace("/", "_").replace("\\", "_")
+    """Convert camera name to a filesystem-safe directory name (preserves spaces and case)."""
+    return name.replace("/", "_").replace("\\", "_").replace(":", "_")
 
 
 def build_probe_command(rtsp_url: str, config: AppConfig) -> list[str]:

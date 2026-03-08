@@ -16,7 +16,7 @@ from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
 from app.routers import cameras, clips, recordings, streams, system
-from app.services.recorder import scan_all_cameras
+from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
 from app.services.playback import get_playback_manager
 from app.services.stream_manager import get_stream_manager
@@ -34,6 +34,12 @@ async def lifespan(app: FastAPI):
     logger.info("RichIris NVR starting up")
 
     await init_db()
+
+    # Clean up DB records for manually deleted files
+    factory = get_session_factory()
+    async with factory() as session:
+        await cleanup_missing_recordings(session)
+
     await _start_enabled_cameras()
 
     scan_task = asyncio.create_task(_periodic_scan())

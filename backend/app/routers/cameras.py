@@ -1,14 +1,17 @@
 """Camera CRUD API endpoints."""
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_config
 from app.database import get_db
-from app.models import Camera
+from app.models import Camera, Recording
 from app.schemas import CameraCreate, CameraResponse, CameraUpdate
+from app.services.ffmpeg import sanitize_camera_name
 from app.services.stream_manager import get_stream_manager
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,8 @@ async def update_camera(
     mgr = get_stream_manager()
     needs_restart = False
 
+    old_name = camera.name
+
     if data.name is not None:
         camera.name = data.name
         needs_restart = True
@@ -75,6 +80,10 @@ async def update_camera(
     await db.commit()
     await db.refresh(camera)
     logger.info("Camera updated", extra={"camera_id": camera.id})
+
+    # Rename recording folder and update DB paths if name changed
+    if data.name is not None and data.name != old_name:
+        await _rename_camera_folder(db, camera.id, old_name, data.name)
 
     if not camera.enabled:
         await mgr.stop_stream(camera.id)
@@ -98,3 +107,32 @@ async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(camera)
     await db.commit()
     logger.info("Camera deleted", extra={"camera_id": camera_id})
+
+
+async def _rename_camera_folder(
+    db: AsyncSession, camera_id: int, old_name: str, new_name: str
+) -> None:
+    """Rename the recording folder on disk and update all DB file paths."""
+    config = get_config()
+    rec_root = Path(config.storage.recordings_dir)
+    old_safe = sanitize_camera_name(old_name)
+    new_safe = sanitize_camera_name(new_name)
+
+    old_dir = rec_root / old_safe
+    new_dir = rec_root / new_safe
+
+    if old_dir.exists() and not new_dir.exists():
+        old_dir.rename(new_dir)
+        logger.info("Renamed camera folder", extra={"old": str(old_dir), "new": str(new_dir)})
+
+        # Update all recording paths in DB
+        result = await db.execute(
+            select(Recording).where(Recording.camera_id == camera_id)
+        )
+        for rec in result.scalars().all():
+            if rec.file_path:
+                rec.file_path = rec.file_path.replace(
+                    str(old_dir), str(new_dir)
+                )
+        await db.commit()
+        logger.info("Updated recording paths", extra={"camera_id": camera_id})

@@ -1,17 +1,27 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import type { RecordingSegment, ClipExport } from '../api'
-import { fetchRecordingDates, fetchSegments, createClipExport, fetchClips, getClipDownloadUrl, deleteClip } from '../api'
+import type { RecordingSegment } from '../api'
+import { fetchSegments, createClipExport } from '../api'
 
 interface Props {
-  cameraId: number
+  cameraId: number | null
   onPlayback: (start: string, end: string) => void
   onLive: () => void
   isLive: boolean
 }
 
+function todayStr(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function shiftDate(dateStr: string, days: number): string {
+  const d = new Date(dateStr + 'T00:00:00')
+  d.setDate(d.getDate() + days)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props) {
-  const [dates, setDates] = useState<string[]>([])
-  const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [selectedDate, setSelectedDate] = useState<string>(todayStr())
   const [segments, setSegments] = useState<RecordingSegment[]>([])
   const [loading, setLoading] = useState(false)
   const barRef = useRef<HTMLDivElement>(null)
@@ -21,43 +31,17 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
   const [exportStart, setExportStart] = useState<number | null>(null) // pct 0-1
   const [exportEnd, setExportEnd] = useState<number | null>(null)
   const [_dragging, _setDragging] = useState<'start' | 'end' | null>(null)
-  const [clips, setClips] = useState<ClipExport[]>([])
-  const [showClips, setShowClips] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetchRecordingDates(cameraId).then(setDates).catch(() => setDates([]))
-  }, [cameraId])
-
-  useEffect(() => {
-    if (!selectedDate) {
-      setSegments([])
-      return
-    }
+    if (cameraId === null) { setSegments([]); return }
     setLoading(true)
     fetchSegments(cameraId, selectedDate)
       .then(setSegments)
       .catch(() => setSegments([]))
       .finally(() => setLoading(false))
   }, [cameraId, selectedDate])
-
-  // Refresh clips list
-  const refreshClips = useCallback(() => {
-    fetchClips(cameraId).then(setClips).catch(() => {})
-  }, [cameraId])
-
-  useEffect(() => {
-    if (showClips) refreshClips()
-  }, [showClips, refreshClips])
-
-  // Poll for processing clips
-  useEffect(() => {
-    const processing = clips.some(c => c.status === 'pending' || c.status === 'processing')
-    if (!processing) return
-    const interval = setInterval(refreshClips, 3000)
-    return () => clearInterval(interval)
-  }, [clips, refreshClips])
 
   const pctToTime = useCallback(
     (pct: number): string => {
@@ -138,7 +122,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
   )
 
   const handleExport = useCallback(async () => {
-    if (exportStart === null || exportEnd === null || !selectedDate) return
+    if (exportStart === null || exportEnd === null || cameraId === null) return
     setExportBusy(true)
     setExportError(null)
     try {
@@ -146,19 +130,12 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
       setExportStart(null)
       setExportEnd(null)
       setExportMode(false)
-      setShowClips(true)
-      refreshClips()
     } catch (e) {
       setExportError(e instanceof Error ? e.message : 'Export failed')
     } finally {
       setExportBusy(false)
     }
-  }, [cameraId, exportStart, exportEnd, selectedDate, pctToTime, refreshClips])
-
-  const handleDeleteClip = useCallback(async (clipId: number) => {
-    await deleteClip(clipId).catch(() => {})
-    refreshClips()
-  }, [refreshClips])
+  }, [cameraId, exportStart, exportEnd, pctToTime])
 
   // Build 24h bar with segments highlighted
   const segmentBars = segments.map((seg) => {
@@ -219,32 +196,45 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
           LIVE
         </button>
 
-        <select
-          value={selectedDate ?? ''}
-          onChange={(e) => {
-            setSelectedDate(e.target.value || null)
-            setExportStart(null)
-            setExportEnd(null)
-          }}
-          className="bg-neutral-800 text-sm text-neutral-300 rounded px-2 py-1 border border-neutral-700"
-        >
-          <option value="">Select date...</option>
-          {dates.map((d) => (
-            <option key={d} value={d}>
-              {d}
-            </option>
-          ))}
-        </select>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => {
+              setSelectedDate(shiftDate(selectedDate, -1))
+              setExportStart(null)
+              setExportEnd(null)
+            }}
+            className="px-2 py-1 rounded text-sm bg-neutral-800 text-neutral-400 hover:text-white border border-neutral-700 transition-colors"
+          >
+            &larr;
+          </button>
+          <span className="text-sm text-neutral-300 px-2 min-w-[7rem] text-center">
+            {selectedDate}
+          </span>
+          <button
+            onClick={() => {
+              const next = shiftDate(selectedDate, 1)
+              if (next <= todayStr()) {
+                setSelectedDate(next)
+                setExportStart(null)
+                setExportEnd(null)
+              }
+            }}
+            disabled={selectedDate >= todayStr()}
+            className="px-2 py-1 rounded text-sm bg-neutral-800 text-neutral-400 hover:text-white border border-neutral-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            &rarr;
+          </button>
+        </div>
 
         {loading && <span className="text-xs text-neutral-500">Loading...</span>}
-        {!loading && selectedDate && (
+        {!loading && cameraId !== null && (
           <span className="text-xs text-neutral-500">
             {segments.length} segments
           </span>
         )}
 
         {/* Export controls */}
-        {selectedDate && segments.length > 0 && (
+        {cameraId !== null && segments.length > 0 && (
           <>
             <div className="ml-auto flex items-center gap-2">
               <button
@@ -260,14 +250,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
                     : 'bg-neutral-800 text-neutral-400 hover:text-white'
                 }`}
               >
-                {exportMode ? 'Cancel Export' : 'Export Clip'}
-              </button>
-
-              <button
-                onClick={() => setShowClips(!showClips)}
-                className="px-3 py-1 rounded text-xs font-medium bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
-              >
-                Clips{clips.length > 0 ? ` (${clips.length})` : ''}
+                {exportMode ? 'Cancel Export' : 'Select Export Range'}
               </button>
             </div>
           </>
@@ -297,78 +280,25 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props
         </div>
       )}
 
-      {selectedDate && (
-        <div className="relative pt-4 pb-1">
-          <div
-            ref={barRef}
-            className={`relative h-6 bg-neutral-800 rounded cursor-pointer overflow-hidden ${
-              exportMode ? 'ring-1 ring-green-500/50' : ''
-            }`}
-            onClick={handleBarClick}
-          >
-            {hourMarkers}
-            {segmentBars}
-            {rangeOverlay}
-          </div>
-          <div className="flex justify-between mt-1">
-            <span className="text-[10px] text-neutral-600">00:00</span>
-            <span className="text-[10px] text-neutral-600">12:00</span>
-            <span className="text-[10px] text-neutral-600">24:00</span>
-          </div>
+      <div className="relative pt-4 pb-1">
+        <div
+          ref={barRef}
+          className={`relative h-6 bg-neutral-800 rounded cursor-pointer overflow-hidden ${
+            exportMode ? 'ring-1 ring-green-500/50' : ''
+          }`}
+          onClick={handleBarClick}
+        >
+          {hourMarkers}
+          {segmentBars}
+          {rangeOverlay}
         </div>
-      )}
+        <div className="flex justify-between mt-1">
+          <span className="text-[10px] text-neutral-600">00:00</span>
+          <span className="text-[10px] text-neutral-600">12:00</span>
+          <span className="text-[10px] text-neutral-600">24:00</span>
+        </div>
+      </div>
 
-      {/* Clips list */}
-      {showClips && (
-        <div className="mt-3 border-t border-neutral-800 pt-3">
-          <h3 className="text-xs font-medium text-neutral-400 mb-2">Exported Clips</h3>
-          {clips.length === 0 ? (
-            <p className="text-xs text-neutral-600">No clips yet</p>
-          ) : (
-            <div className="space-y-1.5 max-h-40 overflow-y-auto">
-              {clips.map((clip) => (
-                <div
-                  key={clip.id}
-                  className="flex items-center gap-3 text-xs bg-neutral-800/50 rounded px-3 py-2"
-                >
-                  <span className="text-neutral-300">
-                    {new Date(clip.start_time).toLocaleString()} &rarr;{' '}
-                    {new Date(clip.end_time).toLocaleTimeString()}
-                  </span>
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                      clip.status === 'done'
-                        ? 'bg-green-900/50 text-green-400'
-                        : clip.status === 'failed'
-                        ? 'bg-red-900/50 text-red-400'
-                        : 'bg-yellow-900/50 text-yellow-400'
-                    }`}
-                  >
-                    {clip.status}
-                  </span>
-                  <div className="ml-auto flex gap-2">
-                    {clip.status === 'done' && (
-                      <a
-                        href={getClipDownloadUrl(clip.id)}
-                        className="text-blue-400 hover:text-blue-300"
-                        download
-                      >
-                        Download
-                      </a>
-                    )}
-                    <button
-                      onClick={() => handleDeleteClip(clip.id)}
-                      className="text-neutral-500 hover:text-red-400"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   )
 }

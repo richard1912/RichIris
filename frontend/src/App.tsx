@@ -116,8 +116,8 @@ export default function App() {
         />
       </main>
 
-      {selectedCamera && (
-        <div className="border-t border-neutral-800">
+      <div className="border-t border-neutral-800">
+        {selectedCamera && (
           <div className="flex items-center gap-3 px-4 pt-3">
             <span className="text-sm font-medium">{selectedCamera.name}</span>
             <button
@@ -136,14 +136,14 @@ export default function App() {
               Close
             </button>
           </div>
-          <Timeline
-            cameraId={selectedCamera.id}
-            onPlayback={handlePlayback}
-            onLive={handleLive}
-            isLive={mode === 'live'}
-          />
-        </div>
-      )}
+        )}
+        <Timeline
+          cameraId={selectedCamera?.id ?? null}
+          onPlayback={handlePlayback}
+          onLive={handleLive}
+          isLive={mode === 'live'}
+        />
+      </div>
 
       {showModal && (
         <CameraModal

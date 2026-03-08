@@ -4,7 +4,7 @@ update claude md as needed for code changes
 - **Backend**: Runs as Windows service `RichIris` (FastAPI on port 8700)
 - **Restart**: `powershell -Command "Restart-Service -Name 'RichIris'"`
 - **Config**: `config.yaml` (cameras, storage paths, ffmpeg settings)
-- **Recordings**: `G:\RichIris` (segment files per camera per day)
+- **Recordings**: `G:\RichIris` (segment files per camera per day, named `Camera 1 2026-03-08 13.30 - 13.45.ts`)
 - **Database**: `data/richiris.db` (SQLite, auto-created on first run)
 - **Frontend build**: `cd frontend && npm run build` (served from `frontend/dist/`)
 - **API docs**: http://localhost:8700/docs
@@ -19,7 +19,7 @@ Browser (LAN/VPN) → FastAPI (port 8700, 0.0.0.0) → FFmpeg subprocesses (NVEN
 ```
 
 - Two ffmpeg processes per camera: recording (always on) + live HLS (on-demand)
-- Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files
+- Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments are renamed by the scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts` after completion. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
 - Live view uses HLS with 2s segments, transcoded to H.264 1080p (libx264), started on first viewer request, stopped after 30s idle
 - **Playback transcoding**: Recordings are HEVC which browsers can't play. On-demand GPU transcode (h264_nvenc) converts to H.264 HLS in `data/playback/`. Sessions auto-cleanup after 120s idle.
 - NVIDIA RTX 4080 SUPER for hardware acceleration (cuda hwaccel)
