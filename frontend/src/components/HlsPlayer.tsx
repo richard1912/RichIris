@@ -68,7 +68,7 @@ export default function HlsPlayer({ cameraId, src, muted = true, className, rota
 
   const isRotated = rotation === 90 || rotation === 270
   const rotationStyle = rotation ? {
-    transform: `rotate(${rotation}deg)${isRotated ? ' scale(1.78)' : ''}`,
+    transform: `rotate(${rotation}deg)${isRotated ? ' scale(0.5625)' : ''}`,
   } : undefined
 
   return (
