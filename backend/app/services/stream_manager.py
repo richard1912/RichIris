@@ -8,6 +8,7 @@ from pathlib import Path
 
 from app.config import AppConfig, get_config
 from app.services.ffmpeg import build_live_command, build_recording_command, sanitize_camera_name
+from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +288,7 @@ async def _launch_recording(info: StreamInfo, config: AppConfig) -> None:
     )
     info.started_at = time.time()
     info.last_error = None
+    assign_to_job(info.rec_process.pid)
 
     asyncio.create_task(_read_stderr(info, "rec"))
 
@@ -303,6 +305,7 @@ async def _launch_live(info: StreamInfo, config: AppConfig) -> None:
     )
     info.live_started_at = time.time()
     info.last_live_access = time.time()
+    assign_to_job(info.live_process.pid)
 
     asyncio.create_task(_read_stderr(info, "live"))
 

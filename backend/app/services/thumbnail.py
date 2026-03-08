@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
 from app.models import Recording
+from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,7 @@ class ThumbnailGenerator:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        assign_to_job(proc.pid)
         _, stderr = await proc.communicate()
 
         if proc.returncode != 0:
