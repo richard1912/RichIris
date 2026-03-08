@@ -24,6 +24,7 @@ class PlaybackSession:
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
     ready: bool = False
+    _ready_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class PlaybackManager:
@@ -109,12 +110,14 @@ class PlaybackManager:
     async def _wait_ready(self, session: PlaybackSession) -> None:
         """Wait for the remux to complete, then mark session ready."""
         if not session.process:
+            session._ready_event.set()
             return
 
         try:
-            await asyncio.wait_for(session.process.wait(), timeout=30)
+            await asyncio.wait_for(session.process.wait(), timeout=60)
         except asyncio.TimeoutError:
             logger.error("Playback remux timed out", extra={"session_id": session.session_id})
+            session._ready_event.set()
             return
 
         output_path = session.output_dir / "playback.mp4"
@@ -131,6 +134,7 @@ class PlaybackManager:
                     "stderr": stderr.decode("utf-8", errors="replace")[-500:],
                 },
             )
+        session._ready_event.set()
 
     def touch(self, session_id: str) -> None:
         session = self._sessions.get(session_id)

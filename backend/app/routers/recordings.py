@@ -138,18 +138,21 @@ async def start_playback_session(
         seek_seconds=seek_seconds, duration_limit=duration_limit,
     )
 
-    # Wait for MP4 to be ready (remux is near-instant, typically < 1 second)
-    for _ in range(20):
-        await asyncio.sleep(0.25)
-        if session.ready:
-            return {
-                "session_id": session_id,
-                "playback_url": f"/api/recordings/playback/{session_id}/playback.mp4",
-                "window_end": actual_end.isoformat(),
-                "has_more": has_more,
-            }
+    # Wait for remux to complete (typically < 1s, up to 60s for large files)
+    try:
+        await asyncio.wait_for(session._ready_event.wait(), timeout=60)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Remux timed out")
 
-    raise HTTPException(status_code=503, detail="Remux in progress, retry shortly")
+    if not session.ready:
+        raise HTTPException(status_code=500, detail="Remux failed")
+
+    return {
+        "session_id": session_id,
+        "playback_url": f"/api/recordings/playback/{session_id}/playback.mp4",
+        "window_end": actual_end.isoformat(),
+        "has_more": has_more,
+    }
 
 
 @router.get("/playback/{session_id}/playback.mp4")
