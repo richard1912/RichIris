@@ -2,6 +2,7 @@
 
 import logging
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -50,6 +51,15 @@ async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Migrate: add rotation column if missing (SQLite ALTER TABLE)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN rotation INTEGER NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added rotation column to cameras")
+        except Exception:
+            pass  # Column already exists
     logger.info("Database tables created")
 
 
