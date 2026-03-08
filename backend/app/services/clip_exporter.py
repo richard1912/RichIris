@@ -76,9 +76,11 @@ async def export_clip(clip_id: int, session_factory) -> None:
 
             exports_dir = get_exports_dir()
             camera = await session.get(Camera, clip.camera_id)
-            cam_name = sanitize_camera_name(camera.name) if camera else f"cam_{clip.camera_id}"
-            timestamp = clip.start_time.strftime("%Y%m%d_%H%M%S")
-            output_file = exports_dir / f"{cam_name}_{timestamp}.mp4"
+            cam_name = camera.name if camera else f"Camera {clip.camera_id}"
+            date_str = clip.start_time.strftime("%Y-%m-%d")
+            start_str = clip.start_time.strftime("%H.%M")
+            end_str = clip.end_time.strftime("%H.%M")
+            output_file = exports_dir / f"{cam_name} {date_str} {start_str} - {end_str}.mp4"
 
             # Build concat file
             concat_lines = []
