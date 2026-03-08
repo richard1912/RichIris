@@ -9,12 +9,14 @@ class CameraCreate(BaseModel):
     name: str
     rtsp_url: str
     enabled: bool = True
+    rotation: int = 0
 
 
 class CameraUpdate(BaseModel):
     name: str | None = None
     rtsp_url: str | None = None
     enabled: bool | None = None
+    rotation: int | None = None
 
 
 class CameraResponse(BaseModel):
@@ -26,6 +28,7 @@ class CameraResponse(BaseModel):
     height: int | None = None
     codec: str | None = None
     fps: float | None = None
+    rotation: int = 0
     created_at: datetime
 
     model_config = {"from_attributes": True}

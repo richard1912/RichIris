@@ -36,7 +36,7 @@ async def get_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=CameraResponse, status_code=201)
 async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
     """Create a new camera."""
-    camera = Camera(name=data.name, rtsp_url=data.rtsp_url, enabled=data.enabled)
+    camera = Camera(name=data.name, rtsp_url=data.rtsp_url, enabled=data.enabled, rotation=data.rotation)
     db.add(camera)
     await db.commit()
     await db.refresh(camera)
@@ -69,6 +69,8 @@ async def update_camera(
         needs_restart = True
     if data.enabled is not None:
         camera.enabled = data.enabled
+    if data.rotation is not None:
+        camera.rotation = data.rotation
 
     await db.commit()
     await db.refresh(camera)

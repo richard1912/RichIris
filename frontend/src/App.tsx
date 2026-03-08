@@ -3,6 +3,7 @@ import type { Camera, StreamStatus } from './api'
 import { fetchCameras, fetchSystemStatus } from './api'
 import CameraGrid from './components/CameraGrid'
 import CameraFullscreen from './components/CameraFullscreen'
+import CameraModal from './components/CameraModal'
 import SystemPage from './components/SystemPage'
 import Timeline from './components/Timeline'
 
@@ -14,6 +15,8 @@ export default function App() {
   const [showSystem, setShowSystem] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<'live' | 'playback'>('live')
+  const [modalCamera, setModalCamera] = useState<Camera | undefined>(undefined)
+  const [showModal, setShowModal] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -38,7 +41,6 @@ export default function App() {
 
   const handleSelectCamera = useCallback((cam: Camera) => {
     if (selectedCamera?.id === cam.id) {
-      // Double-tap same camera → fullscreen
       setFullscreenCamera(cam)
     } else {
       setSelectedCamera(cam)
@@ -57,6 +59,22 @@ export default function App() {
   const handleLive = useCallback(() => {
     setMode('live')
   }, [])
+
+  const openAddModal = useCallback(() => {
+    setModalCamera(undefined)
+    setShowModal(true)
+  }, [])
+
+  const openEditModal = useCallback((cam: Camera) => {
+    setModalCamera(cam)
+    setShowModal(true)
+  }, [])
+
+  const handleModalSaved = useCallback(() => {
+    setShowModal(false)
+    setModalCamera(undefined)
+    refresh()
+  }, [refresh])
 
   if (showSystem) {
     return <SystemPage onBack={() => setShowSystem(false)} />
@@ -92,6 +110,8 @@ export default function App() {
           cameras={cameras}
           streams={streams}
           onSelect={handleSelectCamera}
+          onEdit={openEditModal}
+          onAdd={openAddModal}
           selectedId={selectedCamera?.id ?? null}
         />
       </main>
@@ -123,6 +143,14 @@ export default function App() {
             isLive={mode === 'live'}
           />
         </div>
+      )}
+
+      {showModal && (
+        <CameraModal
+          camera={modalCamera}
+          onClose={() => { setShowModal(false); setModalCamera(undefined) }}
+          onSaved={handleModalSaved}
+        />
       )}
     </div>
   )

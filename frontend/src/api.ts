@@ -7,6 +7,7 @@ export interface Camera {
   height: number | null
   codec: string | null
   fps: number | null
+  rotation: number
   created_at: string
 }
 
@@ -23,6 +24,37 @@ export interface SystemStatus {
   streams: StreamStatus[]
   total_cameras: number
   active_streams: number
+}
+
+export async function createCamera(data: { name: string; rtsp_url: string; enabled?: boolean; rotation?: number }): Promise<Camera> {
+  const res = await fetch('/api/cameras', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to create camera' }))
+    throw new Error(err.detail || 'Failed to create camera')
+  }
+  return res.json()
+}
+
+export async function updateCamera(id: number, data: { name?: string; rtsp_url?: string; enabled?: boolean; rotation?: number }): Promise<Camera> {
+  const res = await fetch(`/api/cameras/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update camera' }))
+    throw new Error(err.detail || 'Failed to update camera')
+  }
+  return res.json()
+}
+
+export async function deleteCamera(id: number): Promise<void> {
+  const res = await fetch(`/api/cameras/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('Failed to delete camera')
 }
 
 export async function fetchCameras(): Promise<Camera[]> {

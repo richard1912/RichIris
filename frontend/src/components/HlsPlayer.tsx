@@ -7,9 +7,10 @@ interface Props {
   src?: string
   muted?: boolean
   className?: string
+  rotation?: number
 }
 
-export default function HlsPlayer({ cameraId, src, muted = true, className }: Props) {
+export default function HlsPlayer({ cameraId, src, muted = true, className, rotation = 0 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
 
@@ -65,6 +66,11 @@ export default function HlsPlayer({ cameraId, src, muted = true, className }: Pr
     }
   }, [url, isLive])
 
+  const isRotated = rotation === 90 || rotation === 270
+  const rotationStyle = rotation ? {
+    transform: `rotate(${rotation}deg)${isRotated ? ' scale(1.78)' : ''}`,
+  } : undefined
+
   return (
     <video
       ref={videoRef}
@@ -73,6 +79,7 @@ export default function HlsPlayer({ cameraId, src, muted = true, className }: Pr
       playsInline
       controls={!isLive}
       className={className ?? 'w-full h-full object-contain'}
+      style={rotationStyle}
     />
   )
 }

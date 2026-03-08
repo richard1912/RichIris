@@ -19,6 +19,7 @@ class Camera(Base):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     codec: Mapped[str | None] = mapped_column(String(50), nullable=True)
     fps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rotation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

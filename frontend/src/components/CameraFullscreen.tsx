@@ -41,6 +41,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
   }, [])
 
   const isLive = mode === 'live'
+  const rot = camera.rotation || 0
 
   return (
     <div className="min-h-screen flex flex-col bg-black">
@@ -67,7 +68,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
         )}
       </header>
 
-      <main className="flex-1 flex items-center justify-center">
+      <main className="flex-1 flex items-center justify-center overflow-hidden">
         {playbackLoading && (
           <div className="text-neutral-400 text-sm">Preparing playback...</div>
         )}
@@ -79,6 +80,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
             <HlsPlayer
               cameraId={camera.id}
               muted
+              rotation={rot}
               className="max-h-[calc(100vh-8rem)] w-full object-contain"
             />
           ) : (
@@ -91,6 +93,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
             key={playbackUrl}
             src={playbackUrl}
             muted
+            rotation={rot}
             className="max-h-[calc(100vh-8rem)] w-full object-contain"
           />
         ) : null}
