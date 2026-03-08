@@ -1,0 +1,374 @@
+import { useEffect, useState, useRef, useCallback } from 'react'
+import type { RecordingSegment, ClipExport } from '../api'
+import { fetchRecordingDates, fetchSegments, createClipExport, fetchClips, getClipDownloadUrl, deleteClip } from '../api'
+
+interface Props {
+  cameraId: number
+  onPlayback: (start: string, end: string) => void
+  onLive: () => void
+  isLive: boolean
+}
+
+export default function Timeline({ cameraId, onPlayback, onLive, isLive }: Props) {
+  const [dates, setDates] = useState<string[]>([])
+  const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [segments, setSegments] = useState<RecordingSegment[]>([])
+  const [loading, setLoading] = useState(false)
+  const barRef = useRef<HTMLDivElement>(null)
+
+  // Clip export state
+  const [exportMode, setExportMode] = useState(false)
+  const [exportStart, setExportStart] = useState<number | null>(null) // pct 0-1
+  const [exportEnd, setExportEnd] = useState<number | null>(null)
+  const [_dragging, _setDragging] = useState<'start' | 'end' | null>(null)
+  const [clips, setClips] = useState<ClipExport[]>([])
+  const [showClips, setShowClips] = useState(false)
+  const [exportBusy, setExportBusy] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchRecordingDates(cameraId).then(setDates).catch(() => setDates([]))
+  }, [cameraId])
+
+  useEffect(() => {
+    if (!selectedDate) {
+      setSegments([])
+      return
+    }
+    setLoading(true)
+    fetchSegments(cameraId, selectedDate)
+      .then(setSegments)
+      .catch(() => setSegments([]))
+      .finally(() => setLoading(false))
+  }, [cameraId, selectedDate])
+
+  // Refresh clips list
+  const refreshClips = useCallback(() => {
+    fetchClips(cameraId).then(setClips).catch(() => {})
+  }, [cameraId])
+
+  useEffect(() => {
+    if (showClips) refreshClips()
+  }, [showClips, refreshClips])
+
+  // Poll for processing clips
+  useEffect(() => {
+    const processing = clips.some(c => c.status === 'pending' || c.status === 'processing')
+    if (!processing) return
+    const interval = setInterval(refreshClips, 3000)
+    return () => clearInterval(interval)
+  }, [clips, refreshClips])
+
+  const pctToTime = useCallback(
+    (pct: number): string => {
+      const hour = Math.floor(pct * 24)
+      const minute = Math.floor((pct * 24 - hour) * 60)
+      const second = Math.floor(((pct * 24 - hour) * 60 - minute) * 60)
+      return `${selectedDate}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
+    },
+    [selectedDate],
+  )
+
+  const pctToLabel = (pct: number): string => {
+    const hour = Math.floor(pct * 24)
+    const minute = Math.floor((pct * 24 - hour) * 60)
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+  }
+
+  const getBarPct = useCallback(
+    (e: React.MouseEvent<HTMLDivElement> | MouseEvent): number => {
+      if (!barRef.current) return 0
+      const rect = barRef.current.getBoundingClientRect()
+      return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    },
+    [],
+  )
+
+  const handleBarClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (exportMode) {
+        // In export mode, set start/end range
+        const pct = getBarPct(e)
+        if (exportStart === null || (exportStart !== null && exportEnd !== null)) {
+          // First click or reset
+          setExportStart(pct)
+          setExportEnd(null)
+          setExportError(null)
+        } else {
+          // Second click
+          if (pct > exportStart) {
+            setExportEnd(pct)
+          } else {
+            setExportEnd(exportStart)
+            setExportStart(pct)
+          }
+        }
+        return
+      }
+
+      // Normal playback click
+      if (!barRef.current || segments.length === 0) return
+      const rect = barRef.current.getBoundingClientRect()
+      const pct = (e.clientX - rect.left) / rect.width
+      const hour = Math.floor(pct * 24)
+      const minute = Math.floor((pct * 24 - hour) * 60)
+
+      const clickTime = `${selectedDate}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`
+      const clickDate = new Date(clickTime)
+
+      let targetIdx = -1
+      for (let i = segments.length - 1; i >= 0; i--) {
+        if (new Date(segments[i].start_time) <= clickDate) {
+          targetIdx = i
+          break
+        }
+      }
+      if (targetIdx === -1) targetIdx = 0
+
+      const startSeg = segments[targetIdx]
+      const endSeg = segments[segments.length - 1]
+      const endMs = new Date(endSeg.start_time).getTime() + (endSeg.duration || 900) * 1000
+      const endDt = new Date(endMs)
+      // Format as local ISO without timezone (matches DB format)
+      const endTime = `${endDt.getFullYear()}-${String(endDt.getMonth() + 1).padStart(2, '0')}-${String(endDt.getDate()).padStart(2, '0')}T${String(endDt.getHours()).padStart(2, '0')}:${String(endDt.getMinutes()).padStart(2, '0')}:${String(endDt.getSeconds()).padStart(2, '0')}`
+
+      onPlayback(startSeg.start_time, endTime)
+    },
+    [segments, selectedDate, onPlayback, exportMode, exportStart, exportEnd, getBarPct],
+  )
+
+  const handleExport = useCallback(async () => {
+    if (exportStart === null || exportEnd === null || !selectedDate) return
+    setExportBusy(true)
+    setExportError(null)
+    try {
+      await createClipExport(cameraId, pctToTime(exportStart), pctToTime(exportEnd))
+      setExportStart(null)
+      setExportEnd(null)
+      setExportMode(false)
+      setShowClips(true)
+      refreshClips()
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : 'Export failed')
+    } finally {
+      setExportBusy(false)
+    }
+  }, [cameraId, exportStart, exportEnd, selectedDate, pctToTime, refreshClips])
+
+  const handleDeleteClip = useCallback(async (clipId: number) => {
+    await deleteClip(clipId).catch(() => {})
+    refreshClips()
+  }, [refreshClips])
+
+  // Build 24h bar with segments highlighted
+  const segmentBars = segments.map((seg) => {
+    const start = new Date(seg.start_time)
+    const startMinutes = start.getHours() * 60 + start.getMinutes()
+    const duration = seg.duration || 900
+    const durationMinutes = duration / 60
+    const leftPct = (startMinutes / 1440) * 100
+    const widthPct = (durationMinutes / 1440) * 100
+    return (
+      <div
+        key={seg.id}
+        className="absolute top-0 bottom-0 bg-blue-500/60 hover:bg-blue-400/80 transition-colors"
+        style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.3)}%` }}
+        title={`${start.toLocaleTimeString()} (${Math.round(duration / 60)}m)`}
+      />
+    )
+  })
+
+  // Hour markers
+  const hourMarkers = Array.from({ length: 24 }, (_, i) => (
+    <div
+      key={i}
+      className="absolute top-0 bottom-0 border-l border-neutral-700/50"
+      style={{ left: `${(i / 24) * 100}%` }}
+    >
+      {i % 3 === 0 && (
+        <span className="absolute -top-4 -translate-x-1/2 text-[10px] text-neutral-500">
+          {String(i).padStart(2, '0')}
+        </span>
+      )}
+    </div>
+  ))
+
+  // Export range overlay
+  const rangeOverlay =
+    exportMode && exportStart !== null ? (
+      <div
+        className="absolute top-0 bottom-0 bg-green-500/30 border-l-2 border-r-2 border-green-400 pointer-events-none"
+        style={{
+          left: `${exportStart * 100}%`,
+          width: exportEnd !== null ? `${(exportEnd - exportStart) * 100}%` : '2px',
+        }}
+      />
+    ) : null
+
+  return (
+    <div className="bg-neutral-900/90 backdrop-blur border-t border-neutral-800 px-4 py-3">
+      <div className="flex items-center gap-3 mb-2">
+        <button
+          onClick={onLive}
+          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            isLive
+              ? 'bg-red-600 text-white'
+              : 'bg-neutral-800 text-neutral-400 hover:text-white'
+          }`}
+        >
+          LIVE
+        </button>
+
+        <select
+          value={selectedDate ?? ''}
+          onChange={(e) => {
+            setSelectedDate(e.target.value || null)
+            setExportStart(null)
+            setExportEnd(null)
+          }}
+          className="bg-neutral-800 text-sm text-neutral-300 rounded px-2 py-1 border border-neutral-700"
+        >
+          <option value="">Select date...</option>
+          {dates.map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+
+        {loading && <span className="text-xs text-neutral-500">Loading...</span>}
+        {!loading && selectedDate && (
+          <span className="text-xs text-neutral-500">
+            {segments.length} segments
+          </span>
+        )}
+
+        {/* Export controls */}
+        {selectedDate && segments.length > 0 && (
+          <>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setExportMode(!exportMode)
+                  setExportStart(null)
+                  setExportEnd(null)
+                  setExportError(null)
+                }}
+                className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                  exportMode
+                    ? 'bg-green-600 text-white'
+                    : 'bg-neutral-800 text-neutral-400 hover:text-white'
+                }`}
+              >
+                {exportMode ? 'Cancel Export' : 'Export Clip'}
+              </button>
+
+              <button
+                onClick={() => setShowClips(!showClips)}
+                className="px-3 py-1 rounded text-xs font-medium bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
+              >
+                Clips{clips.length > 0 ? ` (${clips.length})` : ''}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Export mode instructions */}
+      {exportMode && (
+        <div className="flex items-center gap-3 mb-2 text-xs">
+          <span className="text-green-400">
+            {exportStart === null
+              ? 'Click timeline to set start'
+              : exportEnd === null
+              ? 'Click timeline to set end'
+              : `${pctToLabel(exportStart)} - ${pctToLabel(exportEnd)}`}
+          </span>
+          {exportStart !== null && exportEnd !== null && (
+            <button
+              onClick={handleExport}
+              disabled={exportBusy}
+              className="px-3 py-1 rounded bg-green-600 text-white font-medium hover:bg-green-500 disabled:opacity-50 transition-colors"
+            >
+              {exportBusy ? 'Exporting...' : 'Export'}
+            </button>
+          )}
+          {exportError && <span className="text-red-400">{exportError}</span>}
+        </div>
+      )}
+
+      {selectedDate && (
+        <div className="relative pt-4 pb-1">
+          <div
+            ref={barRef}
+            className={`relative h-6 bg-neutral-800 rounded cursor-pointer overflow-hidden ${
+              exportMode ? 'ring-1 ring-green-500/50' : ''
+            }`}
+            onClick={handleBarClick}
+          >
+            {hourMarkers}
+            {segmentBars}
+            {rangeOverlay}
+          </div>
+          <div className="flex justify-between mt-1">
+            <span className="text-[10px] text-neutral-600">00:00</span>
+            <span className="text-[10px] text-neutral-600">12:00</span>
+            <span className="text-[10px] text-neutral-600">24:00</span>
+          </div>
+        </div>
+      )}
+
+      {/* Clips list */}
+      {showClips && (
+        <div className="mt-3 border-t border-neutral-800 pt-3">
+          <h3 className="text-xs font-medium text-neutral-400 mb-2">Exported Clips</h3>
+          {clips.length === 0 ? (
+            <p className="text-xs text-neutral-600">No clips yet</p>
+          ) : (
+            <div className="space-y-1.5 max-h-40 overflow-y-auto">
+              {clips.map((clip) => (
+                <div
+                  key={clip.id}
+                  className="flex items-center gap-3 text-xs bg-neutral-800/50 rounded px-3 py-2"
+                >
+                  <span className="text-neutral-300">
+                    {new Date(clip.start_time).toLocaleString()} &rarr;{' '}
+                    {new Date(clip.end_time).toLocaleTimeString()}
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                      clip.status === 'done'
+                        ? 'bg-green-900/50 text-green-400'
+                        : clip.status === 'failed'
+                        ? 'bg-red-900/50 text-red-400'
+                        : 'bg-yellow-900/50 text-yellow-400'
+                    }`}
+                  >
+                    {clip.status}
+                  </span>
+                  <div className="ml-auto flex gap-2">
+                    {clip.status === 'done' && (
+                      <a
+                        href={getClipDownloadUrl(clip.id)}
+                        className="text-blue-400 hover:text-blue-300"
+                        download
+                      >
+                        Download
+                      </a>
+                    )}
+                    <button
+                      onClick={() => handleDeleteClip(clip.id)}
+                      className="text-neutral-500 hover:text-red-400"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}

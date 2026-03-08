@@ -1,0 +1,123 @@
+"""Application configuration loaded from config.yaml."""
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+CONFIG_PATH = Path("C:/01-Self-Hosting/RichIris/config.yaml")
+
+
+@dataclass
+class ServerConfig:
+    host: str = "0.0.0.0"
+    port: int = 8700
+
+
+@dataclass
+class StorageConfig:
+    recordings_dir: str = "G:/RichIris"
+    live_dir: str = "C:/01-Self-Hosting/RichIris/data/live"
+    database_url: str = "sqlite+aiosqlite:///C:/01-Self-Hosting/RichIris/data/richiris.db"
+
+
+@dataclass
+class FFmpegConfig:
+    path: str = "ffmpeg"
+    ffprobe_path: str = "ffprobe"
+    hwaccel: str = "cuda"
+    segment_duration: int = 900
+    hls_time: int = 2
+    hls_list_size: int = 5
+    rtsp_transport: str = "tcp"
+
+
+@dataclass
+class RetentionConfig:
+    max_age_days: int = 30
+    max_storage_gb: int = 500
+
+
+@dataclass
+class LoggingConfig:
+    level: str = "DEBUG"
+    json_output: bool = False
+
+
+@dataclass
+class CameraConfig:
+    name: str = ""
+    rtsp_url: str = ""
+    enabled: bool = True
+
+
+@dataclass
+class AppConfig:
+    server: ServerConfig = field(default_factory=ServerConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    ffmpeg: FFmpegConfig = field(default_factory=FFmpegConfig)
+    retention: RetentionConfig = field(default_factory=RetentionConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    cameras: list[CameraConfig] = field(default_factory=list)
+
+
+def load_yaml(path: Path) -> dict:
+    """Load and parse a YAML file."""
+    logger.debug("Loading config", extra={"path": str(path)})
+    with open(path, "r") as f:
+        return yaml.safe_load(f) or {}
+
+
+def parse_cameras(raw: list[dict] | None) -> list[CameraConfig]:
+    """Parse camera entries from raw config data."""
+    if not raw:
+        return []
+    return [CameraConfig(**cam) for cam in raw]
+
+
+def build_config(data: dict) -> AppConfig:
+    """Build AppConfig from raw dictionary."""
+    return AppConfig(
+        server=ServerConfig(**data.get("server", {})),
+        storage=StorageConfig(**data.get("storage", {})),
+        ffmpeg=FFmpegConfig(**data.get("ffmpeg", {})),
+        retention=RetentionConfig(**data.get("retention", {})),
+        logging=LoggingConfig(**data.get("logging", {})),
+        cameras=parse_cameras(data.get("cameras")),
+    )
+
+
+def validate_paths(config: AppConfig) -> None:
+    """Ensure required directories exist, creating them if needed."""
+    for dir_path in (config.storage.recordings_dir, config.storage.live_dir):
+        p = Path(dir_path)
+        p.mkdir(parents=True, exist_ok=True)
+        logger.debug("Ensured directory exists", extra={"path": str(p)})
+
+
+def load_config(path: Path | None = None) -> AppConfig:
+    """Load, parse, and validate the full application config."""
+    path = path or CONFIG_PATH
+    data = load_yaml(path)
+    config = build_config(data)
+    validate_paths(config)
+    logger.info(
+        "Configuration loaded",
+        extra={"cameras_count": len(config.cameras), "config_path": str(path)},
+    )
+    return config
+
+
+# Singleton
+_config: AppConfig | None = None
+
+
+def get_config() -> AppConfig:
+    """Return the cached config, loading it if needed."""
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
