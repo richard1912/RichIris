@@ -52,6 +52,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
   // Minimap drag state
   const minimapDragRef = useRef(false)
   const minimapBarRef = useRef<HTMLDivElement>(null)
+  const manualPanRef = useRef(false) // Track if user has manually panned away from live
 
   // Clip export state
   const [exportMode, setExportMode] = useState(false)
@@ -109,7 +110,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
   useEffect(() => {
     if (!getNvrTime) return
     const id = setInterval(() => {
-      if (draggingRef.current) return
+      if (draggingRef.current || minimapDragRef.current) return
       const ms = getNvrTime.current()
       if (ms == null) return
 
@@ -134,13 +135,15 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
 
       setPlayheadHour(hour)
 
-      // Auto-scroll viewport to keep playhead visible
-      const vs = viewportStartRef.current
-      const vh = visibleHoursRef.current
-      if (hour < vs || hour > vs + vh) {
-        let newStart = hour - vh / 2
-        newStart = Math.max(0, Math.min(24 - vh, newStart))
-        setViewportStart(newStart)
+      // Auto-scroll viewport to keep playhead visible (only if not manually panned)
+      if (!manualPanRef.current) {
+        const vs = viewportStartRef.current
+        const vh = visibleHoursRef.current
+        if (hour < vs || hour > vs + vh) {
+          let newStart = hour - vh / 2
+          newStart = Math.max(0, Math.min(24 - vh, newStart))
+          setViewportStart(newStart)
+        }
       }
     }, 250)
     return () => clearInterval(id)
@@ -337,6 +340,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
     (e: React.MouseEvent<HTMLDivElement>) => {
       e.preventDefault()
       minimapDragRef.current = true
+      manualPanRef.current = true
 
       const updateFromMinimap = (ev: MouseEvent) => {
         if (!minimapBarRef.current) return
@@ -551,7 +555,10 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
     <div className="bg-neutral-900/90 backdrop-blur border-t border-neutral-800 px-4 py-3">
       <div className="flex items-center gap-3 mb-2">
         <button
-          onClick={onLive}
+          onClick={() => {
+            manualPanRef.current = false
+            onLive()
+          }}
           className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
             isLive && !isPaused
               ? 'bg-red-600 text-white'

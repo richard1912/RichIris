@@ -162,11 +162,12 @@ class ThumbnailGenerator:
             timestamp = frame_idx * interval
             frame_path = temp_dir / f"frame_{frame_idx:03d}.jpg"
 
+            # Use -ss AFTER -i for reliable seeking in HEVC (slower but accurate)
             cmd = [
                 ffmpeg_path,
                 "-hwaccel", "cuda",
-                "-ss", str(timestamp),
                 "-i", str(seg_path),
+                "-ss", str(timestamp),
                 "-frames:v", "1",
                 "-vf", f"scale={width}:{height}",
                 "-q:v", "8",
