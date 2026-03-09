@@ -162,18 +162,40 @@ class ThumbnailGenerator:
             timestamp = frame_idx * interval
             frame_path = temp_dir / f"frame_{frame_idx:03d}.jpg"
 
-            # Use -ss AFTER -i for reliable seeking in HEVC (slower but accurate)
+            # Fast seek but validate frame size (reject tiny/blank frames)
             cmd = [
                 ffmpeg_path,
                 "-hwaccel", "cuda",
-                "-i", str(seg_path),
                 "-ss", str(timestamp),
+                "-i", str(seg_path),
                 "-frames:v", "1",
                 "-vf", f"scale={width}:{height}",
                 "-q:v", "8",
                 "-y",
                 str(frame_path),
             ]
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                assign_to_job(proc.pid)
+                _, stderr = await proc.communicate()
+
+                if proc.returncode != 0:
+                    return None
+
+                # Validate frame size (blank frames are <2KB)
+                if not frame_path.exists() or frame_path.stat().st_size < 2000:
+                    logger.debug("Extracted blank frame, skipping", extra={"frame_idx": frame_idx, "timestamp": timestamp})
+                    return None
+
+                return frame_path
+            except Exception as e:
+                logger.debug("Frame extraction exception", extra={"frame_idx": frame_idx, "error": str(e)})
+                return None
 
             try:
                 proc = await asyncio.create_subprocess_exec(
