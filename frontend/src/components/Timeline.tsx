@@ -365,8 +365,53 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
     [visibleHours],
   )
 
+  // Merge consecutive segments
+  const mergedSegments = segments.length > 0 ? (() => {
+    const calcEnd = (seg: RecordingSegment) => {
+      if (seg.end_time) return new Date(seg.end_time).getTime()
+      return new Date(seg.start_time).getTime() + (seg.duration || 900) * 1000
+    }
+    const GAP_TOLERANCE_MS = 30_000 // 30 seconds
+
+    const sorted = [...segments].sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
+    const merged = []
+    let currentStart = new Date(sorted[0].start_time)
+    let currentEnd = new Date(calcEnd(sorted[0]))
+    let ids = [sorted[0].id]
+
+    for (let i = 1; i < sorted.length; i++) {
+      const seg = sorted[i]
+      const nextStart = new Date(seg.start_time)
+      const nextEnd = new Date(calcEnd(seg))
+
+      if (nextStart.getTime() <= currentEnd.getTime() + GAP_TOLERANCE_MS) {
+        // Merge: extend currentEnd if needed
+        if (nextEnd > currentEnd) currentEnd = nextEnd
+        ids.push(seg.id)
+      } else {
+        // Gap found, save current and start new
+        merged.push({
+          id: ids[0],
+          start_time: currentStart.toISOString(),
+          duration: (currentEnd.getTime() - currentStart.getTime()) / 1000,
+          ids,
+        })
+        currentStart = nextStart
+        currentEnd = nextEnd
+        ids = [seg.id]
+      }
+    }
+    merged.push({
+      id: ids[0],
+      start_time: currentStart.toISOString(),
+      duration: (currentEnd.getTime() - currentStart.getTime()) / 1000,
+      ids,
+    })
+    return merged
+  })() : []
+
   // Build segment bars clipped to visible window
-  const segmentBars = segments.map((seg) => {
+  const segmentBars = mergedSegments.map((seg) => {
     const start = new Date(seg.start_time)
     const startHour = start.getHours() + start.getMinutes() / 60 + start.getSeconds() / 3600
     const duration = seg.duration || 900
@@ -382,7 +427,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
 
     return (
       <div
-        key={seg.id}
+        key={seg.ids.join(',')}
         className="absolute top-0 bottom-0 bg-blue-500/60 hover:bg-blue-400/80 transition-colors"
         style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.2)}%` }}
         title={`${start.toLocaleTimeString()} (${Math.round(duration / 60)}m)`}
@@ -391,7 +436,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
   }).filter(Boolean)
 
   // Minimap segment bars (always full 24h)
-  const minimapSegmentBars = segments.map((seg) => {
+  const minimapSegmentBars = mergedSegments.map((seg) => {
     const start = new Date(seg.start_time)
     const startMinutes = start.getHours() * 60 + start.getMinutes()
     const duration = seg.duration || 900
@@ -399,7 +444,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
     const widthPct = (duration / 60 / 1440) * 100
     return (
       <div
-        key={seg.id}
+        key={seg.ids.join(',')}
         className="absolute top-0 bottom-0 bg-blue-500/60"
         style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.3)}%` }}
       />
@@ -707,7 +752,6 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
         </div>
         <div className="flex justify-between mt-1">
           <span className="text-[10px] text-neutral-600">{hourToLabel(viewportStart)}</span>
-          <span className="text-[10px] text-neutral-600">{hourToLabel(viewportStart + visibleHours / 2)}</span>
           <span className="text-[10px] text-neutral-600">{hourToLabel(viewportStart + visibleHours)}</span>
         </div>
       </div>
