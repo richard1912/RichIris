@@ -172,6 +172,20 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
     return () => clearSpeedInterval()
   }, [clearSpeedInterval])
 
+  // Stable callback for Timeline to get current NVR time
+  const getNvrTimeRef = useRef<() => number | null>(() => null)
+  getNvrTimeRef.current = () => {
+    if (mode === 'live') return Date.now()
+    if (!playbackUrl) return null
+    if (speed >= 16 || speed <= -1) return virtualTimeRef.current
+    const video = videoRef.current
+    if (video && playbackStartTimeRef.current) {
+      const startMs = new Date(playbackStartTimeRef.current).getTime()
+      return startMs + video.currentTime * 1000
+    }
+    return null
+  }
+
   const isLive = mode === 'live'
   const rot = camera.rotation || 0
   const isRotated = rot === 90 || rot === 270
@@ -270,6 +284,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
         isLive={isLive}
         onPause={handlePause}
         isPaused={paused}
+        getNvrTime={getNvrTimeRef}
       />
     </div>
   )
