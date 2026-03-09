@@ -47,6 +47,7 @@ class TrickplayConfig:
     interval: int = 60
     thumb_width: int = 192
     thumb_height: int = 108
+    workers: int = 2
 
 
 @dataclass
