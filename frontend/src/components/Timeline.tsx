@@ -43,6 +43,9 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
   const [draggingPlayhead, setDraggingPlayhead] = useState(false)
   const draggingRef = useRef(false)
 
+  // Seek pending: suppress NVR time polling until video catches up
+  const seekTargetHour = useRef<number | null>(null)
+
   // Hover tooltip state
   const [hoverPct, setHoverPct] = useState<number | null>(null)
 
@@ -77,6 +80,16 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
         }
       })
       .catch(() => setSprites([]))
+
+    // Auto-poll segments every 15s when viewing today (to show in-progress segments growing)
+    if (selectedDate !== todayStr()) return
+    const pollId = setInterval(() => {
+      if (cameraId === null) return
+      fetchSegments(cameraId, selectedDate)
+        .then(setSegments)
+        .catch(() => {})
+    }, 15000)
+    return () => clearInterval(pollId)
   }, [cameraId, selectedDate])
 
   // Reset zoom on date change
@@ -109,6 +122,16 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
       }
 
       const hour = d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600
+
+      // If a seek is pending, don't update playhead until video reaches near the target
+      if (seekTargetHour.current !== null) {
+        if (Math.abs(hour - seekTargetHour.current) < 0.01) { // within ~36s
+          seekTargetHour.current = null
+        } else {
+          return // keep showing the clicked position
+        }
+      }
+
       setPlayheadHour(hour)
 
       // Auto-scroll viewport to keep playhead visible
@@ -250,6 +273,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
         const pct = getBarPct(ev)
         const hour = viewportPctToHour(pct)
         setPlayheadHour(hour)
+        seekTargetHour.current = hour
         if (!exportMode && segments.length > 0) {
           triggerPlaybackAtHour(hour)
         }
@@ -286,6 +310,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
       // Set playhead and trigger playback
       if (!barRef.current || segments.length === 0) return
       setPlayheadHour(hour)
+      seekTargetHour.current = hour
       triggerPlaybackAtHour(hour)
     },
     [segments, triggerPlaybackAtHour, exportMode, exportStart, exportEnd, getBarPct, viewportPctToHour],
@@ -463,6 +488,12 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
               {hourToLabel(playheadHour)}
             </div>
             <div className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-red-600 mx-auto" />
+          </div>
+        )}
+        {/* Persistent time label below playhead */}
+        {!draggingPlayhead && playheadHour !== null && (
+          <div className="absolute left-1/2 -translate-x-1/2 pointer-events-none" style={{ top: 'calc(100% + 2px)' }}>
+            <span className="text-[10px] text-white font-medium whitespace-nowrap">{hourToLabel(playheadHour)}</span>
           </div>
         )}
       </div>

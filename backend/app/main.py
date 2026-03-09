@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
 
 async def _periodic_scan() -> None:
     """Periodically scan for new recording segments and register them."""
-    await asyncio.sleep(30)  # Initial delay to let streams start
+    await asyncio.sleep(15)  # Initial delay to let streams start
     while True:
         try:
             factory = get_session_factory()
@@ -79,7 +79,7 @@ async def _periodic_scan() -> None:
                     logger.info("Periodic scan registered segments", extra={"count": count})
         except Exception:
             logger.exception("Periodic segment scan failed")
-        await asyncio.sleep(60)
+        await asyncio.sleep(15)
 
 
 async def _periodic_retention() -> None:

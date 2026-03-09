@@ -82,6 +82,16 @@ class StreamManager:
 
         config = get_config()
         _ensure_directories(info.camera_name, config)
+
+        # Clean stale HLS files before launching so the playlist wait loop
+        # doesn't immediately find an old playlist from a previous session
+        safe_name = sanitize_camera_name(info.camera_name)
+        live_dir = Path(config.storage.live_dir) / safe_name
+        for f in live_dir.glob("*.ts"):
+            f.unlink(missing_ok=True)
+        for f in live_dir.glob("*.m3u8"):
+            f.unlink(missing_ok=True)
+
         await _launch_live(info, config)
 
         info._live_monitor_task = asyncio.create_task(

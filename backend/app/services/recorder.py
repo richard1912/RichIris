@@ -17,6 +17,16 @@ from app.services.ffmpeg import sanitize_camera_name
 logger = logging.getLogger(__name__)
 
 
+def _is_in_progress(seg_path: Path) -> bool:
+    """Check if a segment file is still being written by ffmpeg.
+
+    The segment muxer writes to rec_HH-MM-SS.ts files. Our scanner renames
+    completed segments to human-readable names. So any file still starting
+    with rec_ is the active/in-progress segment.
+    """
+    return seg_path.stem.startswith("rec_")
+
+
 async def cleanup_missing_recordings(session: AsyncSession) -> int:
     """Remove DB recordings whose files no longer exist on disk."""
     result = await session.execute(select(Recording))
@@ -45,7 +55,10 @@ async def scan_all_cameras(session: AsyncSession) -> int:
 
 
 async def scan_new_segments(session: AsyncSession, camera_id: int, camera_name: str) -> int:
-    """Scan for unregistered recording segments and add them to the database."""
+    """Scan for unregistered recording segments and add them to the database.
+
+    Also updates any previously-registered in-progress segments.
+    """
     config = get_config()
     safe_name = sanitize_camera_name(camera_name)
     rec_dir = Path(config.storage.recordings_dir) / safe_name
@@ -54,6 +67,10 @@ async def scan_new_segments(session: AsyncSession, camera_id: int, camera_name: 
         return 0
 
     existing = await _get_existing_paths(session, camera_id)
+
+    # Update existing in-progress segments first
+    await _update_in_progress(session, camera_id, config, camera_name)
+
     new_segments = _find_new_segments(rec_dir, existing)
 
     registered = 0
@@ -66,11 +83,12 @@ async def scan_new_segments(session: AsyncSession, camera_id: int, camera_name: 
 
     if registered > 0:
         await session.commit()
-        # Enqueue thumbnail generation for new recordings
+        # Enqueue thumbnail generation for completed recordings only
         from app.services.thumbnail import get_thumbnail_generator
         gen = get_thumbnail_generator()
         for rec in new_recordings:
-            gen.enqueue(rec.id)
+            if not rec.in_progress:
+                gen.enqueue(rec.id)
         logger.info(
             "Registered new segments",
             extra={"camera_id": camera_id, "count": registered},
@@ -92,41 +110,136 @@ def _find_new_segments(rec_dir: Path, existing: set[str]) -> list[Path]:
     return [s for s in all_segments if str(s) not in existing]
 
 
+async def _update_in_progress(
+    session: AsyncSession, camera_id: int, config: AppConfig, camera_name: str,
+) -> None:
+    """Update all in-progress recordings: finalize completed ones, update end_time for ongoing ones."""
+    result = await session.execute(
+        select(Recording).where(
+            Recording.camera_id == camera_id,
+            Recording.in_progress == True,
+        )
+    )
+    in_progress_recs = result.scalars().all()
+    if not in_progress_recs:
+        return
+
+    for rec in in_progress_recs:
+        seg_path = Path(rec.file_path)
+        if not seg_path.exists():
+            # File gone — ffmpeg rotated to new segment and our path is stale
+            # The renamed file should be picked up as a new segment
+            await session.delete(rec)
+            logger.debug("Removed stale in-progress recording", extra={"id": rec.id, "path": rec.file_path})
+            continue
+
+        if _is_in_progress(seg_path):
+            # Check file modification time — if the file hasn't been written to
+            # recently, the recording process died and we should finalize it
+            stat = seg_path.stat()
+            mtime = datetime.fromtimestamp(stat.st_mtime)
+            stale_seconds = (datetime.now() - mtime).total_seconds()
+
+            if stale_seconds > 120:
+                # Recording process died — finalize with actual mtime as end_time
+                duration = _probe_duration(seg_path, config)
+                if duration:
+                    rec.end_time = rec.start_time + timedelta(seconds=duration)
+                    rec.duration = duration
+                else:
+                    rec.end_time = mtime
+                    rec.duration = (mtime - rec.start_time).total_seconds()
+                rec.file_size = stat.st_size
+                rec.in_progress = False
+                # Rename to human-readable format
+                try:
+                    new_path = _rename_segment(seg_path, camera_name, rec.start_time, rec.duration)
+                    rec.file_path = str(new_path)
+                except (PermissionError, OSError):
+                    pass
+                logger.info("Finalized stale in-progress recording",
+                            extra={"id": rec.id, "stale_seconds": stale_seconds})
+            else:
+                # Still being actively written — update end_time to file mtime
+                rec.duration = (mtime - rec.start_time).total_seconds()
+                rec.end_time = mtime
+                rec.file_size = stat.st_size
+        else:
+            # File was renamed (no longer rec_*) — should not happen since we
+            # only rename in our code, but handle gracefully
+            duration = _probe_duration(seg_path, config)
+            if duration:
+                rec.duration = duration
+                rec.end_time = rec.start_time + timedelta(seconds=duration)
+            rec.file_size = seg_path.stat().st_size
+            rec.in_progress = False
+
+    await session.commit()
+
+
 async def _register_segment(
     session: AsyncSession, camera_id: int, seg_path: Path, config: AppConfig,
     camera_name: str = "",
 ) -> Recording | None:
-    """Create a Recording entry for a segment file. Renames completed segments to human-readable format."""
+    """Create a Recording entry for a segment file.
+
+    In-progress segments (rec_* prefix) are registered with estimated duration.
+    Completed segments are renamed and registered with probed duration.
+    """
     try:
         start_time = _parse_segment_time(seg_path)
         file_size = seg_path.stat().st_size
-        duration = _probe_duration(seg_path, config)
 
-        # Skip in-progress segments (no duration means ffmpeg is still writing)
-        if duration is None:
-            return None
-
-        # Rename to human-readable format if still using old naming
-        if seg_path.stem.startswith("rec_") and camera_name and duration:
-            try:
-                seg_path = _rename_segment(seg_path, camera_name, start_time, duration)
-                file_size = seg_path.stat().st_size
-            except PermissionError:
-                # ffmpeg still has the file locked; skip and retry next scan
+        if _is_in_progress(seg_path):
+            # In-progress segment — register with estimated duration
+            now = datetime.now()
+            elapsed = (now - start_time).total_seconds()
+            if elapsed < 5:
+                # Too fresh, skip (ffmpeg may not have written data yet)
                 return None
 
-        recording = Recording(
-            camera_id=camera_id,
-            file_path=str(seg_path),
-            start_time=start_time,
-            end_time=start_time + timedelta(seconds=duration),
-            file_size=file_size,
-            duration=duration,
-        )
+            recording = Recording(
+                camera_id=camera_id,
+                file_path=str(seg_path),
+                start_time=start_time,
+                end_time=now,
+                file_size=file_size,
+                duration=elapsed,
+                in_progress=True,
+            )
+        else:
+            # Completed segment — probe and register
+            duration = _probe_duration(seg_path, config)
+            if duration is None:
+                return None
+
+            # Rename to human-readable format if still using old naming
+            if seg_path.stem.startswith("rec_") and camera_name and duration:
+                try:
+                    seg_path = _rename_segment(seg_path, camera_name, start_time, duration)
+                    file_size = seg_path.stat().st_size
+                except PermissionError:
+                    return None
+
+            recording = Recording(
+                camera_id=camera_id,
+                file_path=str(seg_path),
+                start_time=start_time,
+                end_time=start_time + timedelta(seconds=duration),
+                file_size=file_size,
+                duration=duration,
+                in_progress=False,
+            )
+
         session.add(recording)
         logger.debug(
             "Registered segment",
-            extra={"camera_id": camera_id, "path": str(seg_path), "size": file_size},
+            extra={
+                "camera_id": camera_id,
+                "path": str(seg_path),
+                "size": file_size,
+                "in_progress": recording.in_progress,
+            },
         )
         return recording
     except Exception:
