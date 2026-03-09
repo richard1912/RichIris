@@ -124,6 +124,7 @@ async def _update_in_progress(
     if not in_progress_recs:
         return
 
+    finalized_recs = []
     for rec in in_progress_recs:
         seg_path = Path(rec.file_path)
         if not seg_path.exists():
@@ -157,6 +158,7 @@ async def _update_in_progress(
                     rec.file_path = str(new_path)
                 except (PermissionError, OSError):
                     pass
+                finalized_recs.append(rec)
                 logger.info("Finalized stale in-progress recording",
                             extra={"id": rec.id, "stale_seconds": stale_seconds})
             else:
@@ -175,6 +177,14 @@ async def _update_in_progress(
             rec.in_progress = False
 
     await session.commit()
+
+    # Enqueue thumbnails for newly finalized recordings
+    if finalized_recs:
+        from app.services.thumbnail import get_thumbnail_generator
+        gen = get_thumbnail_generator()
+        for rec in finalized_recs:
+            gen.enqueue(rec.id)
+        logger.debug("Enqueued thumbnails for finalized recordings", extra={"count": len(finalized_recs)})
 
 
 async def _register_segment(

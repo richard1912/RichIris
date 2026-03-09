@@ -29,20 +29,23 @@ async def get_live_playlist(camera_id: int):
     # Start live process on-demand if not running
     if not mgr.is_live_running(camera_id):
         await mgr.start_live(camera_id)
-        # Wait briefly for HLS playlist to be created
-        import asyncio
-        for _ in range(15):
-            await asyncio.sleep(0.5)
-            if _get_playlist_path(info.camera_name).exists():
-                break
-        else:
-            raise HTTPException(status_code=503, detail="Live stream starting, try again shortly")
 
     mgr.touch_live(camera_id)
 
+    # Wait for HLS playlist to be created (first segment can take 10+ seconds)
     playlist_path = _get_playlist_path(info.camera_name)
     if not playlist_path.exists():
-        raise HTTPException(status_code=404, detail="Playlist not yet available")
+        import asyncio
+        for _ in range(40):  # up to 20 seconds
+            await asyncio.sleep(0.5)
+            mgr.touch_live(camera_id)  # keep alive while waiting
+            if playlist_path.exists():
+                break
+            # Bail if the live process died
+            if not mgr.is_live_running(camera_id):
+                raise HTTPException(status_code=503, detail="Live stream failed to start")
+        else:
+            raise HTTPException(status_code=503, detail="Live stream starting, try again shortly")
 
     return FileResponse(
         playlist_path,
