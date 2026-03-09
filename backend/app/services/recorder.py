@@ -93,6 +93,24 @@ async def scan_new_segments(session: AsyncSession, camera_id: int, camera_name: 
             "Registered new segments",
             extra={"camera_id": camera_id, "count": registered},
         )
+
+    # Catch-all: enqueue any existing completed recordings without thumbnails
+    # (handles segments registered before thumbnail code was added)
+    from app.services.thumbnail import get_thumbnail_generator
+    result = await session.execute(
+        select(Recording).where(
+            Recording.camera_id == camera_id,
+            Recording.in_progress == False,
+            Recording.has_thumbnail == False,
+        )
+    )
+    orphaned = result.scalars().all()
+    if orphaned:
+        gen = get_thumbnail_generator()
+        for rec in orphaned:
+            gen.enqueue(rec.id)
+        logger.debug("Enqueued orphaned thumbnails", extra={"camera_id": camera_id, "count": len(orphaned)})
+
     return registered
 
 
