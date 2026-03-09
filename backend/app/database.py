@@ -69,6 +69,15 @@ async def init_db() -> None:
             logger.info("Migration: added has_thumbnail column to recordings")
         except Exception:
             pass  # Column already exists
+    # Migrate: add in_progress column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE recordings ADD COLUMN in_progress BOOLEAN NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added in_progress column to recordings")
+        except Exception:
+            pass  # Column already exists
     logger.info("Database tables created")
 
 

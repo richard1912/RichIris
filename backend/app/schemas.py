@@ -42,6 +42,7 @@ class RecordingResponse(BaseModel):
     end_time: datetime | None = None
     file_size: int | None = None
     duration: float | None = None
+    in_progress: bool = False
 
     model_config = {"from_attributes": True}
 

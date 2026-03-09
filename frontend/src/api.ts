@@ -77,6 +77,7 @@ export interface RecordingSegment {
   end_time: string | null
   file_size: number | null
   duration: number | null
+  in_progress: boolean
 }
 
 export function getStreamUrl(cameraId: number): string {
