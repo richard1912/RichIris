@@ -67,7 +67,13 @@ const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (data.fatal) {
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR && isLive) {
-          setTimeout(() => hls.loadSource(url), 3000)
+          // Retry after delay - loadSource resets and re-fetches manifest
+          setTimeout(() => {
+            hls.loadSource(url)
+            hls.startLoad()
+          }, 3000)
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError()
         } else {
           hls.destroy()
         }

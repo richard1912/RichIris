@@ -428,7 +428,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
     return (
       <div
         key={seg.ids.join(',')}
-        className="absolute top-0 bottom-0 bg-blue-500/60 hover:bg-blue-400/80 transition-colors"
+        className="absolute top-0 bottom-0 bg-blue-500/60"
         style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.2)}%` }}
         title={`${start.toLocaleTimeString()} (${Math.round(duration / 60)}m)`}
       />

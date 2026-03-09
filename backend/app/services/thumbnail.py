@@ -112,6 +112,10 @@ class ThumbnailGenerator:
                 seg_path, temp_dir, frame_count, tp.interval, tp.thumb_width, tp.thumb_height
             )
 
+            if len(frame_paths) == 0:
+                logger.error("No frames extracted", extra={"recording_id": recording_id})
+                return
+
             if len(frame_paths) < frame_count:
                 logger.warning("Failed to extract all frames", extra={
                     "recording_id": recording_id,
@@ -122,12 +126,19 @@ class ThumbnailGenerator:
             # Phase 2: Compose frames into sprite sheet
             await self._compose_sprite(frame_paths, out_path, cols, rows, tp.thumb_width, tp.thumb_height)
 
-            recording.has_thumbnail = True
-            await session.commit()
-            logger.info("Thumbnail sprite generated", extra={
-                "recording_id": recording_id,
-                "size": out_path.stat().st_size,
-            })
+            # Only mark as done if file actually exists
+            if out_path.exists():
+                recording.has_thumbnail = True
+                await session.commit()
+                logger.info("Thumbnail sprite generated", extra={
+                    "recording_id": recording_id,
+                    "size": out_path.stat().st_size,
+                })
+            else:
+                logger.error("Thumbnail file not created", extra={
+                    "recording_id": recording_id,
+                    "expected_path": str(out_path),
+                })
 
         finally:
             # Cleanup temp directory
@@ -153,11 +164,12 @@ class ThumbnailGenerator:
 
             cmd = [
                 ffmpeg_path,
+                "-hwaccel", "cuda",
                 "-ss", str(timestamp),
                 "-i", str(seg_path),
                 "-frames:v", "1",
                 "-vf", f"scale={width}:{height}",
-                "-q:v", "3",
+                "-q:v", "8",
                 "-y",
                 str(frame_path),
             ]
