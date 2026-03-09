@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import type { RecordingSegment, ThumbnailSpriteInfo } from '../api'
+import type { MutableRefObject } from 'react'
 import { fetchSegments, fetchThumbnails, createClipExport } from '../api'
 
 interface Props {
@@ -9,6 +10,7 @@ interface Props {
   isLive: boolean
   onPause?: () => void
   isPaused?: boolean
+  getNvrTime?: MutableRefObject<() => number | null>
 }
 
 const ZOOM_LEVELS = [1, 2, 4, 8, 12, 24] as const
@@ -24,7 +26,7 @@ function shiftDate(dateStr: string, days: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause, isPaused }: Props) {
+export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause, isPaused, getNvrTime }: Props) {
   const [selectedDate, setSelectedDate] = useState<string>(todayStr())
   const [segments, setSegments] = useState<RecordingSegment[]>([])
   const [loading, setLoading] = useState(false)
@@ -82,6 +84,44 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
     setZoomLevel(1)
     setViewportStart(0)
   }, [selectedDate])
+
+  // Poll NVR time and update playhead via interval
+  const selectedDateRef = useRef(selectedDate)
+  selectedDateRef.current = selectedDate
+  const viewportStartRef = useRef(viewportStart)
+  viewportStartRef.current = viewportStart
+  const visibleHoursRef = useRef(visibleHours)
+  visibleHoursRef.current = visibleHours
+
+  useEffect(() => {
+    if (!getNvrTime) return
+    const id = setInterval(() => {
+      if (draggingRef.current) return
+      const ms = getNvrTime.current()
+      if (ms == null) return
+
+      const d = new Date(ms)
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+      if (dateStr !== selectedDateRef.current) {
+        setPlayheadHour(null)
+        return
+      }
+
+      const hour = d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600
+      setPlayheadHour(hour)
+
+      // Auto-scroll viewport to keep playhead visible
+      const vs = viewportStartRef.current
+      const vh = visibleHoursRef.current
+      if (hour < vs || hour > vs + vh) {
+        let newStart = hour - vh / 2
+        newStart = Math.max(0, Math.min(24 - vh, newStart))
+        setViewportStart(newStart)
+      }
+    }, 250)
+    return () => clearInterval(id)
+  }, [getNvrTime])
 
   // Convert absolute hour (0-24) to viewport percentage (0-1)
   const hourToViewportPct = useCallback(
