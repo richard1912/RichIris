@@ -34,7 +34,6 @@ cameras:
 
 trickplay:
   enabled: true
-  interval: 300       # seconds between frames
+  interval: 300       # seconds between RTSP frame captures
   thumb_width: 192
   thumb_height: 108
-  workers: 6          # parallel thumbnail workers

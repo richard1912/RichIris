@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import type { RecordingSegment, ThumbnailSpriteInfo } from '../api'
+import type { RecordingSegment, ThumbnailInfo } from '../api'
 import type { MutableRefObject } from 'react'
 import { fetchSegments, fetchThumbnails, createClipExport } from '../api'
 
@@ -61,8 +61,8 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
   const [exportBusy, setExportBusy] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
 
-  // Thumbnail sprites
-  const [sprites, setSprites] = useState<ThumbnailSpriteInfo[]>([])
+  // Thumbnails
+  const [sprites, setSprites] = useState<ThumbnailInfo[]>([])
 
   useEffect(() => {
     if (cameraId === null) { setSegments([]); setSprites([]); return }
@@ -72,14 +72,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
       .catch(() => setSegments([]))
       .finally(() => setLoading(false))
     fetchThumbnails(cameraId, selectedDate)
-      .then((s) => {
-        setSprites(s)
-        // Preload sprite images
-        for (const sp of s) {
-          const img = new Image()
-          img.src = sp.sprite_url
-        }
-      })
+      .then(setSprites)
       .catch(() => setSprites([]))
 
     // Auto-poll segments every 15s when viewing today (to show in-progress segments growing)
@@ -184,29 +177,34 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
   }
 
   const getThumbnailForHour = useCallback(
-    (hour: number): { url: string; x: number; y: number; width: number; height: number } | null => {
+    (hour: number): { url: string; width: number; height: number } | null => {
       if (sprites.length === 0) return null
-      const timeStr = `${selectedDate}T${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}:${String(Math.floor(((hour * 60) % 1) * 60)).padStart(2, '0')}`
+      // Build HH:MM:SS from hour
+      const h = Math.floor(hour)
+      const m = Math.floor((hour - h) * 60)
+      const s = Math.floor(((hour - h) * 60 - m) * 60)
+      const targetSec = h * 3600 + m * 60 + s
+
+      // Find nearest thumbnail by timestamp
+      let best: ThumbnailInfo | null = null
+      let bestDist = Infinity
       for (const sp of sprites) {
-        if (timeStr >= sp.start_time && timeStr < sp.end_time) {
-          const startDate = new Date(sp.start_time)
-          const startHour = startDate.getHours() + startDate.getMinutes() / 60 + startDate.getSeconds() / 3600
-          const secondsIntoSegment = (hour - startHour) * 3600
-          const frameIndex = Math.max(0, Math.min(Math.floor(secondsIntoSegment / sp.interval), sp.cols * sp.rows - 1))
-          const col = frameIndex % sp.cols
-          const row = Math.floor(frameIndex / sp.cols)
-          return {
-            url: sp.sprite_url,
-            x: col * sp.thumb_width,
-            y: row * sp.thumb_height,
-            width: sp.thumb_width,
-            height: sp.thumb_height,
-          }
+        const parts = sp.timestamp.split(':')
+        const spSec = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2])
+        const dist = Math.abs(spSec - targetSec)
+        if (dist < bestDist) {
+          bestDist = dist
+          best = sp
         }
       }
-      return null
+
+      if (!best) return null
+      // Reject if nearest thumbnail is too far away (stale data)
+      const maxDist = (best.interval || 300) * 3
+      if (bestDist > maxDist) return null
+      return { url: best.url, width: best.thumb_width, height: best.thumb_height }
     },
-    [sprites, selectedDate],
+    [sprites],
   )
 
   const getBarPct = useCallback(
@@ -731,15 +729,12 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
                 style={{ left: `${hoverPct! * 100}%`, top: thumb ? `-${thumb.height + 36}px` : '-28px', transform: 'translateX(-50%)' }}
               >
                 {thumb && (
-                  <div
-                    className="rounded overflow-hidden shadow-lg mb-1 border border-neutral-600"
-                    style={{
-                      width: thumb.width,
-                      height: thumb.height,
-                      backgroundImage: `url(${thumb.url})`,
-                      backgroundPosition: `-${thumb.x}px -${thumb.y}px`,
-                      backgroundSize: 'auto',
-                    }}
+                  <img
+                    src={thumb.url}
+                    className="rounded shadow-lg mb-1 border border-neutral-600"
+                    width={thumb.width}
+                    height={thumb.height}
+                    alt=""
                   />
                 )}
                 <div className="bg-neutral-700 text-white text-xs px-2 py-1 rounded shadow-lg whitespace-nowrap text-center">

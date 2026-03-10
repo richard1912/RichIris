@@ -85,17 +85,12 @@ class RetentionResult(BaseModel):
     freed_bytes: int
 
 
-class ThumbnailSpriteInfo(BaseModel):
-    recording_id: int
-    start_time: datetime
-    end_time: datetime
-    duration: float
-    sprite_url: str
-    interval: int
-    cols: int
-    rows: int
+class ThumbnailInfo(BaseModel):
+    timestamp: str       # "HH:MM:SS"
+    url: str             # "/api/recordings/{camera_id}/thumb/{date}/{filename}"
     thumb_width: int
     thumb_height: int
+    interval: int        # capture interval in seconds (for staleness cutoff)
 
 
 class ClipExportCreate(BaseModel):

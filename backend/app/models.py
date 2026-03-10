@@ -38,7 +38,6 @@ class Recording(Base):
     end_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
-    has_thumbnail: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     in_progress: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     camera: Mapped["Camera"] = relationship(back_populates="recordings")
