@@ -115,20 +115,15 @@ export async function fetchSegments(cameraId: number, date: string): Promise<Rec
   return res.json()
 }
 
-export interface ThumbnailSpriteInfo {
-  recording_id: number
-  start_time: string
-  end_time: string
-  duration: number
-  sprite_url: string
-  interval: number
-  cols: number
-  rows: number
+export interface ThumbnailInfo {
+  timestamp: string
+  url: string
   thumb_width: number
   thumb_height: number
+  interval: number
 }
 
-export async function fetchThumbnails(cameraId: number, date: string): Promise<ThumbnailSpriteInfo[]> {
+export async function fetchThumbnails(cameraId: number, date: string): Promise<ThumbnailInfo[]> {
   const res = await fetch(`/api/recordings/${cameraId}/thumbnails?date=${date}`)
   if (!res.ok) return []
   return res.json()

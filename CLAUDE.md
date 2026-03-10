@@ -48,13 +48,13 @@ RichIris/
 │   │   │   ├── streams.py       # HLS /api/streams/{id}
 │   │   │   └── system.py        # /api/system/status + storage + retention
 │   │   └── services/
-│   │       ├── ffmpeg.py         # Command builder (composable functions)
-│   │       ├── stream_manager.py # FFmpeg process lifecycle
-│   │       ├── recorder.py       # Segment scanner + DB registration
-│   │       ├── clip_exporter.py  # Clip export (concat segments → MP4)
-│   │       ├── playback.py       # On-demand HEVC→H.264 transcode for playback
-│   │       ├── thumbnail.py      # Trickplay sprite sheet generator
-│   │       └── retention.py      # Age + storage-based retention cleanup
+│   │       ├── ffmpeg.py              # Command builder (composable functions)
+│   │       ├── stream_manager.py      # FFmpeg process lifecycle
+│   │       ├── recorder.py            # Segment scanner + DB registration
+│   │       ├── clip_exporter.py       # Clip export (concat segments → MP4)
+│   │       ├── playback.py            # On-demand HEVC→H.264 transcode for playback
+│   │       ├── thumbnail_capture.py   # Real-time RTSP thumbnail capture
+│   │       └── retention.py           # Age + storage-based retention cleanup
 │   ├── requirements.txt
 │   └── run.py                   # Uvicorn entry point (dev)
 ├── frontend/                    # React 19 + Vite + Tailwind
@@ -101,14 +101,14 @@ RichIris/
 - `GET /api/clips/{id}` - Get clip status
 - `GET /api/clips/{id}/download` - Download completed clip MP4
 - `DELETE /api/clips/{id}` - Delete clip and file
-- `GET /api/recordings/{id}/thumbnails?date=YYYY-MM-DD` - Thumbnail sprite metadata for a date
-- `GET /api/recordings/thumbnail/{recording_id}` - Serve sprite sheet JPEG (cached 24h)
+- `GET /api/recordings/{id}/thumbnails?date=YYYY-MM-DD` - Thumbnail metadata for a date (individual JPEGs)
+- `GET /api/recordings/{id}/thumb/{date}/{filename}` - Serve individual thumbnail JPEG (cached 24h)
 
 ## Frontend UI Flow
 - **Grid page**: Click camera → selects it (blue ring), shows timeline at bottom. Click same camera again → fullscreen.
 - **Fullscreen page**: Full video player + timeline + speed controls (shown in playback mode). Click timeline segment → instant MP4 remux (< 1s) → video plays natively (HEVC in browser).
 - **Speed controls**: -32x to 32x. 1x/2x/4x use native `video.playbackRate`. 16x/32x use interval-based jumping. Reverse speeds request new playback sessions at earlier times.
-- **Timeline**: LIVE button, date picker, zoomable timeline bar with blue segments. Mouse wheel zooms (1h-24h range), minimap shown when zoomed for pan navigation. Export clip mode, clips list with download/delete. Trickplay thumbnail preview on hover (sprite sheets).
+- **Timeline**: LIVE button, date picker, zoomable timeline bar with blue segments. Mouse wheel zooms (1h-24h range), minimap shown when zoomed for pan navigation. Export clip mode, clips list with download/delete. Trickplay thumbnail preview on hover (individual JPEGs captured from RTSP).
 - **Playback**: Uses direct `<video src="...">` for MP4 playback (no HLS.js). HlsPlayer is only used for live streams.
 
 ## Key Dependencies
@@ -126,4 +126,4 @@ RichIris/
 4. Clip Export (DONE)
 5. Retention + System monitoring (DONE)
 6. Production - LAN access via VPN, no reverse proxy/auth needed (DONE)
-7. Trickplay thumbnails - sprite sheet previews on timeline hover (DONE)
+7. Trickplay thumbnails - real-time RTSP capture, individual JPEG previews on timeline hover (DONE)

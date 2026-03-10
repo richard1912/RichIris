@@ -47,7 +47,6 @@ class TrickplayConfig:
     interval: int = 60
     thumb_width: int = 192
     thumb_height: int = 108
-    workers: int = 2
 
 
 @dataclass
@@ -95,7 +94,7 @@ def build_config(data: dict) -> AppConfig:
         storage=StorageConfig(**data.get("storage", {})),
         ffmpeg=FFmpegConfig(**data.get("ffmpeg", {})),
         retention=RetentionConfig(**data.get("retention", {})),
-        trickplay=TrickplayConfig(**data.get("trickplay", {})),
+        trickplay=TrickplayConfig(**{k: v for k, v in data.get("trickplay", {}).items() if k in TrickplayConfig.__dataclass_fields__}),
         logging=LoggingConfig(**data.get("logging", {})),
         cameras=parse_cameras(data.get("cameras")),
     )

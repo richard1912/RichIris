@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_config
 from app.database import get_db
 from app.models import Camera, Recording
-from app.schemas import RecordingResponse, ThumbnailSpriteInfo
+from app.schemas import RecordingResponse, ThumbnailInfo
 from app.services.playback import get_playback_manager
-from app.services.thumbnail import get_thumbnail_generator
+from app.services.thumbnail_capture import get_thumbnail_capture
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
@@ -184,13 +184,13 @@ async def get_segment_file(recording_id: int, db: AsyncSession = Depends(get_db)
     return FileResponse(path, media_type="video/mp2t")
 
 
-@router.get("/{camera_id}/thumbnails", response_model=list[ThumbnailSpriteInfo])
+@router.get("/{camera_id}/thumbnails", response_model=list[ThumbnailInfo])
 async def list_thumbnails(
     camera_id: int,
     date: date = Query(..., description="Date in YYYY-MM-DD format"),
     db: AsyncSession = Depends(get_db),
 ):
-    """List thumbnail sprite metadata for all segments on a date."""
+    """List thumbnail metadata for a camera on a date."""
     config = get_config()
     if not config.trickplay.enabled:
         return []
@@ -199,54 +199,40 @@ async def list_thumbnails(
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    start = datetime.combine(date, datetime.min.time())
-    end = datetime.combine(date, datetime.max.time())
-
-    result = await db.execute(
-        select(Recording)
-        .where(
-            Recording.camera_id == camera_id,
-            Recording.start_time >= start,
-            Recording.start_time <= end,
-            Recording.has_thumbnail == True,
-        )
-        .order_by(Recording.start_time)
-    )
-    recordings = result.scalars().all()
-
     tp = config.trickplay
-    sprites = []
-    for rec in recordings:
-        duration = rec.duration or 900.0
-        frame_count = max(1, int(duration / tp.interval))
-        cols = min(frame_count, 10)
-        import math
-        rows = math.ceil(frame_count / cols)
-        sprites.append(ThumbnailSpriteInfo(
-            recording_id=rec.id,
-            start_time=rec.start_time,
-            end_time=rec.end_time or rec.start_time,
-            duration=duration,
-            sprite_url=f"/api/recordings/thumbnail/{rec.id}",
-            interval=tp.interval,
-            cols=cols,
-            rows=rows,
+    capture = get_thumbnail_capture()
+    thumbs = capture.get_thumbnails_for_date(camera.name, str(date))
+
+    return [
+        ThumbnailInfo(
+            timestamp=t["timestamp"],
+            url=f"/api/recordings/{camera_id}/thumb/{date}/{t['filename']}",
             thumb_width=tp.thumb_width,
             thumb_height=tp.thumb_height,
-        ))
-    return sprites
+            interval=tp.interval,
+        )
+        for t in thumbs
+    ]
 
 
-@router.get("/thumbnail/{recording_id}")
-async def get_thumbnail_sprite(recording_id: int, db: AsyncSession = Depends(get_db)):
-    """Serve a thumbnail sprite JPEG."""
-    recording = await db.get(Recording, recording_id)
-    if not recording:
-        raise HTTPException(status_code=404, detail="Recording not found")
+@router.get("/{camera_id}/thumb/{date}/{filename}")
+async def get_thumbnail(
+    camera_id: int,
+    date: str,
+    filename: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve an individual thumbnail JPEG."""
+    camera = await db.get(Camera, camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
 
-    gen = get_thumbnail_generator()
-    path = gen.get_sprite_path(recording.camera_id, recording_id)
-    if not path:
+    from app.services.ffmpeg import sanitize_camera_name
+    config = get_config()
+    safe_name = sanitize_camera_name(camera.name)
+    path = Path(config.storage.recordings_dir) / safe_name / date / "thumbs" / filename
+
+    if not path.exists():
         raise HTTPException(status_code=404, detail="Thumbnail not found")
 
     return FileResponse(
