@@ -31,3 +31,10 @@ cameras:
   - name: "Camera 2"
     rtsp_url: "rtsp://user:password@192.168.1.101/stream1"
     enabled: true
+
+trickplay:
+  enabled: true
+  interval: 300       # seconds between frames
+  thumb_width: 192
+  thumb_height: 108
+  workers: 6          # parallel thumbnail workers
