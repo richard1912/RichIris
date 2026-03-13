@@ -8,9 +8,11 @@ interface Props {
   onPlayback: (start: string) => void
   onLive: () => void
   isLive: boolean
-  onPause?: () => void
   isPaused?: boolean
   getNvrTime?: MutableRefObject<() => number | null>
+  speed?: number
+  onSpeedChange?: (speed: number) => void
+  speeds?: readonly number[]
 }
 
 const ZOOM_LEVELS = [1, 2, 4, 8, 12, 24] as const
@@ -26,7 +28,7 @@ function shiftDate(dateStr: string, days: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause, isPaused, getNvrTime }: Props) {
+export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPaused, getNvrTime, speed, onSpeedChange, speeds }: Props) {
   const [selectedDate, setSelectedDate] = useState<string>(todayStr())
   const [segments, setSegments] = useState<RecordingSegment[]>([])
   const [loading, setLoading] = useState(false)
@@ -91,6 +93,13 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
     setZoomLevel(1)
     setViewportStart(0)
   }, [selectedDate])
+
+  // Clear stale seek target when switching to live
+  useEffect(() => {
+    if (isLive) {
+      seekTargetHour.current = null
+    }
+  }, [isLive])
 
   // Poll NVR time and update playhead via interval
   const selectedDateRef = useRef(selectedDate)
@@ -551,34 +560,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
 
   return (
     <div className="bg-neutral-900/90 backdrop-blur border-t border-neutral-800 px-4 py-3">
-      <div className="flex items-center gap-3 mb-2">
-        <button
-          onClick={() => {
-            manualPanRef.current = false
-            onLive()
-          }}
-          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-            isLive && !isPaused
-              ? 'bg-red-600 text-white'
-              : 'bg-neutral-800 text-neutral-400 hover:text-white'
-          }`}
-        >
-          LIVE
-        </button>
-
-        {isLive && onPause && (
-          <button
-            onClick={onPause}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              isPaused
-                ? 'bg-yellow-600 text-white'
-                : 'bg-neutral-800 text-neutral-400 hover:text-white'
-            }`}
-          >
-            {isPaused ? 'Resume' : 'Pause Feed'}
-          </button>
-        )}
-
+      <div className="relative flex items-center gap-3 mb-2">
         <div className="flex items-center gap-1">
           <button
             onClick={() => {
@@ -621,6 +603,40 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, onPause
           <span className="text-xs text-neutral-500">
             {visibleHours < 1 ? `${Math.round(visibleHours * 60)}m` : `${visibleHours}h`} view
           </span>
+        )}
+
+        {/* Speed controls + LIVE button - centred */}
+        {speeds && onSpeedChange && (
+          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-1">
+            {speeds.map((s) => (
+              <button
+                key={s}
+                onClick={() => onSpeedChange(s)}
+                className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                  !isLive && speed === s
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-neutral-800 text-neutral-400 hover:text-white'
+                }`}
+              >
+                {s}x
+              </button>
+            ))}
+            <button
+              onClick={() => {
+                manualPanRef.current = false
+                onLive()
+              }}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                isLive && !isPaused
+                  ? 'bg-red-600 text-white'
+                  : isLive && isPaused
+                  ? 'bg-yellow-600 text-white'
+                  : 'bg-neutral-800 text-neutral-400 hover:text-white'
+              }`}
+            >
+              LIVE
+            </button>
+          </div>
         )}
 
         {/* Export controls */}
