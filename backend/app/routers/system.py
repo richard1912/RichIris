@@ -1,6 +1,7 @@
 """System status endpoints."""
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
@@ -14,6 +15,20 @@ from app.services.stream_manager import get_stream_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/system", tags=["system"])
+
+
+@router.get("/time")
+async def get_server_time():
+    """Return server local time and UTC offset for client timezone alignment."""
+    now = datetime.now()
+    utc_now = datetime.utcnow()
+    # Server's UTC offset in minutes (e.g. +660 for UTC+11)
+    utc_offset_min = round((now - utc_now).total_seconds() / 60)
+    return {
+        "iso": now.isoformat(),
+        "epoch_ms": int(now.timestamp() * 1000),
+        "utc_offset_min": utc_offset_min,
+    }
 
 
 @router.get("/status", response_model=SystemStatus)

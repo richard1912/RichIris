@@ -208,3 +208,16 @@ export async function runRetention(): Promise<RetentionResult> {
   if (!res.ok) throw new Error('Failed to run retention')
   return res.json()
 }
+
+/**
+ * Fetch server's UTC offset and return the timezone difference in ms
+ * (server_utc_offset - client_utc_offset). Adding this to a local Date
+ * shifts its getHours()/getMinutes() to match server-local time.
+ */
+export async function fetchServerTzOffsetMs(): Promise<number> {
+  const res = await fetch('/api/system/time')
+  if (!res.ok) return 0
+  const data: { utc_offset_min: number } = await res.json()
+  const clientOffsetMin = -(new Date().getTimezoneOffset()) // e.g. +660 for UTC+11
+  return (data.utc_offset_min - clientOffsetMin) * 60 * 1000
+}
