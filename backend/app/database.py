@@ -78,6 +78,15 @@ async def init_db() -> None:
             logger.info("Migration: added in_progress column to recordings")
         except Exception:
             pass  # Column already exists
+    # Migrate: add sub_stream_url column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN sub_stream_url VARCHAR(500)")
+            )
+            logger.info("Migration: added sub_stream_url column to cameras")
+        except Exception:
+            pass  # Column already exists
     logger.info("Database tables created")
 
 

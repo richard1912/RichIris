@@ -2,6 +2,7 @@ export interface Camera {
   id: number
   name: string
   rtsp_url: string
+  sub_stream_url: string | null
   enabled: boolean
   width: number | null
   height: number | null
@@ -26,7 +27,7 @@ export interface SystemStatus {
   active_streams: number
 }
 
-export async function createCamera(data: { name: string; rtsp_url: string; enabled?: boolean; rotation?: number }): Promise<Camera> {
+export async function createCamera(data: { name: string; rtsp_url: string; sub_stream_url?: string | null; enabled?: boolean; rotation?: number }): Promise<Camera> {
   const res = await fetch('/api/cameras', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -39,7 +40,7 @@ export async function createCamera(data: { name: string; rtsp_url: string; enabl
   return res.json()
 }
 
-export async function updateCamera(id: number, data: { name?: string; rtsp_url?: string; enabled?: boolean; rotation?: number }): Promise<Camera> {
+export async function updateCamera(id: number, data: { name?: string; rtsp_url?: string; sub_stream_url?: string | null; enabled?: boolean; rotation?: number }): Promise<Camera> {
   const res = await fetch(`/api/cameras/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -78,10 +79,6 @@ export interface RecordingSegment {
   file_size: number | null
   duration: number | null
   in_progress: boolean
-}
-
-export function getStreamUrl(cameraId: number): string {
-  return `/api/streams/${cameraId}/index.m3u8`
 }
 
 export interface PlaybackSession {

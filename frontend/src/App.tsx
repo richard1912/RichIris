@@ -15,7 +15,6 @@ export default function App() {
   const [showSystem, setShowSystem] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<'live' | 'playback'>('live')
-  const [paused, setPaused] = useState(false)
   const [modalCamera, setModalCamera] = useState<Camera | undefined>(undefined)
   const [showModal, setShowModal] = useState(false)
 
@@ -59,11 +58,6 @@ export default function App() {
 
   const handleLive = useCallback(() => {
     setMode('live')
-    setPaused(false)
-  }, [])
-
-  const handlePause = useCallback(() => {
-    setPaused(p => !p)
   }, [])
 
   const openAddModal = useCallback(() => {
@@ -119,7 +113,7 @@ export default function App() {
           onEdit={openEditModal}
           onAdd={openAddModal}
           selectedId={selectedCamera?.id ?? null}
-          paused={paused}
+          paused={false}
         />
       </main>
 
@@ -149,8 +143,6 @@ export default function App() {
           onPlayback={handlePlayback}
           onLive={handleLive}
           isLive={mode === 'live'}
-          onPause={handlePause}
-          isPaused={paused}
         />
       </div>
 
