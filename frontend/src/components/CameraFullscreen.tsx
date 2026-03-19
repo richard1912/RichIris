@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import type { Camera, StreamStatus } from '../api'
 import { startPlaybackSession, fetchServerTzOffsetMs } from '../api'
-import HlsPlayer from './HlsPlayer'
+import MsePlayer from './MsePlayer'
 import Timeline from './Timeline'
 
 interface Props {
@@ -30,6 +30,8 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
   const speedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // Guard to prevent overlapping reverse session loads
   const reverseLoadingRef = useRef(false)
+  // Generation counter to cancel stale async operations (Bug 3)
+  const generationRef = useRef(0)
 
   // Timezone difference: server_tz - client_tz in ms.
   // Adding this to Date.now() makes getHours() return server-local hours.
@@ -44,6 +46,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
       speedIntervalRef.current = null
     }
     reverseLoadingRef.current = false
+    generationRef.current += 1
   }, [])
 
   const handlePlayback = useCallback(
@@ -109,52 +112,93 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
       clearSpeedInterval()
       vid.pause()
 
+      const gen = generationRef.current
       const TICK_MS = 500
       const jumpSeconds = reverseSpeed * (TICK_MS / 1000) // negative
 
       speedIntervalRef.current = setInterval(() => {
-        if (reverseLoadingRef.current) return // waiting for earlier session
+        if (reverseLoadingRef.current) return
+        if (generationRef.current !== gen) return
         const v = videoRef.current
         if (!v) return
 
-        virtualTimeRef.current += jumpSeconds * 1000
-        v.currentTime += jumpSeconds
+        // Bug 2: Check boundary BEFORE applying the jump
+        const proposedTime = v.currentTime + jumpSeconds
 
-        if (v.currentTime <= 0.5) {
+        if (proposedTime <= 0.5) {
           // Reached start of this video — load the PREVIOUS 30-min window
           reverseLoadingRef.current = true
+
+          // Bug 2: Snap virtualTimeRef to playbackStartTimeRef to eliminate drift
+          if (playbackStartTimeRef.current) {
+            virtualTimeRef.current = new Date(playbackStartTimeRef.current).getTime()
+          }
+
           const WINDOW_MS = 30 * 60 * 1000
-          const newStart = formatLocalISO(virtualTimeRef.current - WINDOW_MS)
+          const newStartMs = virtualTimeRef.current - WINDOW_MS
+          const newStart = formatLocalISO(newStartMs)
 
           startPlaybackSession(camera.id, newStart)
             .then(({ playback_url, window_end, has_more }) => {
+              // Bug 3: Discard if generation changed
+              if (generationRef.current !== gen) return
               const v2 = videoRef.current
               if (!v2) { reverseLoadingRef.current = false; return }
 
-              // Update React state for UI consistency
-              setPlaybackUrl(playback_url)
-              setWindowEnd(window_end)
-              setHasMore(has_more)
               playbackStartTimeRef.current = newStart
 
-              // Directly set video src (don't rely on React re-render)
+              // Bug 6: Set DOM source first, defer React state
               v2.src = playback_url
               v2.load()
 
-              const onReady = () => {
-                v2.currentTime = Math.max(0, v2.duration - 1)
-                v2.pause()
-                reverseLoadingRef.current = false
+              const onMetadata = () => {
+                if (generationRef.current !== gen) return
+                // Bug 4: Seek to end, then wait for seeked
+                const seekTarget = Math.max(0, v2.duration - 1)
+                v2.currentTime = seekTarget
+
+                const onSeeked = () => {
+                  if (generationRef.current !== gen) return
+                  // Force frame rendering
+                  v2.play().then(() => {
+                    v2.pause()
+                    // Bug 2: Resync virtualTimeRef after loading new session
+                    virtualTimeRef.current = newStartMs + seekTarget * 1000
+                    // Bug 6: Update React state last
+                    setPlaybackUrl(playback_url)
+                    setWindowEnd(window_end)
+                    setHasMore(has_more)
+                    reverseLoadingRef.current = false
+                  }).catch(() => {
+                    v2.pause()
+                    virtualTimeRef.current = newStartMs + seekTarget * 1000
+                    setPlaybackUrl(playback_url)
+                    setWindowEnd(window_end)
+                    setHasMore(has_more)
+                    reverseLoadingRef.current = false
+                  })
+                }
+                v2.addEventListener('seeked', onSeeked, { once: true })
               }
+
               if (v2.readyState >= 1) {
-                onReady()
+                onMetadata()
               } else {
-                v2.addEventListener('loadedmetadata', onReady, { once: true })
+                v2.addEventListener('loadedmetadata', onMetadata, { once: true })
               }
             })
             .catch(() => {
-              reverseLoadingRef.current = false
+              // Bug 5: Stop reverse, show error, don't retry
+              if (generationRef.current !== gen) return
+              clearSpeedInterval()
+              setSpeed(1)
+              setPlaybackError('No earlier recordings available')
+              setTimeout(() => setPlaybackError(null), 3000)
             })
+        } else {
+          // Normal tick
+          v.currentTime = proposedTime
+          virtualTimeRef.current += jumpSeconds * 1000
         }
       }, TICK_MS)
     },
@@ -170,14 +214,18 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
 
       // If in live mode, start a playback session first
       if (mode === 'live' || !video) {
-        const startMs = Date.now() + tzOffsetMsRef.current - 60 * 1000
+        // Bug 1: 30-minute buffer to match backend PLAYBACK_WINDOW
+        const startMs = Date.now() + tzOffsetMsRef.current - 30 * 60 * 1000
         const startStr = formatLocalISO(startMs)
+        const gen = generationRef.current
         setPlaybackLoading(true)
         setPlaybackError(null)
         setPaused(false)
 
         startPlaybackSession(camera.id, startStr)
           .then(({ playback_url, window_end, has_more }) => {
+            // Bug 3: Discard if generation changed
+            if (generationRef.current !== gen) return
             setPlaybackUrl(playback_url)
             setWindowEnd(window_end)
             setHasMore(has_more)
@@ -188,10 +236,12 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
 
             // Wait for video element, then apply speed
             const waitForVideo = () => {
+              if (generationRef.current !== gen) return
               const v = videoRef.current
               if (!v) { requestAnimationFrame(waitForVideo); return }
 
               const applyOnReady = () => {
+                if (generationRef.current !== gen) return
                 if (newSpeed < 0) {
                   v.currentTime = Math.max(0, v.duration - 1)
                   virtualTimeRef.current = startMs + v.currentTime * 1000
@@ -206,6 +256,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
                   const TICK_MS = 500
                   const jumpSec = newSpeed * (TICK_MS / 1000)
                   speedIntervalRef.current = setInterval(() => {
+                    if (generationRef.current !== gen) return
                     virtualTimeRef.current += jumpSec * 1000
                     const vid = videoRef.current
                     if (!vid) return
@@ -225,6 +276,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
             requestAnimationFrame(waitForVideo)
           })
           .catch((e) => {
+            if (generationRef.current !== gen) return
             setPlaybackError(e instanceof Error ? e.message : 'Playback failed')
             setPlaybackLoading(false)
           })
@@ -334,7 +386,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
           paused ? (
             <div className="text-yellow-500 text-sm">Feed paused</div>
           ) : running ? (
-            <HlsPlayer
+            <MsePlayer
               cameraId={camera.id}
               muted
               rotation={rot}

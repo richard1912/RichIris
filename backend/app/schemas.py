@@ -8,6 +8,7 @@ from pydantic import BaseModel
 class CameraCreate(BaseModel):
     name: str
     rtsp_url: str
+    sub_stream_url: str | None = None
     enabled: bool = True
     rotation: int = 0
 
@@ -15,6 +16,7 @@ class CameraCreate(BaseModel):
 class CameraUpdate(BaseModel):
     name: str | None = None
     rtsp_url: str | None = None
+    sub_stream_url: str | None = None
     enabled: bool | None = None
     rotation: int | None = None
 
@@ -23,6 +25,7 @@ class CameraResponse(BaseModel):
     id: int
     name: str
     rtsp_url: str
+    sub_stream_url: str | None = None
     enabled: bool
     width: int | None = None
     height: int | None = None

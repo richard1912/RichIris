@@ -39,7 +39,11 @@ async def get_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=CameraResponse, status_code=201)
 async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
     """Create a new camera."""
-    camera = Camera(name=data.name, rtsp_url=data.rtsp_url, enabled=data.enabled, rotation=data.rotation)
+    camera = Camera(
+        name=data.name, rtsp_url=data.rtsp_url,
+        sub_stream_url=data.sub_stream_url or None,
+        enabled=data.enabled, rotation=data.rotation,
+    )
     db.add(camera)
     await db.commit()
     await db.refresh(camera)
@@ -47,7 +51,7 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
 
     if camera.enabled:
         mgr = get_stream_manager()
-        await mgr.start_stream(camera.id, camera.name, camera.rtsp_url)
+        await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
 
     return camera
 
@@ -72,6 +76,9 @@ async def update_camera(
     if data.rtsp_url is not None:
         camera.rtsp_url = data.rtsp_url
         needs_restart = True
+    if "sub_stream_url" in (data.model_fields_set or set()):
+        camera.sub_stream_url = data.sub_stream_url or None
+        needs_restart = True
     if data.enabled is not None:
         camera.enabled = data.enabled
     if data.rotation is not None:
@@ -89,7 +96,7 @@ async def update_camera(
         await mgr.stop_stream(camera.id)
     elif needs_restart:
         await mgr.stop_stream(camera.id)
-        await mgr.start_stream(camera.id, camera.name, camera.rtsp_url)
+        await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
 
     return camera
 

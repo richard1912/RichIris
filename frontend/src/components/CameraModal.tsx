@@ -13,6 +13,7 @@ export default function CameraModal({ camera, onClose, onSaved }: Props) {
   const [name, setName] = useState(camera?.name ?? '')
   const [rtspUrl, setRtspUrl] = useState(camera?.rtsp_url ?? '')
   const [enabled, setEnabled] = useState(camera?.enabled ?? true)
+  const [subStreamUrl, setSubStreamUrl] = useState(camera?.sub_stream_url ?? '')
   const [rotation, setRotation] = useState(camera?.rotation ?? 0)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -26,10 +27,11 @@ export default function CameraModal({ camera, onClose, onSaved }: Props) {
     setSaving(true)
     setError(null)
     try {
+      const sub = subStreamUrl.trim() || null
       if (isEdit) {
-        await updateCamera(camera.id, { name, rtsp_url: rtspUrl, enabled, rotation })
+        await updateCamera(camera.id, { name, rtsp_url: rtspUrl, sub_stream_url: sub, enabled, rotation })
       } else {
-        await createCamera({ name, rtsp_url: rtspUrl, enabled, rotation })
+        await createCamera({ name, rtsp_url: rtspUrl, sub_stream_url: sub, enabled, rotation })
       }
       onSaved()
     } catch (e) {
@@ -75,6 +77,14 @@ export default function CameraModal({ camera, onClose, onSaved }: Props) {
           value={rtspUrl}
           onChange={e => setRtspUrl(e.target.value)}
           placeholder="rtsp://user:pass@192.168.1.100/stream1"
+        />
+
+        <label className="block text-sm text-neutral-400 mb-1">Sub-Stream URL <span className="text-neutral-500">(optional)</span></label>
+        <input
+          className="w-full bg-neutral-800 border border-neutral-600 rounded px-3 py-2 text-sm mb-3 focus:outline-none focus:border-blue-500"
+          value={subStreamUrl}
+          onChange={e => setSubStreamUrl(e.target.value)}
+          placeholder="rtsp://user:pass@192.168.1.100/stream2"
         />
 
         <label className="block text-sm text-neutral-400 mb-1">Rotation</label>

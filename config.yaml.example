@@ -4,7 +4,6 @@ server:
 
 storage:
   recordings_dir: "G:/RichIris"
-  live_dir: "C:/path/to/RichIris/data/live"
   database_url: "sqlite+aiosqlite:///C:/path/to/RichIris/data/richiris.db"
 
 ffmpeg:
@@ -12,9 +11,11 @@ ffmpeg:
   ffprobe_path: "C:/path/to/ffprobe.exe"
   hwaccel: "cuda"
   segment_duration: 900  # 15 minutes in seconds
-  hls_time: 2
-  hls_list_size: 5
   rtsp_transport: "tcp"
+
+go2rtc:
+  host: "localhost"
+  port: 1984
 
 retention:
   max_age_days: 30
@@ -27,13 +28,15 @@ logging:
 cameras:
   - name: "Camera 1"
     rtsp_url: "rtsp://user:password@192.168.1.100/stream1"
+    sub_stream_url: "rtsp://user:password@192.168.1.100/stream2"  # optional: H.264 sub-stream for live view (zero transcode via go2rtc)
     enabled: true
   - name: "Camera 2"
     rtsp_url: "rtsp://user:password@192.168.1.101/stream1"
+    sub_stream_url: ""  # leave empty to use main stream for live view
     enabled: true
 
 trickplay:
   enabled: true
-  interval: 300       # seconds between RTSP frame captures
+  interval: 60        # seconds between RTSP frame captures
   thumb_width: 192
   thumb_height: 108

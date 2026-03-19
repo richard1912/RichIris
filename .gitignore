@@ -31,6 +31,8 @@ Desktop.ini
 .env
 *.env
 config.yaml
+go2rtc/go2rtc.yaml
+go2rtc/go2rtc.exe
 
 # Logs
 *.log

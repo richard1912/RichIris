@@ -1,5 +1,5 @@
 import type { Camera, StreamStatus } from '../api'
-import HlsPlayer from './HlsPlayer'
+import MsePlayer from './MsePlayer'
 
 interface Props {
   camera: Camera
@@ -34,7 +34,7 @@ export default function CameraCard({ camera, stream, onClick, onEdit, selected, 
           {paused ? (
             <div className="text-yellow-500 text-sm">Paused</div>
           ) : running ? (
-            <HlsPlayer cameraId={camera.id} muted />
+            <MsePlayer cameraId={camera.id} muted />
           ) : (
             <div className="text-neutral-600 text-sm">
               {camera.enabled ? 'Connecting...' : 'Disabled'}

@@ -47,6 +47,9 @@ async def lifespan(app: FastAPI):
 
     cameras_list = await _start_enabled_cameras()
 
+    # Verify go2rtc is reachable (live view depends on it, recording does not)
+    await _check_go2rtc_health()
+
     thumb_capture = get_thumbnail_capture()
     thumb_capture.start(cameras_list)
 
@@ -125,6 +128,20 @@ def _kill_orphaned_ffmpeg() -> None:
         logger.exception("Failed to clean up orphaned ffmpeg processes")
 
 
+async def _check_go2rtc_health() -> None:
+    """Retry loop to verify go2rtc is responding. Logs warning if unavailable."""
+    from app.services.go2rtc_client import get_go2rtc_client
+
+    client = get_go2rtc_client()
+    for attempt in range(5):
+        if await client.is_healthy():
+            logger.info("go2rtc health check passed")
+            return
+        logger.warning("go2rtc not responding, retrying", extra={"attempt": attempt + 1})
+        await asyncio.sleep(2)
+    logger.error("go2rtc unavailable — live view will not work, recording continues")
+
+
 async def _start_enabled_cameras() -> list:
     """Start streams for all enabled cameras in the database. Returns camera list."""
     factory = get_session_factory()
@@ -137,7 +154,7 @@ async def _start_enabled_cameras() -> list:
     mgr = get_stream_manager()
     for cam in cameras_list:
         logger.info("Auto-starting camera stream", extra={"camera_id": cam.id, "camera_name": cam.name})
-        await mgr.start_stream(cam.id, cam.name, cam.rtsp_url)
+        await mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url)
 
     logger.info("Started enabled cameras", extra={"count": len(cameras_list)})
     return cameras_list

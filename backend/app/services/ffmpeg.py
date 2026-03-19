@@ -1,5 +1,7 @@
 """FFmpeg command builder - composable functions for building ffmpeg commands."""
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -43,58 +45,11 @@ def build_recording_output(camera_name: str, config: AppConfig) -> list[str]:
     return args
 
 
-def build_live_output(camera_name: str, config: AppConfig) -> list[str]:
-    """Build ffmpeg output args for HLS live streaming (transcode to H.264 for browser compatibility)."""
-    safe_name = sanitize_camera_name(camera_name)
-    live_dir = Path(config.storage.live_dir) / safe_name
-    playlist_path = str(live_dir / "stream.m3u8")
-
-    args = [
-        "-map", "0:v",
-        "-map", "0:a?",
-        "-vf", "scale=1920:-2",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-b:v", "2M",
-        "-maxrate", "2.5M",
-        "-bufsize", "4M",
-        "-g", "48",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-f", "hls",
-        "-hls_time", str(config.ffmpeg.hls_time),
-        "-hls_list_size", str(config.ffmpeg.hls_list_size),
-        "-hls_flags", "delete_segments+temp_file",
-        "-hls_segment_filename", str(live_dir / "segment_%03d.ts"),
-        playlist_path,
-    ]
-    logger.debug("Built live output", extra={"camera": camera_name, "playlist": playlist_path})
-    return args
-
-
 def build_recording_command(camera_name: str, rtsp_url: str, config: AppConfig) -> list[str]:
     """Build ffmpeg command for recording only (passthrough, no transcode)."""
     cmd = build_input_args(rtsp_url, config, hwaccel=False)
     cmd.extend(build_recording_output(camera_name, config))
     logger.info("Built recording-only ffmpeg command", extra={"camera": camera_name})
-    return cmd
-
-
-def build_live_command(camera_name: str, rtsp_url: str, config: AppConfig) -> list[str]:
-    """Build ffmpeg command for live HLS output only (transcode)."""
-    cmd = build_input_args(rtsp_url, config)
-    cmd.extend(build_live_output(camera_name, config))
-    logger.info("Built live-only ffmpeg command", extra={"camera": camera_name})
-    return cmd
-
-
-def build_full_command(camera_name: str, rtsp_url: str, config: AppConfig) -> list[str]:
-    """Build the complete ffmpeg command for a camera (recording + live)."""
-    cmd = build_input_args(rtsp_url, config)
-    cmd.extend(build_recording_output(camera_name, config))
-    cmd.extend(build_live_output(camera_name, config))
-    logger.info("Built full ffmpeg command", extra={"camera": camera_name})
     return cmd
 
 
@@ -113,3 +68,25 @@ def build_probe_command(rtsp_url: str, config: AppConfig) -> list[str]:
         "-rtsp_transport", config.ffmpeg.rtsp_transport,
         rtsp_url,
     ]
+
+
+async def probe_video_codec(rtsp_url: str, config: AppConfig) -> str | None:
+    """Probe an RTSP URL and return the video codec name (e.g. 'h264', 'hevc')."""
+    cmd = build_probe_command(rtsp_url, config)
+    logger.debug("Probing video codec", extra={"url": rtsp_url})
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        data = json.loads(stdout.decode())
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                codec = stream.get("codec_name", "").lower()
+                logger.info("Probed video codec", extra={"url": rtsp_url, "codec": codec})
+                return codec
+    except Exception:
+        logger.exception("Failed to probe video codec", extra={"url": rtsp_url})
+    return None

@@ -20,7 +20,6 @@ class ServerConfig:
 @dataclass
 class StorageConfig:
     recordings_dir: str = "G:/RichIris"
-    live_dir: str = "C:/01-Self-Hosting/RichIris/data/live"
     database_url: str = "sqlite+aiosqlite:///C:/01-Self-Hosting/RichIris/data/richiris.db"
 
 
@@ -30,9 +29,13 @@ class FFmpegConfig:
     ffprobe_path: str = "ffprobe"
     hwaccel: str = "cuda"
     segment_duration: int = 900
-    hls_time: int = 2
-    hls_list_size: int = 5
     rtsp_transport: str = "tcp"
+
+
+@dataclass
+class Go2rtcConfig:
+    host: str = "localhost"
+    port: int = 1984
 
 
 @dataclass
@@ -59,6 +62,7 @@ class LoggingConfig:
 class CameraConfig:
     name: str = ""
     rtsp_url: str = ""
+    sub_stream_url: str = ""
     enabled: bool = True
 
 
@@ -67,6 +71,7 @@ class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     ffmpeg: FFmpegConfig = field(default_factory=FFmpegConfig)
+    go2rtc: Go2rtcConfig = field(default_factory=Go2rtcConfig)
     retention: RetentionConfig = field(default_factory=RetentionConfig)
     trickplay: TrickplayConfig = field(default_factory=TrickplayConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -93,6 +98,7 @@ def build_config(data: dict) -> AppConfig:
         server=ServerConfig(**data.get("server", {})),
         storage=StorageConfig(**data.get("storage", {})),
         ffmpeg=FFmpegConfig(**data.get("ffmpeg", {})),
+        go2rtc=Go2rtcConfig(**data.get("go2rtc", {})),
         retention=RetentionConfig(**data.get("retention", {})),
         trickplay=TrickplayConfig(**{k: v for k, v in data.get("trickplay", {}).items() if k in TrickplayConfig.__dataclass_fields__}),
         logging=LoggingConfig(**data.get("logging", {})),
@@ -102,10 +108,9 @@ def build_config(data: dict) -> AppConfig:
 
 def validate_paths(config: AppConfig) -> None:
     """Ensure required directories exist, creating them if needed."""
-    for dir_path in (config.storage.recordings_dir, config.storage.live_dir):
-        p = Path(dir_path)
-        p.mkdir(parents=True, exist_ok=True)
-        logger.debug("Ensured directory exists", extra={"path": str(p)})
+    p = Path(config.storage.recordings_dir)
+    p.mkdir(parents=True, exist_ok=True)
+    logger.debug("Ensured directory exists", extra={"path": str(p)})
 
 
 def load_config(path: Path | None = None) -> AppConfig:
