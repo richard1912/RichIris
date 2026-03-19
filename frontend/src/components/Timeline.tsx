@@ -56,6 +56,13 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
   const minimapBarRef = useRef<HTMLDivElement>(null)
   const manualPanRef = useRef(false) // Track if user has manually panned away from live
 
+  // Touch gesture state
+  const touchModeRef = useRef<'none' | 'scrub' | 'pinch'>('none')
+  const pinchStartDistRef = useRef(0)
+  const pinchStartZoomRef = useRef(1)
+  const pinchStartViewportRef = useRef(0)
+  const pinchMidPctRef = useRef(0)
+
   // Clip export state
   const [exportMode, setExportMode] = useState(false)
   const [exportStart, setExportStart] = useState<number | null>(null) // absolute hour
@@ -216,13 +223,20 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
     [sprites],
   )
 
-  const getBarPct = useCallback(
-    (e: React.MouseEvent<HTMLDivElement> | MouseEvent): number => {
+  const getBarPctFromX = useCallback(
+    (clientX: number): number => {
       if (!barRef.current) return 0
       const rect = barRef.current.getBoundingClientRect()
-      return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+      return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
     },
     [],
+  )
+
+  const getBarPct = useCallback(
+    (e: React.MouseEvent<HTMLDivElement> | MouseEvent): number => {
+      return getBarPctFromX(e.clientX)
+    },
+    [getBarPctFromX],
   )
 
   const triggerPlaybackAtHour = useCallback(
@@ -240,7 +254,12 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
       const cursorPct = getBarPct(e as unknown as React.MouseEvent<HTMLDivElement>)
       const cursorHour = viewportPctToHour(cursorPct)
 
-      const currentIdx = ZOOM_LEVELS.indexOf(zoomLevel as typeof ZOOM_LEVELS[number])
+      let currentIdx = 0
+      let bestDist = Infinity
+      for (let i = 0; i < ZOOM_LEVELS.length; i++) {
+        const d = Math.abs(ZOOM_LEVELS[i] - zoomLevel)
+        if (d < bestDist) { bestDist = d; currentIdx = i }
+      }
       let newIdx: number
       if (e.deltaY < 0) {
         // Scroll up = zoom in
@@ -296,6 +315,43 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
     [getBarPct, viewportPctToHour, exportMode, segments, triggerPlaybackAtHour],
   )
 
+  // Playhead touch drag
+  const handlePlayheadTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      e.stopPropagation()
+      e.preventDefault()
+      if (e.touches.length !== 1) return
+      draggingRef.current = true
+      setDraggingPlayhead(true)
+
+      const onMove = (ev: TouchEvent) => {
+        if (!draggingRef.current || ev.touches.length < 1) return
+        ev.preventDefault()
+        const pct = getBarPctFromX(ev.touches[0].clientX)
+        setPlayheadHour(viewportPctToHour(pct))
+      }
+      const onEnd = (ev: TouchEvent) => {
+        if (!draggingRef.current) return
+        draggingRef.current = false
+        setDraggingPlayhead(false)
+        if (ev.changedTouches.length > 0) {
+          const pct = getBarPctFromX(ev.changedTouches[0].clientX)
+          const hour = viewportPctToHour(pct)
+          setPlayheadHour(hour)
+          seekTargetHour.current = hour
+          if (!exportMode && segments.length > 0) {
+            triggerPlaybackAtHour(hour)
+          }
+        }
+        window.removeEventListener('touchmove', onMove)
+        window.removeEventListener('touchend', onEnd)
+      }
+      window.addEventListener('touchmove', onMove, { passive: false })
+      window.addEventListener('touchend', onEnd)
+    },
+    [getBarPctFromX, viewportPctToHour, exportMode, segments, triggerPlaybackAtHour],
+  )
+
   const handleBarClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const pct = getBarPct(e)
@@ -324,6 +380,95 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
       triggerPlaybackAtHour(hour)
     },
     [segments, triggerPlaybackAtHour, exportMode, exportStart, exportEnd, getBarPct, viewportPctToHour],
+  )
+
+  // Touch: pinch-to-zoom and single-finger scrub with trickplay
+  const handleBarTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      if (e.touches.length >= 2) {
+        e.preventDefault()
+        touchModeRef.current = 'pinch'
+        const t0 = e.touches[0], t1 = e.touches[1]
+        pinchStartDistRef.current = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+        pinchStartZoomRef.current = zoomLevel
+        pinchStartViewportRef.current = viewportStart
+        pinchMidPctRef.current = getBarPctFromX((t0.clientX + t1.clientX) / 2)
+        setHoverPct(null)
+      } else if (e.touches.length === 1) {
+        e.preventDefault()
+        touchModeRef.current = 'scrub'
+        const pct = getBarPctFromX(e.touches[0].clientX)
+        setHoverPct(pct)
+      }
+    },
+    [zoomLevel, viewportStart, getBarPctFromX],
+  )
+
+  const handleBarTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      if (e.touches.length >= 2) {
+        if (touchModeRef.current === 'scrub') {
+          // Transition from scrub to pinch
+          touchModeRef.current = 'pinch'
+          const t0 = e.touches[0], t1 = e.touches[1]
+          pinchStartDistRef.current = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+          pinchStartZoomRef.current = zoomLevel
+          pinchStartViewportRef.current = viewportStart
+          pinchMidPctRef.current = getBarPctFromX((t0.clientX + t1.clientX) / 2)
+          setHoverPct(null)
+          return
+        }
+        if (touchModeRef.current !== 'pinch') return
+        const t0 = e.touches[0], t1 = e.touches[1]
+        const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+        const ratio = dist / pinchStartDistRef.current
+        const newZoom = Math.max(1, Math.min(24, pinchStartZoomRef.current * ratio))
+        const newVisibleHours = 24 / newZoom
+        // Keep pinch midpoint anchored to the same hour
+        const anchorHour = pinchStartViewportRef.current + pinchMidPctRef.current * (24 / pinchStartZoomRef.current)
+        const midPctNow = getBarPctFromX((t0.clientX + t1.clientX) / 2)
+        let newStart = anchorHour - midPctNow * newVisibleHours
+        newStart = Math.max(0, Math.min(24 - newVisibleHours, newStart))
+        setZoomLevel(newZoom)
+        setViewportStart(newStart)
+      } else if (e.touches.length === 1 && touchModeRef.current === 'scrub') {
+        const pct = getBarPctFromX(e.touches[0].clientX)
+        setHoverPct(pct)
+      }
+    },
+    [zoomLevel, viewportStart, getBarPctFromX],
+  )
+
+  const handleBarTouchEnd = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      if (touchModeRef.current === 'scrub' && e.changedTouches.length > 0) {
+        const pct = getBarPctFromX(e.changedTouches[0].clientX)
+        const hour = viewportPctToHour(pct)
+
+        if (exportMode) {
+          if (exportStart === null || (exportStart !== null && exportEnd !== null)) {
+            setExportStart(hour)
+            setExportEnd(null)
+            setExportError(null)
+          } else {
+            if (hour > exportStart) {
+              setExportEnd(hour)
+            } else {
+              setExportEnd(exportStart)
+              setExportStart(hour)
+            }
+          }
+        } else if (segments.length > 0) {
+          setPlayheadHour(hour)
+          seekTargetHour.current = hour
+          triggerPlaybackAtHour(hour)
+        }
+      }
+      setHoverPct(null)
+      touchModeRef.current = 'none'
+    },
+    [getBarPctFromX, viewportPctToHour, exportMode, exportStart, exportEnd, segments, triggerPlaybackAtHour],
   )
 
   const handleExport = useCallback(async () => {
@@ -372,6 +517,42 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
       }
       window.addEventListener('mousemove', onMove)
       window.addEventListener('mouseup', onUp)
+    },
+    [visibleHours],
+  )
+
+  // Minimap touch drag
+  const handleMinimapTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      if (e.touches.length < 1) return
+      minimapDragRef.current = true
+      manualPanRef.current = true
+
+      const updateFromMinimap = (clientX: number) => {
+        if (!minimapBarRef.current) return
+        const rect = minimapBarRef.current.getBoundingClientRect()
+        const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+        const centerHour = pct * 24
+        let newStart = centerHour - visibleHours / 2
+        newStart = Math.max(0, Math.min(24 - visibleHours, newStart))
+        setViewportStart(newStart)
+      }
+
+      updateFromMinimap(e.touches[0].clientX)
+
+      const onMove = (ev: TouchEvent) => {
+        if (!minimapDragRef.current || ev.touches.length < 1) return
+        ev.preventDefault()
+        updateFromMinimap(ev.touches[0].clientX)
+      }
+      const onEnd = () => {
+        minimapDragRef.current = false
+        window.removeEventListener('touchmove', onMove)
+        window.removeEventListener('touchend', onEnd)
+      }
+      window.addEventListener('touchmove', onMove, { passive: false })
+      window.addEventListener('touchend', onEnd)
     },
     [visibleHours],
   )
@@ -535,6 +716,7 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
           className="absolute -top-3 -bottom-1 w-5 cursor-grab active:cursor-grabbing"
           style={{ left: '50%', transform: 'translateX(-50%)' }}
           onMouseDown={handlePlayheadDown}
+          onTouchStart={handlePlayheadTouchStart}
         />
         <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none" style={{ left: '50%', transform: 'translateX(-50%)' }} />
         <div className="absolute -top-2 w-3.5 h-3.5 rounded-full bg-red-500 border-2 border-red-300 shadow pointer-events-none" style={{ left: '50%', transform: 'translateX(-50%)' }} />
@@ -691,6 +873,8 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
             ref={minimapBarRef}
             className="relative h-3 bg-neutral-800/60 rounded cursor-pointer"
             onMouseDown={handleMinimapDown}
+            onTouchStart={handleMinimapTouchStart}
+            style={{ touchAction: 'none' }}
           >
             {minimapSegmentBars}
             {/* Viewport indicator */}
@@ -731,6 +915,10 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
             if (!draggingRef.current) setHoverPct(getBarPct(e))
           }}
           onMouseLeave={() => setHoverPct(null)}
+          onTouchStart={handleBarTouchStart}
+          onTouchMove={handleBarTouchMove}
+          onTouchEnd={handleBarTouchEnd}
+          style={{ touchAction: 'none' }}
         >
           {hourMarkers}
           {segmentBars}
