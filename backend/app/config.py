@@ -30,6 +30,7 @@ class FFmpegConfig:
     hwaccel: str = "cuda"
     segment_duration: int = 900
     rtsp_transport: str = "tcp"
+    rtsp_timeout_us: int = 30_000_000  # 30s socket I/O timeout (microseconds)
 
 
 @dataclass

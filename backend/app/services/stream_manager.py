@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from app.config import AppConfig, get_config
@@ -12,6 +13,11 @@ from app.services.go2rtc_client import get_go2rtc_client
 from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
+
+# Watchdog: kill ffmpeg if no .ts file has been modified in this many seconds
+STALE_THRESHOLD_SECONDS = 300  # 5 minutes
+# How often the watchdog checks for stale recordings
+WATCHDOG_INTERVAL_SECONDS = 120  # 2 minutes
 
 
 @dataclass
@@ -25,6 +31,7 @@ class StreamInfo:
     restart_count: int = 0
     last_error: str | None = None
     _rec_monitor_task: asyncio.Task | None = field(default=None, repr=False)
+    _watchdog_task: asyncio.Task | None = field(default=None, repr=False)
 
 
 class StreamManager:
@@ -62,6 +69,9 @@ class StreamManager:
         info._rec_monitor_task = asyncio.create_task(
             self._monitor_process(camera_id)
         )
+        info._watchdog_task = asyncio.create_task(
+            self._watchdog(camera_id)
+        )
 
         # Register with go2rtc for live view
         client = get_go2rtc_client()
@@ -79,6 +89,9 @@ class StreamManager:
         if info._rec_monitor_task:
             info._rec_monitor_task.cancel()
             info._rec_monitor_task = None
+        if info._watchdog_task:
+            info._watchdog_task.cancel()
+            info._watchdog_task = None
 
         # Remove from go2rtc
         client = get_go2rtc_client()
@@ -131,6 +144,56 @@ class StreamManager:
             await _launch_recording(info, config)
 
         dir_task.cancel()
+
+    async def _watchdog(self, camera_id: int) -> None:
+        """Kill ffmpeg if it stops producing recording files (stale stream detection)."""
+        # Grace period: don't check until the process has been running long enough
+        # to have produced at least one segment update
+        await asyncio.sleep(STALE_THRESHOLD_SECONDS)
+
+        while self._running:
+            await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+            info = self._streams.get(camera_id)
+            if not info or not info.rec_process:
+                break
+            if info.rec_process.returncode is not None:
+                break  # Already dead, monitor will handle restart
+
+            config = get_config()
+            safe_name = sanitize_camera_name(info.camera_name)
+            rec_dir = Path(config.storage.recordings_dir) / safe_name
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_dir = rec_dir / today
+
+            if not today_dir.exists():
+                continue
+
+            # Check for any .ts file modified within the stale threshold
+            now = time.time()
+            has_fresh_file = False
+            try:
+                for f in today_dir.iterdir():
+                    if f.suffix == ".ts" and (now - f.stat().st_mtime) < STALE_THRESHOLD_SECONDS:
+                        has_fresh_file = True
+                        break
+            except OSError:
+                continue
+
+            if has_fresh_file:
+                continue
+
+            # No recent recording output — stream is stale
+            logger.error(
+                "Watchdog: no recording output detected, killing stale ffmpeg",
+                extra={
+                    "camera_id": camera_id,
+                    "camera_name": info.camera_name,
+                    "threshold_seconds": STALE_THRESHOLD_SECONDS,
+                },
+            )
+            info.last_error = "Watchdog: stale recording — no output files"
+            info.rec_process.kill()
+            # _monitor_process will detect the exit and restart
 
     async def _ensure_date_dirs(self, camera_id: int) -> None:
         """Periodically create tomorrow's date directory so midnight rollovers work."""
