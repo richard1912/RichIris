@@ -15,11 +15,15 @@ def build_input_args(rtsp_url: str, config: AppConfig, hwaccel: bool = True) -> 
     args = [config.ffmpeg.path]
     if hwaccel and config.ffmpeg.hwaccel:
         args.extend(["-hwaccel", config.ffmpeg.hwaccel])
+    # timeout: socket I/O timeout in microseconds — forces ffmpeg to exit
+    # if the camera stops sending data, so the process monitor can restart it.
+    timeout = str(config.ffmpeg.rtsp_timeout_us)
     args.extend([
         "-rtsp_transport", config.ffmpeg.rtsp_transport,
+        "-timeout", timeout,
         "-i", rtsp_url,
     ])
-    logger.debug("Built input args", extra={"rtsp_url": rtsp_url, "hwaccel": config.ffmpeg.hwaccel if hwaccel else None})
+    logger.debug("Built input args", extra={"rtsp_url": rtsp_url, "timeout_us": timeout})
     return args
 
 
