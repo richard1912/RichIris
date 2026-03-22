@@ -23,7 +23,7 @@ Browser (LAN/VPN) → WebSocket (MSE) → go2rtc:1984 ← RTSP sub-stream (zero 
 - One ffmpeg process per camera for recording (always on). Live view handled by go2rtc (separate service).
 - Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments are renamed by the scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts` after completion. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
 - **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
-- **Live view (go2rtc MSE)**: go2rtc takes RTSP input (prefers sub-stream URL when configured) and outputs MSE (fMP4 over WebSocket). Frontend opens a WebSocket to go2rtc, sends `{"type":"mse"}`, and receives a continuous push-based stream of fMP4 segments. No HLS, no polling, no file I/O. Works reliably over WireGuard VPN. Streams are registered dynamically by RichIris via go2rtc's REST API on camera startup.
+- **Live view (go2rtc MSE)**: go2rtc takes RTSP input (prefers sub-stream URL when configured) and outputs MSE (fMP4 over WebSocket). Frontend opens a WebSocket to go2rtc, sends `{"type":"mse"}`, and receives a continuous push-based stream of fMP4 segments. No HLS, no polling, no file I/O. Works reliably over WireGuard VPN. Streams are registered dynamically by RichIris via go2rtc's REST API on camera startup. **MsePlayer uses a persistent video pool** — video elements and WebSocket connections are kept alive at the module level (`Map<cameraId, StreamEntry>`), surviving React unmount/remount. View transitions (grid↔fullscreen) just move the same `<video>` DOM element between containers via `appendChild`, so the feed is never interrupted.
 - **Playback remux (no transcode)**: Recordings are HEVC .ts files. Instead of GPU transcoding, ffmpeg remuxes to MP4 with `-c copy -movflags +faststart` (instant, < 1 second). Browser plays HEVC natively (Chrome 107+, Edge, Safari have hardware HEVC decode). Single files use `-ss` before `-i` for fast keyframe seek. Multiple files use concat demuxer with `-ss` after `-i`. Sessions auto-cleanup after 120s idle.
 - NVIDIA RTX 4080 SUPER available (not currently used — recording is passthrough, live view is zero-transcode via go2rtc)
 
@@ -72,7 +72,7 @@ RichIris/
 │           ├── CameraGrid.tsx   # Camera grid with selection highlight
 │           ├── CameraCard.tsx   # Individual camera thumbnail
 │           ├── CameraFullscreen.tsx # Fullscreen view with timeline
-│           ├── MsePlayer.tsx    # go2rtc MSE WebSocket player (live streams)
+│           ├── MsePlayer.tsx    # go2rtc MSE WebSocket player (persistent video pool)
 │           ├── Timeline.tsx     # 24h timeline bar, date picker, clip export
 │           └── SystemPage.tsx   # System status + storage
 ├── config.yaml                  # Main configuration (cameras, paths)
