@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
 from app.database import get_db
-from app.models import Camera, Recording
+from app.models import Camera, ClipExport, Recording
 from app.schemas import CameraCreate, CameraResponse, CameraUpdate
 from app.services.ffmpeg import sanitize_camera_name
 from app.services.stream_manager import get_stream_manager
@@ -103,13 +103,20 @@ async def update_camera(
 
 @router.delete("/{camera_id}", status_code=204)
 async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
-    """Delete a camera and stop its stream."""
+    """Delete a camera and stop its stream. Video files on disk are preserved."""
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
     mgr = get_stream_manager()
     await mgr.stop_stream(camera.id)
+
+    # Remove DB metadata (recordings + clip exports) so FK constraints don't block delete.
+    # Actual video files on disk are NOT deleted.
+    for model in (ClipExport, Recording):
+        result = await db.execute(select(model).where(model.camera_id == camera_id))
+        for row in result.scalars().all():
+            await db.delete(row)
 
     await db.delete(camera)
     await db.commit()
