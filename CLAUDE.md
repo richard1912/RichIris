@@ -8,24 +8,46 @@ update claude md as needed for code changes
 - **Config**: `config.yaml` (cameras, storage paths, ffmpeg settings, go2rtc)
 - **Recordings**: `G:\RichIris` (segment files per camera per day, named `Camera 1 2026-03-08 13.30 - 13.45.ts`)
 - **Database**: `data/richiris.db` (SQLite, auto-created on first run)
-- **Frontend build**: `cd frontend && npm run build` (served from `frontend/dist/`)
+- **Frontend build**: `cd frontend && npm run build` (served from `frontend/dist/`) — legacy web UI
+- **Native app**: Flutter app in `app/` (Windows + Android), replaces web UI for live/playback/export
+- **App build (Windows)**: `cd app && flutter build windows --release` → `app/build/windows/x64/runner/Release/`
+- **App build (Android)**: `cd app && flutter build apk --release` → `app/build/app/outputs/flutter-apk/`
 - **API docs**: http://localhost:8700/docs
 
 ## Architecture
 ```
-Browser (LAN/VPN) → WebSocket (MSE) → go2rtc:1984 ← RTSP sub-stream (zero transcode)
-                  → FastAPI:8700 → FFmpeg subprocesses (recording only)
-                            |                    |
-                        SQLite DB         G:\RichIris (recordings)
-                                          data\playback\ (remux cache)
+Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTSP sub-stream
+                          → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
+Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
+                          → FastAPI:8700 → FFmpeg subprocesses (recording only)
+                                    |                    |
+                                SQLite DB         G:\RichIris (recordings)
+                                                  data\playback\ (remux cache)
 ```
 
 - One ffmpeg process per camera for recording (always on). Live view handled by go2rtc (separate service).
 - Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments are renamed by the scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts` after completion. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
 - **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
-- **Live view (go2rtc MSE)**: go2rtc takes RTSP input (prefers sub-stream URL when configured) and outputs MSE (fMP4 over WebSocket). Frontend opens a WebSocket to go2rtc, sends `{"type":"mse"}`, and receives a continuous push-based stream of fMP4 segments. No HLS, no polling, no file I/O. Works reliably over WireGuard VPN. Streams are registered dynamically by RichIris via go2rtc's REST API on camera startup. **MsePlayer uses a persistent video pool** — video elements and WebSocket connections are kept alive at the module level (`Map<cameraId, StreamEntry>`), surviving React unmount/remount. View transitions (grid↔fullscreen) just move the same `<video>` DOM element between containers via `appendChild`, so the feed is never interrupted.
+- **Live view (go2rtc MSE — web UI)**: go2rtc takes RTSP input (prefers sub-stream URL when configured) and outputs MSE (fMP4 over WebSocket). Frontend opens a WebSocket to go2rtc, sends `{"type":"mse"}`, and receives a continuous push-based stream of fMP4 segments. No HLS, no polling, no file I/O. Works reliably over WireGuard VPN. Streams are registered dynamically by RichIris via go2rtc's REST API on camera startup. **MsePlayer uses a persistent video pool** — video elements and WebSocket connections are kept alive at the module level (`Map<cameraId, StreamEntry>`), surviving React unmount/remount. View transitions (grid↔fullscreen) just move the same `<video>` DOM element between containers via `appendChild`, so the feed is never interrupted.
+- **Live view (HTTP fMP4 — native app)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
 - **Playback remux (no transcode)**: Recordings are HEVC .ts files. Instead of GPU transcoding, ffmpeg remuxes to MP4 with `-c copy -movflags +faststart` (instant, < 1 second). Browser plays HEVC natively (Chrome 107+, Edge, Safari have hardware HEVC decode). Single files use `-ss` before `-i` for fast keyframe seek. Multiple files use concat demuxer with `-ss` after `-i`. Sessions auto-cleanup after 120s idle.
 - NVIDIA RTX 4080 SUPER available (not currently used — recording is passthrough, live view is zero-transcode via go2rtc)
+
+### Video Quality Selection
+- **Two independent selectors** in header (also in fullscreen view): **Stream** (S1/S2) and **Quality** (Direct/High/Low)
+  - Stream persisted in SharedPreferences key `richiris-stream-source`, Quality in `richiris-quality`
+- **Live streams**: go2rtc registers 6 streams per camera (S1/S2 × Direct/High/Low). Unused quality streams are lazy — zero resources until a client connects.
+  - S1 Direct: raw 4K HEVC passthrough (no ffmpeg, zero CPU)
+  - S1 High: 1920×1080 H.264 transcode, S1 Low: 1280×720 H.264
+  - S2 Direct: raw sub-stream passthrough (H.264, ~640x480, no ffmpeg)
+  - S2 High: sub-stream H.264 re-encode (native res), S2 Low: 320×180
+- **Playback**: Direct/High use `-c copy` (instant passthrough HEVC). Medium/Low use NVENC GPU transcode (`h264_nvenc`).
+  - Direct/High: 3840x2160 (4K native), Medium: 1280x720 @ 2Mbps, Low: 640x360 @ 800kbps
+- Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low` params for both HTTP fMP4 and WebSocket
+- Backend uses module-level connection-pooled httpx client for go2rtc fMP4 proxying
+- Stream pre-warming at backend startup triggers go2rtc RTSP connections proactively
+- **Low-latency LivePlayer**: 512KB buffer, mpv `low-latency` profile, `cache=no`, `untimed=yes`, exponential backoff retry (500ms→10s)
+- Legacy web frontend still works (defaults `stream=s2`, maps old quality values)
 
 ### Important: Timezone handling
 - Recordings are stored in the DB as **local time without timezone** (e.g. `2026-03-08T10:36:02`)
@@ -64,7 +86,7 @@ RichIris/
 ├── go2rtc/
 │   ├── go2rtc.exe               # go2rtc binary (RTSP → MSE/WebSocket)
 │   └── go2rtc.yaml              # go2rtc config (API port, streams registered dynamically)
-├── frontend/                    # React 19 + Vite + Tailwind
+├── frontend/                    # React 19 + Vite + Tailwind (legacy web UI)
 │   └── src/
 │       ├── App.tsx              # Main app - grid with selectable timeline
 │       ├── api.ts               # API client functions
@@ -75,8 +97,21 @@ RichIris/
 │           ├── MsePlayer.tsx    # go2rtc MSE WebSocket player (persistent video pool)
 │           ├── Timeline.tsx     # 24h timeline bar, date picker, clip export
 │           └── SystemPage.tsx   # System status + storage
+├── app/                         # Flutter native app (Windows + Android)
+│   ├── lib/
+│   │   ├── main.dart            # Entry point, MediaKit init
+│   │   ├── app.dart             # MaterialApp, navigation, state management
+│   │   ├── theme.dart           # Dark theme
+│   │   ├── config/              # API config, quality tiers, constants
+│   │   ├── models/              # Data classes (Camera, RecordingSegment, etc.)
+│   │   ├── services/            # API layer (Dio HTTP client)
+│   │   ├── screens/             # Home, Fullscreen, System, Settings, CameraForm
+│   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector
+│   │   │   └── timeline/        # CustomPainter timeline (controller, painter, minimap)
+│   │   └── utils/               # Time/format utilities
+│   └── pubspec.yaml             # Dependencies: media_kit, dio, shared_preferences
 ├── config.yaml                  # Main configuration (cameras, paths)
-├── build.bat                    # Frontend build script
+├── rebuild.bat                  # Frontend build script
 ├── start.bat                    # Quick launcher
 ├── service-install.bat          # Install Windows service
 ├── service-uninstall.bat
@@ -93,6 +128,7 @@ RichIris/
 ## API Endpoints
 - `GET/POST/PUT/DELETE /api/cameras` - Camera CRUD
 - `GET /api/streams/{id}/live` - go2rtc stream info (stream_name, port) for WebSocket MSE URL construction
+- `GET /api/streams/{id}/live.mp4?quality=` - HTTP fMP4 proxy for native app live view (proxies go2rtc stream.mp4)
 - `GET /api/recordings/{id}/dates` - List dates with recordings
 - `GET /api/recordings/{id}/segments?date=YYYY-MM-DD` - List segments for a date
 - `POST /api/recordings/{id}/playback?start=ISO` - Start remux session, returns `{session_id, playback_url, window_end, has_more}`
@@ -115,6 +151,7 @@ RichIris/
 - **Fullscreen page**: Full video player + timeline + speed controls (shown in playback mode). Click timeline segment → instant MP4 remux (< 1s) → video plays natively (HEVC in browser).
 - **Speed controls**: -32x to 32x. 1x/2x/4x use native `video.playbackRate`. 16x/32x use interval-based jumping. Reverse speeds request new playback sessions at earlier times.
 - **Timeline**: LIVE button, date picker, zoomable timeline bar with blue segments. Mouse wheel zooms (1h-24h range), minimap shown when zoomed for pan navigation. Export clip mode, clips list with download/delete. Trickplay thumbnail preview on hover (individual JPEGs captured from RTSP).
+- **Timeline (Flutter app)**: CustomPainter-based timeline with scrub indicator showing time label. Scroll wheel zoom (Windows), pinch-to-zoom (Android). Mouse hover (Windows) or touch scrub (Android) shows white scrub line with time + trickplay thumbnail via OverlayEntry (floats above timeline, `gaplessPlayback: true` prevents flicker). Tap/release navigates to time and instantly moves red playhead. Playhead timer pauses live-time updates during playback transition (`_manualPan` flag).
 - **Playback**: Uses direct `<video src="...">` for MP4 playback (no HLS.js). MsePlayer is only used for live streams.
 
 ## Key Dependencies
@@ -136,3 +173,4 @@ RichIris/
 7. Trickplay thumbnails - real-time RTSP capture, individual JPEG previews on timeline hover (DONE)
 8. Sub-stream live view - use camera's H.264 sub-stream for live, no transcode, no recording interruption (DONE)
 9. go2rtc MSE live view - replaced HLS with go2rtc WebSocket MSE for reliable VPN streaming (DONE)
+10. Flutter native app - Windows + Android app with media_kit, quality selection, timeline interactions (DONE)

@@ -23,6 +23,18 @@ interface StreamEntry {
 
 const streams = new Map<number, StreamEntry>()
 
+// Module-level quality — read by connectStream, updated by setStreamQuality()
+let currentQuality: string = localStorage.getItem('richiris-quality') || 'high'
+
+/** Change live stream quality for all active streams. */
+export function setStreamQuality(quality: string) {
+  if (quality === currentQuality) return
+  currentQuality = quality
+  for (const [cameraId, entry] of streams) {
+    connectStream(cameraId, entry)
+  }
+}
+
 function connectStream(cameraId: number, entry: StreamEntry) {
   const { video } = entry
 
@@ -41,7 +53,7 @@ function connectStream(cameraId: number, entry: StreamEntry) {
   entry.queue = []
 
   const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  const wsUrl = `${wsProto}://${window.location.host}/api/streams/${cameraId}/ws`
+  const wsUrl = `${wsProto}://${window.location.host}/api/streams/${cameraId}/ws?quality=${currentQuality}`
   const ws = new WebSocket(wsUrl)
   ws.binaryType = 'arraybuffer'
   entry.ws = ws

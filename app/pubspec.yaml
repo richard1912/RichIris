@@ -1,0 +1,45 @@
+name: richiris
+description: RichIris NVR client
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Video playback (libmpv-based, RTSP + HTTP + local files)
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_windows_video: ^1.0.10
+  media_kit_libs_android_video: ^1.3.6
+
+  # WebView for live MSE streaming (go2rtc WebSocket → MSE in Chromium)
+  flutter_inappwebview: ^6.1.5
+
+  # HTTP
+  dio: ^5.7.0
+
+  # Local storage
+  shared_preferences: ^2.5.3
+
+  # Image caching (thumbnails)
+  cached_network_image: ^3.4.1
+
+  # File downloads
+  path_provider: ^2.1.5
+
+  # URL launcher (for opening files)
+  url_launcher: ^6.3.1
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

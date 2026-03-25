@@ -728,8 +728,8 @@ export default function Timeline({ cameraId, onPlayback, onLive, isLive, isPause
             <div className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-red-600 mx-auto" />
           </div>
         )}
-        {/* Persistent time label below playhead */}
-        {!draggingPlayhead && playheadHour !== null && (
+        {/* Persistent time label below playhead — only during playback */}
+        {!draggingPlayhead && !isLive && playheadHour !== null && (
           <div className="absolute left-1/2 -translate-x-1/2 pointer-events-none" style={{ top: 'calc(100% + 2px)' }}>
             <span className="text-[10px] text-white font-medium whitespace-nowrap">{hourToLabel(playheadHour)}</span>
           </div>
