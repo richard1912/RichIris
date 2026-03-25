@@ -8,12 +8,14 @@ interface Props {
   camera: Camera
   stream?: StreamStatus
   onBack: () => void
+  quality?: string
+  onQualityChange?: (q: string) => void
 }
 
 const SPEEDS = [-32, -16, -4, -2, -1, 1, 2, 4, 16, 32] as const
 type Speed = typeof SPEEDS[number]
 
-export default function CameraFullscreen({ camera, stream, onBack }: Props) {
+export default function CameraFullscreen({ camera, stream, onBack, quality = 'high', onQualityChange }: Props) {
   const running = stream?.running ?? false
   const [mode, setMode] = useState<'live' | 'playback'>('live')
   const [paused, setPaused] = useState(false)
@@ -56,7 +58,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
       clearSpeedInterval()
       setSpeed(1)
       try {
-        const { playback_url, window_end, has_more } = await startPlaybackSession(camera.id, start)
+        const { playback_url, window_end, has_more } = await startPlaybackSession(camera.id, start, quality)
         setPlaybackUrl(playback_url)
         setWindowEnd(window_end)
         setHasMore(has_more)
@@ -69,7 +71,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
         setPlaybackLoading(false)
       }
     },
-    [camera.id, clearSpeedInterval],
+    [camera.id, clearSpeedInterval, quality],
   )
 
   const handleEnded = useCallback(() => {
@@ -138,7 +140,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
           const newStartMs = virtualTimeRef.current - WINDOW_MS
           const newStart = formatLocalISO(newStartMs)
 
-          startPlaybackSession(camera.id, newStart)
+          startPlaybackSession(camera.id, newStart, quality)
             .then(({ playback_url, window_end, has_more }) => {
               // Bug 3: Discard if generation changed
               if (generationRef.current !== gen) return
@@ -202,7 +204,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
         }
       }, TICK_MS)
     },
-    [camera.id, clearSpeedInterval],
+    [camera.id, clearSpeedInterval, quality],
   )
 
   const handleSpeedChange = useCallback(
@@ -222,7 +224,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
         setPlaybackError(null)
         setPaused(false)
 
-        startPlaybackSession(camera.id, startStr)
+        startPlaybackSession(camera.id, startStr, quality)
           .then(({ playback_url, window_end, has_more }) => {
             // Bug 3: Discard if generation changed
             if (generationRef.current !== gen) return
@@ -323,7 +325,7 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
         }
       }, TICK_MS)
     },
-    [camera.id, mode, clearSpeedInterval, handlePlayback, startReverseInterval],
+    [camera.id, mode, clearSpeedInterval, handlePlayback, startReverseInterval, quality],
   )
 
   useEffect(() => {
@@ -365,14 +367,28 @@ export default function CameraFullscreen({ camera, stream, onBack }: Props) {
             running ? 'bg-green-500' : 'bg-yellow-500'
           }`}
         />
-        {isLive && stream?.uptime_seconds != null && (
-          <span className="text-xs text-neutral-500 ml-auto">
-            Up {formatUptime(stream.uptime_seconds)}
-          </span>
-        )}
-        {!isLive && (
-          <span className="text-xs text-blue-400 ml-auto">Playback</span>
-        )}
+        <div className="ml-auto flex items-center gap-3">
+          {isLive && stream?.uptime_seconds != null && (
+            <span className="text-xs text-neutral-500">
+              Up {formatUptime(stream.uptime_seconds)}
+            </span>
+          )}
+          {!isLive && (
+            <span className="text-xs text-blue-400">Playback</span>
+          )}
+          {onQualityChange && (
+            <select
+              value={quality}
+              onChange={e => onQualityChange(e.target.value)}
+              className="bg-neutral-800 text-neutral-300 text-xs rounded px-2 py-1 border border-neutral-700 focus:outline-none focus:border-neutral-500"
+            >
+              <option value="direct">Direct</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          )}
+        </div>
       </header>
 
       <main className="flex-1 flex items-center justify-center overflow-hidden">

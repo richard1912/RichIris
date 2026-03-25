@@ -1,4 +1,4 @@
-"""On-demand playback: HEVC recordings → MP4 remux (no transcode) for browser playback."""
+"""On-demand playback: HEVC recordings → MP4 remux/transcode for browser playback."""
 
 import asyncio
 import logging
@@ -15,6 +15,37 @@ logger = logging.getLogger(__name__)
 PLAYBACK_DIR = Path("data/playback")
 IDLE_TIMEOUT = 120  # seconds before cleanup
 
+# Quality presets for playback transcoding.
+# direct/high = passthrough (instant), medium/low = NVENC GPU transcode (streamed).
+PLAYBACK_QUALITY: dict[str, dict] = {
+    "direct": {
+        "pre_input": [],
+        "codec": ["-c", "copy"],
+        "movflags": "+faststart",
+        "streaming": False,
+    },
+    "high": {
+        "pre_input": [],
+        "codec": ["-c", "copy"],
+        "movflags": "+faststart",
+        "streaming": False,
+    },
+    "medium": {
+        "pre_input": ["-hwaccel", "cuda"],
+        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "2M",
+                  "-vf", "scale=1280:720", "-c:a", "copy"],
+        "movflags": "frag_keyframe+empty_moov",
+        "streaming": True,
+    },
+    "low": {
+        "pre_input": ["-hwaccel", "cuda"],
+        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "800k",
+                  "-vf", "scale=640:360", "-c:a", "copy"],
+        "movflags": "frag_keyframe+empty_moov",
+        "streaming": True,
+    },
+}
+
 
 @dataclass
 class PlaybackSession:
@@ -24,6 +55,7 @@ class PlaybackSession:
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
     ready: bool = False
+    streaming: bool = False
     _ready_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -39,8 +71,9 @@ class PlaybackManager:
     async def start_session(
         self, session_id: str, segment_paths: list[str],
         seek_seconds: float = 0.0, duration_limit: float = 1800.0,
+        quality: str = "high",
     ) -> PlaybackSession:
-        """Start a playback remux session (no transcode, just repackage to MP4)."""
+        """Start a playback session. High = instant remux, medium/low = NVENC transcode."""
         # Return existing session if still valid
         if session_id in self._sessions:
             session = self._sessions[session_id]
@@ -58,16 +91,23 @@ class PlaybackManager:
         config = get_config()
         output_path = output_dir / "playback.mp4"
 
+        preset = PLAYBACK_QUALITY.get(quality, PLAYBACK_QUALITY["high"])
+        pre_input = preset["pre_input"]
+        codec_args = preset["codec"]
+        movflags = preset.get("movflags", "+faststart")
+        session.streaming = preset.get("streaming", False)
+
         # For single file: direct input with fast seek (-ss before -i)
         # For multiple files: use concat demuxer (no seek support, use -ss after -i)
         if len(segment_paths) == 1:
             cmd = [
                 config.ffmpeg.path, "-y",
+                *pre_input,
                 "-ss", str(seek_seconds),
                 "-i", segment_paths[0],
                 "-t", str(duration_limit),
-                "-c", "copy",
-                "-movflags", "+faststart",
+                *codec_args,
+                "-movflags", movflags,
                 str(output_path),
             ]
         else:
@@ -81,12 +121,13 @@ class PlaybackManager:
 
             cmd = [
                 config.ffmpeg.path, "-y",
+                *pre_input,
                 "-f", "concat", "-safe", "0",
                 "-i", str(concat_list_path),
                 "-ss", str(seek_seconds),
                 "-t", str(duration_limit),
-                "-c", "copy",
-                "-movflags", "+faststart",
+                *codec_args,
+                "-movflags", movflags,
                 str(output_path),
             ]
 
@@ -108,11 +149,46 @@ class PlaybackManager:
         return session
 
     async def _wait_ready(self, session: PlaybackSession) -> None:
-        """Wait for the remux to complete, then mark session ready."""
+        """Wait for the remux/transcode to be ready for serving.
+
+        For non-streaming (direct/high): wait for ffmpeg to finish.
+        For streaming (medium/low): mark ready as soon as the file has initial data.
+        """
         if not session.process:
             session._ready_event.set()
             return
 
+        output_path = session.output_dir / "playback.mp4"
+
+        if session.streaming:
+            # Fragmented MP4: ready once initial fMP4 header is written
+            for _ in range(60):  # up to 30 seconds
+                await asyncio.sleep(0.5)
+                if output_path.exists() and output_path.stat().st_size > 4096:
+                    session.ready = True
+                    logger.info("Streaming playback ready", extra={"session_id": session.session_id})
+                    session._ready_event.set()
+                    return
+                # If process already exited, check file
+                if session.process.returncode is not None:
+                    break
+            # Fallback: check if file was created
+            if output_path.exists() and output_path.stat().st_size > 0:
+                session.ready = True
+            else:
+                stderr = await session.process.stderr.read() if session.process.stderr else b""
+                logger.error(
+                    "Streaming playback failed to start",
+                    extra={
+                        "session_id": session.session_id,
+                        "returncode": session.process.returncode,
+                        "stderr": stderr.decode("utf-8", errors="replace")[-500:],
+                    },
+                )
+            session._ready_event.set()
+            return
+
+        # Non-streaming: wait for full completion
         try:
             await asyncio.wait_for(session.process.wait(), timeout=60)
         except asyncio.TimeoutError:
@@ -120,7 +196,6 @@ class PlaybackManager:
             session._ready_event.set()
             return
 
-        output_path = session.output_dir / "playback.mp4"
         if output_path.exists() and output_path.stat().st_size > 0:
             session.ready = True
             logger.info("Playback session ready", extra={"session_id": session.session_id})

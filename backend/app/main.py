@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
 from sqlalchemy import select
@@ -50,6 +51,9 @@ async def lifespan(app: FastAPI):
     # Verify go2rtc is reachable (live view depends on it, recording does not)
     await _check_go2rtc_health()
 
+    # Pre-warm go2rtc streams so they're ready before clients connect
+    asyncio.create_task(_prewarm_streams(cameras_list))
+
     thumb_capture = get_thumbnail_capture()
     thumb_capture.start(cameras_list)
 
@@ -65,6 +69,8 @@ async def lifespan(app: FastAPI):
     pb = get_playback_manager()
     await pb.stop_all()
     await thumb_capture.stop()
+    from app.routers.streams import close_pool
+    await close_pool()
     await close_db()
 
 
@@ -152,12 +158,38 @@ async def _start_enabled_cameras() -> list:
         cameras_list = result.scalars().all()
 
     mgr = get_stream_manager()
-    for cam in cameras_list:
-        logger.info("Auto-starting camera stream", extra={"camera_id": cam.id, "camera_name": cam.name})
-        await mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url)
+    await asyncio.gather(*[
+        mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url)
+        for cam in cameras_list
+    ])
 
     logger.info("Started enabled cameras", extra={"count": len(cameras_list)})
     return cameras_list
+
+
+async def _prewarm_streams(cameras_list: list) -> None:
+    """Trigger go2rtc lazy RTSP connections so streams are ready for clients."""
+    from app.services.go2rtc_client import get_stream_name
+
+    config = get_config()
+
+    async def warm_one(cam) -> None:
+        stream_name = get_stream_name(cam.name)
+        # Warm the s2_direct stream (most commonly used, fastest path)
+        url = f"http://127.0.0.1:{config.go2rtc.port}/api/stream.mp4?src={stream_name}_s2_direct"
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                async with client.stream("GET", url) as resp:
+                    total = 0
+                    async for chunk in resp.aiter_bytes(chunk_size=8192):
+                        total += len(chunk)
+                        if total > 32768:
+                            break
+            logger.info("Pre-warmed stream", extra={"camera": cam.name})
+        except Exception:
+            logger.warning("Failed to pre-warm stream", extra={"camera": cam.name})
+
+    await asyncio.gather(*[warm_one(cam) for cam in cameras_list])
 
 
 def create_app() -> FastAPI:

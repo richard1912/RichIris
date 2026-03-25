@@ -6,6 +6,9 @@ import CameraFullscreen from './components/CameraFullscreen'
 import CameraModal from './components/CameraModal'
 import SystemPage from './components/SystemPage'
 import Timeline from './components/Timeline'
+import { setStreamQuality } from './components/MsePlayer'
+
+type Quality = 'direct' | 'high' | 'medium' | 'low'
 
 export default function App() {
   const [cameras, setCameras] = useState<Camera[]>([])
@@ -17,6 +20,15 @@ export default function App() {
   const [mode, setMode] = useState<'live' | 'playback'>('live')
   const [modalCamera, setModalCamera] = useState<Camera | undefined>(undefined)
   const [showModal, setShowModal] = useState(false)
+  const [quality, setQualityState] = useState<Quality>(
+    () => (localStorage.getItem('richiris-quality') as Quality) || 'high'
+  )
+
+  const setQuality = useCallback((q: string) => {
+    setQualityState(q as Quality)
+    localStorage.setItem('richiris-quality', q)
+    setStreamQuality(q)
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -86,6 +98,8 @@ export default function App() {
         camera={fullscreenCamera}
         stream={streams.get(fullscreenCamera.id)}
         onBack={() => setFullscreenCamera(null)}
+        quality={quality}
+        onQualityChange={setQuality}
       />
     )
   }
@@ -97,6 +111,16 @@ export default function App() {
         <div className="flex items-center gap-4 text-sm text-neutral-400">
           {error && <span className="text-red-400">{error}</span>}
           <span>{activeCount}/{cameras.length} cameras active</span>
+          <select
+            value={quality}
+            onChange={e => setQuality(e.target.value as Quality)}
+            className="bg-neutral-800 text-neutral-300 text-sm rounded px-2 py-1 border border-neutral-700 focus:outline-none focus:border-neutral-500"
+          >
+            <option value="direct">Direct</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
           <button
             onClick={() => setShowSystem(true)}
             className="text-neutral-400 hover:text-white transition-colors"

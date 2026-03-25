@@ -87,9 +87,9 @@ export interface PlaybackSession {
   has_more: boolean
 }
 
-export async function startPlaybackSession(cameraId: number, start: string): Promise<PlaybackSession> {
+export async function startPlaybackSession(cameraId: number, start: string, quality: string = 'high'): Promise<PlaybackSession> {
   const res = await fetch(
-    `/api/recordings/${cameraId}/playback?start=${encodeURIComponent(start)}`,
+    `/api/recordings/${cameraId}/playback?start=${encodeURIComponent(start)}&quality=${quality}`,
     { method: 'POST' },
   )
   if (!res.ok) {

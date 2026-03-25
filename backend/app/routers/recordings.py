@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,9 +78,10 @@ PLAYBACK_WINDOW = 1800  # 30 minutes
 async def start_playback_session(
     camera_id: int,
     start: datetime = Query(..., description="Start time ISO format"),
+    quality: str = Query("high", description="Quality tier: high, medium, low"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Start a playback session (instant MP4 remux, no transcode)."""
+    """Start a playback session. High = instant remux, medium/low = NVENC transcode."""
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -129,13 +130,14 @@ async def start_playback_session(
     )
     has_more = has_more_result.first() is not None
 
-    key = f"{camera_id}:{start.isoformat()}"
+    key = f"{camera_id}:{start.isoformat()}:{quality}"
     session_id = hashlib.md5(key.encode()).hexdigest()[:12]
 
     mgr = get_playback_manager()
     session = await mgr.start_session(
         session_id, segment_paths,
         seek_seconds=seek_seconds, duration_limit=duration_limit,
+        quality=quality,
     )
 
     # Wait for remux to complete (typically < 1s, up to 60s for large files)
@@ -157,7 +159,11 @@ async def start_playback_session(
 
 @router.get("/playback/{session_id}/playback.mp4")
 async def get_playback_mp4(session_id: str):
-    """Serve the remuxed playback MP4 file."""
+    """Serve the remuxed/transcoded playback MP4 file.
+
+    For streaming sessions (medium/low quality), streams bytes as ffmpeg
+    writes them so the browser can start playback immediately.
+    """
     mgr = get_playback_manager()
     session = mgr.get_session(session_id)
     if not session:
@@ -167,7 +173,42 @@ async def get_playback_mp4(session_id: str):
     if not mp4_path.exists():
         raise HTTPException(status_code=404, detail="Playback not ready")
 
-    return FileResponse(mp4_path, media_type="video/mp4")
+    if not session.streaming:
+        return FileResponse(mp4_path, media_type="video/mp4")
+
+    # Stream fragmented MP4 as ffmpeg writes it
+    async def stream_file():
+        CHUNK = 64 * 1024
+        pos = 0
+        while True:
+            size = mp4_path.stat().st_size
+            if pos < size:
+                with open(mp4_path, "rb") as f:
+                    f.seek(pos)
+                    while pos < size:
+                        data = f.read(min(CHUNK, size - pos))
+                        if not data:
+                            break
+                        pos += len(data)
+                        yield data
+            # If ffmpeg is still running, wait for more data
+            proc = session.process
+            if proc and proc.returncode is None:
+                await asyncio.sleep(0.3)
+            else:
+                # ffmpeg finished — read any remaining bytes
+                final_size = mp4_path.stat().st_size
+                if pos < final_size:
+                    with open(mp4_path, "rb") as f:
+                        f.seek(pos)
+                        while True:
+                            data = f.read(CHUNK)
+                            if not data:
+                                break
+                            yield data
+                break
+
+    return StreamingResponse(stream_file(), media_type="video/mp4")
 
 
 @router.get("/segment/{recording_id}")
