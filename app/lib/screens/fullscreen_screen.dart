@@ -89,6 +89,18 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _generation++;
   }
 
+  void _ensurePlayer() {
+    if (_pbPlayer != null) return;
+    _pbPlayer = Player();
+    _pbController = VideoController(_pbPlayer!);
+    _pbPlayer!.setVolume(0);
+    _pbPlayer!.stream.completed.listen((completed) {
+      if (completed && _speedTimer == null && _hasMore && _windowEnd != null) {
+        _startPlayback(_windowEnd!);
+      }
+    });
+  }
+
   Future<void> _startPlayback(String start) async {
     setState(() {
       _playbackLoading = true;
@@ -105,18 +117,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       );
       final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
 
-      _pbPlayer?.dispose();
-      _pbPlayer = Player();
-      _pbController = VideoController(_pbPlayer!);
-      _pbPlayer!.setVolume(0);
-
-      _pbPlayer!.stream.completed.listen((completed) {
-        if (completed && _speedTimer == null && _hasMore && _windowEnd != null) {
-          _startPlayback(_windowEnd!);
-        }
-      });
-
-      await _pbPlayer!.open(Media(fullUrl));
+      _ensurePlayer();
+      _pbPlayer!.open(Media(fullUrl));
 
       setState(() {
         _playbackUrl = fullUrl;
@@ -141,9 +143,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       return;
     }
     _clearSpeedTimer();
-    _pbPlayer?.dispose();
-    _pbPlayer = null;
-    _pbController = null;
+    _pbPlayer?.stop();
     setState(() {
       _isLive = true;
       _paused = false;
@@ -176,17 +176,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         if (_generation != gen || !mounted) return;
         final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
 
-        _pbPlayer?.dispose();
-        _pbPlayer = Player();
-        _pbController = VideoController(_pbPlayer!);
-        _pbPlayer!.setVolume(0);
+        _ensurePlayer();
         _pbPlayer!.open(Media(fullUrl));
-
-        _pbPlayer!.stream.completed.listen((completed) {
-          if (completed && _speedTimer == null && _hasMore && _windowEnd != null) {
-            _startPlayback(_windowEnd!);
-          }
-        });
 
         setState(() {
           _playbackUrl = fullUrl;
@@ -290,10 +281,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           if (_generation != gen || !mounted) return;
           final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
 
-          _pbPlayer?.dispose();
-          _pbPlayer = Player();
-          _pbController = VideoController(_pbPlayer!);
-          _pbPlayer!.setVolume(0);
+          _ensurePlayer();
           _pbPlayer!.open(Media(fullUrl));
 
           _pbPlayer!.stream.duration.listen((dur) {

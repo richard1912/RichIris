@@ -21,14 +21,14 @@ PLAYBACK_QUALITY: dict[str, dict] = {
     "direct": {
         "pre_input": [],
         "codec": ["-c", "copy"],
-        "movflags": "+faststart",
-        "streaming": False,
+        "movflags": "frag_keyframe+empty_moov",
+        "streaming": True,
     },
     "high": {
         "pre_input": [],
         "codec": ["-c", "copy"],
-        "movflags": "+faststart",
-        "streaming": False,
+        "movflags": "frag_keyframe+empty_moov",
+        "streaming": True,
     },
     "medium": {
         "pre_input": ["-hwaccel", "cuda"],
@@ -162,8 +162,8 @@ class PlaybackManager:
 
         if session.streaming:
             # Fragmented MP4: ready once initial fMP4 header is written
-            for _ in range(60):  # up to 30 seconds
-                await asyncio.sleep(0.5)
+            for _ in range(300):  # up to 30 seconds
+                await asyncio.sleep(0.1)
                 if output_path.exists() and output_path.stat().st_size > 4096:
                     session.ready = True
                     logger.info("Streaming playback ready", extra={"session_id": session.session_id})
