@@ -220,6 +220,7 @@ class _MainNav extends StatefulWidget {
 
 class _MainNavState extends State<_MainNav> {
   int? _selectedCameraId;
+  int? _fullscreenCameraId;
   bool _showSystem = false;
 
   @override
@@ -255,6 +256,28 @@ class _MainNavState extends State<_MainNav> {
       );
     }
 
+    // Fullscreen mode: render inline (no Navigator.push) for faster transitions
+    if (_fullscreenCameraId != null) {
+      final cam = widget.cameras.where((c) => c.id == _fullscreenCameraId).firstOrNull;
+      if (cam != null) {
+        return FullscreenScreen(
+          camera: cam,
+          stream: _streamForCamera(_fullscreenCameraId!),
+          quality: widget.quality,
+          streamSource: widget.streamSource,
+          streamApi: widget.streamApi,
+          recordingApi: widget.recordingApi,
+          clipApi: widget.clipApi,
+          systemApi: widget.systemApi,
+          tzOffsetMs: widget.tzOffsetMs,
+          onQualityChanged: widget.onQualityChanged,
+          onStreamSourceChanged: widget.onStreamSourceChanged,
+          onBack: () => setState(() => _fullscreenCameraId = null),
+        );
+      }
+      _fullscreenCameraId = null;
+    }
+
     return HomeScreen(
       cameras: widget.cameras,
       systemStatus: widget.systemStatus,
@@ -268,22 +291,7 @@ class _MainNavState extends State<_MainNav> {
       selectedCameraId: _selectedCameraId,
       onCameraSelected: (id) {
         if (_selectedCameraId == id) {
-          final cam = widget.cameras.firstWhere((c) => c.id == id);
-          Navigator.of(context).push(MaterialPageRoute(
-            builder: (_) => FullscreenScreen(
-              camera: cam,
-              stream: _streamForCamera(id),
-              quality: widget.quality,
-              streamSource: widget.streamSource,
-              streamApi: widget.streamApi,
-              recordingApi: widget.recordingApi,
-              clipApi: widget.clipApi,
-              systemApi: widget.systemApi,
-              tzOffsetMs: widget.tzOffsetMs,
-              onQualityChanged: widget.onQualityChanged,
-              onStreamSourceChanged: widget.onStreamSourceChanged,
-            ),
-          ));
+          setState(() => _fullscreenCameraId = id);
         } else {
           setState(() => _selectedCameraId = id);
         }

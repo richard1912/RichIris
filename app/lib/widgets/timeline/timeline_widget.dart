@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../services/recording_api.dart';
 import '../../services/clip_api.dart';
 import '../../utils/time_utils.dart';
 import '../../config/constants.dart';
 import '../../models/thumbnail_info.dart';
+import '../../models/clip_export.dart';
 import 'timeline_controller.dart';
 import 'timeline_painter.dart';
 import 'timeline_minimap.dart';
@@ -48,6 +50,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   late TimelineController _ctrl;
   Timer? _playheadTimer;
   Timer? _segmentPollTimer;
+  Timer? _clipPollTimer;
   bool _manualPan = false;
   String? _hoverTime;
   List<ThumbnailInfo> _thumbnails = [];
@@ -58,6 +61,11 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   double _thumbLeft = 0;
   double _thumbTop = 0;
   String _thumbSrc = '';
+
+  // Clip export state
+  List<ClipExport> _clips = [];
+  bool _showClips = false;
+  bool _exporting = false;
 
   @override
   void initState() {
@@ -75,6 +83,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     if (oldWidget.cameraId != widget.cameraId) {
       _ctrl.setDate(todayDate(tzOffsetMs: widget.tzOffsetMs));
       _fetchSegments();
+      _clips = [];
+      _showClips = false;
+      _stopClipPolling();
     }
     if (widget.isLive && !oldWidget.isLive) {
       _manualPan = false;
@@ -87,6 +98,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     _thumbOverlay = null;
     _playheadTimer?.cancel();
     _segmentPollTimer?.cancel();
+    _clipPollTimer?.cancel();
     _ctrl.removeListener(_onCtrlChange);
     _ctrl.dispose();
     super.dispose();
@@ -256,23 +268,109 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     }
   }
 
+  // --- Clip export ---
+
+  void _enterExportMode() {
+    _ctrl.toggleExportMode();
+    if (_ctrl.exportMode) {
+      _fetchClips();
+      setState(() => _showClips = true);
+    } else {
+      _stopClipPolling();
+      setState(() => _showClips = false);
+    }
+  }
+
   Future<void> _exportClip() async {
     final s = _ctrl.exportStartHour;
     final e = _ctrl.exportEndHour;
     if (s == null || e == null) return;
     final start = hourToISO(_ctrl.selectedDate, s);
     final end = hourToISO(_ctrl.selectedDate, e);
+
+    setState(() => _exporting = true);
     try {
       await widget.clipApi.create(widget.cameraId, start, end);
-      _ctrl.toggleExportMode();
+      _ctrl.clearExportPoints();
+      _fetchClips();
+      _startClipPolling();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Clip export started'),
+            backgroundColor: Color(0xFF22C55E),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
     } catch (err) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Export failed: $err')),
         );
       }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
     }
   }
+
+  Future<void> _fetchClips() async {
+    try {
+      final clips = await widget.clipApi.fetchAll(cameraId: widget.cameraId);
+      if (mounted) setState(() => _clips = clips);
+      // If any clip is still processing, keep polling
+      if (clips.any((c) => c.status == 'pending' || c.status == 'processing')) {
+        _startClipPolling();
+      } else {
+        _stopClipPolling();
+      }
+    } catch (_) {}
+  }
+
+  void _startClipPolling() {
+    _clipPollTimer?.cancel();
+    _clipPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      _fetchClips();
+    });
+  }
+
+  void _stopClipPolling() {
+    _clipPollTimer?.cancel();
+    _clipPollTimer = null;
+  }
+
+  Future<void> _downloadClip(ClipExport clip) async {
+    final url = widget.clipApi.downloadUrl(clip.id);
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  Future<void> _deleteClip(ClipExport clip) async {
+    try {
+      await widget.clipApi.delete(clip.id);
+      _fetchClips();
+    } catch (err) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed: $err')),
+        );
+      }
+    }
+  }
+
+  String _exportInstruction() {
+    if (_ctrl.exportStartHour == null) return 'Tap timeline to set start';
+    if (_ctrl.exportEndHour == null) return 'Tap timeline to set end';
+    final dur = ((_ctrl.exportEndHour! - _ctrl.exportStartHour!) * 3600).round();
+    final m = dur ~/ 60;
+    final s = dur % 60;
+    return '${hourToTimeString(_ctrl.exportStartHour!)} - ${hourToTimeString(_ctrl.exportEndHour!)}  (${m}m ${s}s)';
+  }
+
+  // --- Build ---
 
   @override
   Widget build(BuildContext context) {
@@ -285,6 +383,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
           // Top row: date picker, LIVE button, export controls
           _buildControls(),
           const SizedBox(height: 4),
+          // Export mode instructions
+          if (_ctrl.exportMode) _buildExportBar(),
           // Timeline bar
           _buildTimelineBar(),
           // Minimap
@@ -323,6 +423,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                 }).toList(),
               ),
             ),
+          // Clips list
+          if (_showClips && _clips.isNotEmpty) _buildClipsList(),
         ],
       ),
     );
@@ -365,39 +467,23 @@ class _TimelineWidgetState extends State<TimelineWidget> {
         ),
         const Spacer(),
         // Hover time
-        if (_hoverTime != null)
+        if (_hoverTime != null && !_ctrl.exportMode)
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: Text(_hoverTime!, style: const TextStyle(fontSize: 11, color: Color(0xFF737373))),
           ),
-        // Export button
-        if (_ctrl.exportMode && _ctrl.exportStartHour != null && _ctrl.exportEndHour != null)
-          Padding(
-            padding: const EdgeInsets.only(right: 4),
-            child: SizedBox(
-              height: 26,
-              child: ElevatedButton(
-                onPressed: _exportClip,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF22C55E),
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  minimumSize: Size.zero,
-                ),
-                child: const Text('Export', style: TextStyle(fontSize: 11)),
-              ),
-            ),
-          ),
+        // Export Clip / Cancel
         SizedBox(
           height: 26,
           child: TextButton(
-            onPressed: () => _ctrl.toggleExportMode(),
+            onPressed: _enterExportMode,
             style: TextButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               minimumSize: Size.zero,
               foregroundColor: _ctrl.exportMode ? const Color(0xFF22C55E) : const Color(0xFF737373),
             ),
             child: Text(
-              _ctrl.exportMode ? 'Cancel Export' : 'Export Clip',
+              _ctrl.exportMode ? 'Cancel' : 'Export Clip',
               style: const TextStyle(fontSize: 11),
             ),
           ),
@@ -422,6 +508,161 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       ],
     );
   }
+
+  Widget _buildExportBar() {
+    final hasRange = _ctrl.exportStartHour != null && _ctrl.exportEndHour != null;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF22C55E).withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: const Color(0xFF22C55E).withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.content_cut, size: 14, color: Color(0xFF22C55E)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _exportInstruction(),
+              style: const TextStyle(fontSize: 11, color: Color(0xFF22C55E)),
+            ),
+          ),
+          if (hasRange)
+            SizedBox(
+              height: 24,
+              child: ElevatedButton(
+                onPressed: _exporting ? null : _exportClip,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF22C55E),
+                  disabledBackgroundColor: const Color(0xFF22C55E).withValues(alpha: 0.5),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  minimumSize: Size.zero,
+                ),
+                child: _exporting
+                    ? const SizedBox(
+                        width: 12, height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Text('Export', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildClipsList() {
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      constraints: const BoxConstraints(maxHeight: 120),
+      child: ListView.builder(
+        shrinkWrap: true,
+        itemCount: _clips.length,
+        itemBuilder: (context, index) {
+          final clip = _clips[index];
+          return _buildClipRow(clip);
+        },
+      ),
+    );
+  }
+
+  Widget _buildClipRow(ClipExport clip) {
+    final startDt = DateTime.parse(clip.startTime);
+    final endDt = DateTime.parse(clip.endTime);
+    final timeStr = '${_fmtTime(startDt)} - ${_fmtTime(endDt)}';
+    final dateStr = '${startDt.month}/${startDt.day}';
+
+    Color statusColor;
+    String statusText;
+    IconData? actionIcon;
+
+    switch (clip.status) {
+      case 'pending':
+        statusColor = const Color(0xFFEAB308);
+        statusText = 'Queued';
+        break;
+      case 'processing':
+        statusColor = const Color(0xFF3B82F6);
+        statusText = 'Processing';
+        break;
+      case 'done':
+        statusColor = const Color(0xFF22C55E);
+        statusText = 'Ready';
+        actionIcon = Icons.download;
+        break;
+      case 'failed':
+        statusColor = const Color(0xFFEF4444);
+        statusText = 'Failed';
+        break;
+      default:
+        statusColor = const Color(0xFF737373);
+        statusText = clip.status;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      margin: const EdgeInsets.only(bottom: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        children: [
+          // Status dot
+          Container(
+            width: 6, height: 6,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor),
+          ),
+          const SizedBox(width: 6),
+          // Spinner for processing
+          if (clip.status == 'pending' || clip.status == 'processing')
+            const Padding(
+              padding: EdgeInsets.only(right: 6),
+              child: SizedBox(
+                width: 10, height: 10,
+                child: CircularProgressIndicator(strokeWidth: 1.5, color: Color(0xFF3B82F6)),
+              ),
+            ),
+          // Time range
+          Expanded(
+            child: Text(
+              '$dateStr  $timeStr',
+              style: const TextStyle(fontSize: 10, color: Color(0xFFA3A3A3)),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // Status label
+          Text(statusText, style: TextStyle(fontSize: 10, color: statusColor)),
+          const SizedBox(width: 8),
+          // Download button
+          if (actionIcon != null)
+            InkWell(
+              onTap: () => _downloadClip(clip),
+              borderRadius: BorderRadius.circular(4),
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(actionIcon, size: 16, color: const Color(0xFF22C55E)),
+              ),
+            ),
+          // Delete button
+          InkWell(
+            onTap: () => _deleteClip(clip),
+            borderRadius: BorderRadius.circular(4),
+            child: const Padding(
+              padding: EdgeInsets.all(2),
+              child: Icon(Icons.close, size: 14, color: Color(0xFF525252)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _fmtTime(DateTime dt) =>
+      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
   Widget _buildTimelineBar() {
     final barHeight = widget.compact ? 40.0 : 56.0;
