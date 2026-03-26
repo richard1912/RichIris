@@ -194,7 +194,7 @@ async def get_playback_mp4(session_id: str):
             # If ffmpeg is still running, wait for more data
             proc = session.process
             if proc and proc.returncode is None:
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.05)
             else:
                 # ffmpeg finished — read any remaining bytes
                 final_size = mp4_path.stat().st_size
