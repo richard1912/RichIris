@@ -28,6 +28,7 @@ class FullscreenScreen extends StatefulWidget {
   final int tzOffsetMs;
   final ValueChanged<Quality> onQualityChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
+  final VoidCallback? onBack;
 
   const FullscreenScreen({
     super.key,
@@ -42,6 +43,7 @@ class FullscreenScreen extends StatefulWidget {
     required this.tzOffsetMs,
     required this.onQualityChanged,
     required this.onStreamSourceChanged,
+    this.onBack,
   });
 
   @override
@@ -373,7 +375,13 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           children: [
             IconButton(
               icon: const Icon(Icons.arrow_back, size: 20),
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: () {
+                if (widget.onBack != null) {
+                  widget.onBack!();
+                } else {
+                  Navigator.of(context).pop();
+                }
+              },
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             ),
@@ -479,7 +487,11 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     if (event is! KeyDownEvent) return;
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.escape) {
-      Navigator.of(context).pop();
+      if (widget.onBack != null) {
+        widget.onBack!();
+      } else {
+        Navigator.of(context).pop();
+      }
     } else if (key == LogicalKeyboardKey.arrowRight) {
       final idx = kSpeeds.indexOf(_speed);
       if (idx < kSpeeds.length - 1) _onSpeedChanged(kSpeeds[idx + 1]);

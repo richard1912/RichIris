@@ -105,11 +105,55 @@ class TimelinePainter extends CustomPainter {
     final e = controller.exportEndHour;
     if (s == null) return;
 
-    final exportPaint = Paint()..color = const Color(0xFF22C55E).withValues(alpha: 0.25);
     final end = e ?? s;
     final x1 = (s - vpStart) / vpHours * size.width;
     final x2 = (end - vpStart) / vpHours * size.width;
-    canvas.drawRect(Rect.fromLTRB(x1, 0, x2, size.height), exportPaint);
+
+    // Green range fill
+    if (e != null) {
+      final exportPaint = Paint()..color = const Color(0xFF22C55E).withValues(alpha: 0.2);
+      canvas.drawRect(Rect.fromLTRB(x1, 0, x2, size.height), exportPaint);
+    }
+
+    // Start marker (green line + label)
+    final markerPaint = Paint()..color = const Color(0xFF22C55E)..strokeWidth = 2;
+    if (x1 >= -5 && x1 <= size.width + 5) {
+      canvas.drawLine(Offset(x1, 0), Offset(x1, size.height), markerPaint);
+      _drawExportLabel(canvas, size, x1, s, true);
+    }
+
+    // End marker
+    if (e != null && x2 >= -5 && x2 <= size.width + 5) {
+      canvas.drawLine(Offset(x2, 0), Offset(x2, size.height), markerPaint);
+      _drawExportLabel(canvas, size, x2, e, false);
+    }
+  }
+
+  void _drawExportLabel(Canvas canvas, Size size, double x, double hour, bool isStart) {
+    final timeStr = hourToTimeString(hour);
+    final tp = TextPainter(
+      text: TextSpan(
+        text: timeStr,
+        style: const TextStyle(color: Color(0xFF22C55E), fontSize: 9, fontWeight: FontWeight.w600),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    final bw = tp.width + 8;
+    final bh = tp.height + 4;
+    // Position label: start goes right, end goes left
+    final bx = isStart
+        ? (x + 2).clamp(0.0, size.width - bw)
+        : (x - bw - 2).clamp(0.0, size.width - bw);
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(bx, 2, bw, bh),
+        const Radius.circular(3),
+      ),
+      Paint()..color = const Color(0xE0000000),
+    );
+    tp.paint(canvas, Offset(bx + 4, 4));
   }
 
   void _drawPlayhead(Canvas canvas, Size size, double vpStart, double vpHours) {

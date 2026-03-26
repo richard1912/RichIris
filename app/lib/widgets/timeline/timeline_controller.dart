@@ -134,6 +134,12 @@ class TimelineController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void clearExportPoints() {
+    exportStartHour = null;
+    exportEndHour = null;
+    notifyListeners();
+  }
+
   void setExportPoint(double hour) {
     if (exportStartHour == null || exportEndHour != null) {
       exportStartHour = hour;

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import '../models/camera.dart';
 import '../models/system_status.dart';
 import '../services/stream_api.dart';
@@ -14,6 +15,8 @@ class CameraGrid extends StatelessWidget {
   final ValueChanged<int> onCameraSelected;
   final ValueChanged<Camera> onEditCamera;
   final VoidCallback onAddCamera;
+  final Map<int, VideoController> playbackControllers;
+  final Set<int> playbackLoading;
 
   const CameraGrid({
     super.key,
@@ -26,6 +29,8 @@ class CameraGrid extends StatelessWidget {
     required this.onCameraSelected,
     required this.onEditCamera,
     required this.onAddCamera,
+    this.playbackControllers = const {},
+    this.playbackLoading = const {},
   });
 
   StreamStatus? _streamFor(int cameraId) {
@@ -61,6 +66,8 @@ class CameraGrid extends StatelessWidget {
           selected: selectedCameraId == cam.id,
           onTap: () => onCameraSelected(cam.id),
           onEdit: () => onEditCamera(cam),
+          playbackController: playbackControllers[cam.id],
+          playbackLoading: playbackLoading.contains(cam.id),
         );
       },
     );

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import '../models/camera.dart';
 import '../models/system_status.dart';
 import 'live_player.dart';
@@ -10,6 +11,8 @@ class CameraCard extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback onEdit;
+  final VideoController? playbackController;
+  final bool playbackLoading;
 
   const CameraCard({
     super.key,
@@ -19,6 +22,8 @@ class CameraCard extends StatelessWidget {
     this.selected = false,
     required this.onTap,
     required this.onEdit,
+    this.playbackController,
+    this.playbackLoading = false,
   });
 
   @override
@@ -45,7 +50,17 @@ class CameraCard extends StatelessWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (camera.enabled && running)
+                  if (playbackLoading)
+                    const Center(
+                      child: Text('Loading...',
+                          style: TextStyle(
+                              color: Color(0xFF737373), fontSize: 12)),
+                    )
+                  else if (playbackController != null)
+                    IgnorePointer(
+                      child: _buildPlaybackVideo(),
+                    )
+                  else if (camera.enabled && running)
                     IgnorePointer(
                       child: LivePlayer(
                         wsUrl: streamUrl,
@@ -98,11 +113,13 @@ class CameraCard extends StatelessWidget {
                     height: 6,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: running
-                          ? const Color(0xFF22C55E)
-                          : camera.enabled
-                              ? const Color(0xFFEAB308)
-                              : const Color(0xFFEF4444),
+                      color: playbackController != null
+                          ? const Color(0xFF3B82F6)
+                          : running
+                              ? const Color(0xFF22C55E)
+                              : camera.enabled
+                                  ? const Color(0xFFEAB308)
+                                  : const Color(0xFFEF4444),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -113,6 +130,9 @@ class CameraCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (playbackController != null)
+                    const Text('Playback',
+                        style: TextStyle(fontSize: 10, color: Color(0xFF3B82F6))),
                 ],
               ),
             ),
@@ -120,5 +140,21 @@ class CameraCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Widget _buildPlaybackVideo() {
+    final rot = camera.rotation;
+    Widget video = Video(
+      controller: playbackController!,
+      fit: BoxFit.cover,
+    );
+    if (rot != 0) {
+      final isRotated = rot == 90 || rot == 270;
+      video = Transform.rotate(
+        angle: rot * 3.14159265 / 180,
+        child: isRotated ? Transform.scale(scale: 0.5625, child: video) : video,
+      );
+    }
+    return video;
   }
 }
