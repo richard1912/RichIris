@@ -80,6 +80,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   @override
   void dispose() {
     _clearSpeedTimer();
+    _seekSub?.cancel();
     _pbPlayer?.dispose();
     super.dispose();
   }
@@ -90,6 +91,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _reverseLoading = false;
     _generation++;
   }
+
+  StreamSubscription? _seekSub;
 
   void _ensurePlayer() {
     if (_pbPlayer != null) return;
@@ -110,6 +113,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     });
     _clearSpeedTimer();
     _speed = 1;
+    _seekSub?.cancel();
 
     try {
       final session = await widget.recordingApi.startPlayback(
@@ -117,14 +121,24 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         start,
         widget.quality.param,
       );
-      final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
+      final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
 
       _ensurePlayer();
       _pbPlayer!.open(Media(fullUrl));
 
+      // Seek to offset within segment
+      if (session.seekSeconds > 1.0) {
+        _seekSub = _pbPlayer!.stream.duration.listen((dur) {
+          if (dur > Duration.zero) {
+            _pbPlayer!.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
+            _seekSub?.cancel();
+          }
+        });
+      }
+
       setState(() {
         _playbackUrl = fullUrl;
-        _windowEnd = session.windowEnd;
+        _windowEnd = session.segmentEnd;
         _hasMore = session.hasMore;
         _isLive = false;
         _playbackStartTime = start;
@@ -176,14 +190,24 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           .startPlayback(widget.camera.id, startStr, widget.quality.param)
           .then((session) {
         if (_generation != gen || !mounted) return;
-        final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
+        final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
 
         _ensurePlayer();
         _pbPlayer!.open(Media(fullUrl));
 
+        if (session.seekSeconds > 1.0) {
+          _seekSub?.cancel();
+          _seekSub = _pbPlayer!.stream.duration.listen((dur) {
+            if (dur > Duration.zero) {
+              _pbPlayer!.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
+              _seekSub?.cancel();
+            }
+          });
+        }
+
         setState(() {
           _playbackUrl = fullUrl;
-          _windowEnd = session.windowEnd;
+          _windowEnd = session.segmentEnd;
           _hasMore = session.hasMore;
           _isLive = false;
           _playbackStartTime = startStr;
@@ -281,7 +305,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
             .startPlayback(widget.camera.id, newStart, widget.quality.param)
             .then((session) {
           if (_generation != gen || !mounted) return;
-          final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
+          final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
 
           _ensurePlayer();
           _pbPlayer!.open(Media(fullUrl));
@@ -293,7 +317,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
             _virtualTimeMs = newStartMs + seekTarget.inMilliseconds;
             setState(() {
               _playbackUrl = fullUrl;
-              _windowEnd = session.windowEnd;
+              _windowEnd = session.segmentEnd;
               _hasMore = session.hasMore;
               _playbackStartTime = newStart;
             });

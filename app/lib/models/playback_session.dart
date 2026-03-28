@@ -1,18 +1,24 @@
 class PlaybackSession {
-  final String playbackUrl;
-  final String windowEnd;
+  final String segmentUrl;
+  final double seekSeconds;
+  final String segmentStart;
+  final String segmentEnd;
   final bool hasMore;
 
   PlaybackSession({
-    required this.playbackUrl,
-    required this.windowEnd,
+    required this.segmentUrl,
+    required this.seekSeconds,
+    required this.segmentStart,
+    required this.segmentEnd,
     required this.hasMore,
   });
 
   factory PlaybackSession.fromJson(Map<String, dynamic> json) =>
       PlaybackSession(
-        playbackUrl: json['playback_url'] as String,
-        windowEnd: json['window_end'] as String,
+        segmentUrl: json['segment_url'] as String,
+        seekSeconds: (json['seek_seconds'] as num).toDouble(),
+        segmentStart: (json['segment_start'] as String?) ?? '',
+        segmentEnd: json['segment_end'] as String,
         hasMore: json['has_more'] as bool,
       );
 }

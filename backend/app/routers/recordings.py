@@ -1,13 +1,11 @@
 """Recording playback API endpoints."""
 
-import asyncio
-import hashlib
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +13,6 @@ from app.config import get_config
 from app.database import get_db
 from app.models import Camera, Recording
 from app.schemas import RecordingResponse, ThumbnailInfo
-from app.services.playback import get_playback_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
 
 logger = logging.getLogger(__name__)
@@ -71,9 +68,6 @@ async def list_segments(
     return segments
 
 
-PLAYBACK_WINDOW = 1800  # 30 minutes
-
-
 @router.post("/{camera_id}/playback")
 async def start_playback_session(
     camera_id: int,
@@ -81,134 +75,78 @@ async def start_playback_session(
     quality: str = Query("high", description="Quality tier: high, medium, low"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Start a playback session. High = instant remux, medium/low = NVENC transcode."""
+    """Find the recording segment containing the requested time.
+
+    Returns the segment file URL and seek offset — no ffmpeg, no remux.
+    media_kit (libmpv) plays .ts files natively.
+    """
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    window_end = start + timedelta(seconds=PLAYBACK_WINDOW)
-
-    # Segments overlapping [start, window_end]
+    # Find the segment that contains 'start'
     result = await db.execute(
         select(Recording)
         .where(
             Recording.camera_id == camera_id,
-            Recording.start_time < window_end,
+            Recording.start_time <= start,
             Recording.end_time > start,
         )
-        .order_by(Recording.start_time)
+        .order_by(Recording.start_time.desc())
+        .limit(1)
     )
-    segments = result.scalars().all()
+    seg = result.scalars().first()
 
-    if not segments:
+    # If no segment contains start, find the next one after start
+    if not seg:
+        result = await db.execute(
+            select(Recording)
+            .where(
+                Recording.camera_id == camera_id,
+                Recording.start_time > start,
+            )
+            .order_by(Recording.start_time)
+            .limit(1)
+        )
+        seg = result.scalars().first()
+
+    if not seg:
         raise HTTPException(status_code=404, detail="No recordings in range")
 
-    segment_paths = [str(Path(s.file_path)) for s in segments if Path(s.file_path).exists()]
-    if not segment_paths:
-        raise HTTPException(status_code=404, detail="Recording files missing")
+    if not Path(seg.file_path).exists():
+        raise HTTPException(status_code=404, detail="Recording file missing")
 
-    # Calculate seek offset if start is mid-segment
-    seek_seconds = 0.0
-    first_seg = segments[0]
-    if first_seg.start_time < start:
-        seek_seconds = (start - first_seg.start_time).total_seconds()
+    seek_seconds = max(0.0, (start - seg.start_time).total_seconds())
+    seg_end = seg.end_time or (seg.start_time + timedelta(seconds=seg.duration or 900))
 
-    # Calculate actual duration to remux (may be less than full window)
-    last_seg = segments[-1]
-    last_end = last_seg.end_time or (last_seg.start_time + timedelta(seconds=last_seg.duration or 900))
-    actual_end = min(window_end, last_end)
-    duration_limit = (actual_end - start).total_seconds()
-
-    # Check if more recordings exist beyond this window
+    # Check if more segments exist after this one
     has_more_result = await db.execute(
         select(Recording.id)
         .where(
             Recording.camera_id == camera_id,
-            Recording.start_time >= window_end,
+            Recording.start_time >= seg_end,
         )
         .limit(1)
     )
     has_more = has_more_result.first() is not None
 
-    key = f"{camera_id}:{start.isoformat()}:{quality}"
-    session_id = hashlib.md5(key.encode()).hexdigest()[:12]
-
-    mgr = get_playback_manager()
-    session = await mgr.start_session(
-        session_id, segment_paths,
-        seek_seconds=seek_seconds, duration_limit=duration_limit,
-        quality=quality,
+    logger.info(
+        "Playback segment found",
+        extra={
+            "camera_id": camera_id,
+            "recording_id": seg.id,
+            "seek_seconds": seek_seconds,
+            "has_more": has_more,
+        },
     )
 
-    # Wait for remux to complete (typically < 1s, up to 60s for large files)
-    try:
-        await asyncio.wait_for(session._ready_event.wait(), timeout=60)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=503, detail="Remux timed out")
-
-    if not session.ready:
-        raise HTTPException(status_code=500, detail="Remux failed")
-
     return {
-        "session_id": session_id,
-        "playback_url": f"/api/recordings/playback/{session_id}/playback.mp4",
-        "window_end": actual_end.isoformat(),
+        "segment_url": f"/api/recordings/segment/{seg.id}",
+        "seek_seconds": seek_seconds,
+        "segment_start": seg.start_time.isoformat(),
+        "segment_end": seg_end.isoformat(),
         "has_more": has_more,
     }
-
-
-@router.get("/playback/{session_id}/playback.mp4")
-async def get_playback_mp4(session_id: str):
-    """Serve the remuxed/transcoded playback MP4 file.
-
-    For streaming sessions (medium/low quality), streams bytes as ffmpeg
-    writes them so the browser can start playback immediately.
-    """
-    mgr = get_playback_manager()
-    session = mgr.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Playback session not found")
-
-    mp4_path = session.output_dir / "playback.mp4"
-    if not mp4_path.exists():
-        raise HTTPException(status_code=404, detail="Playback not ready")
-
-    if not session.streaming:
-        return FileResponse(mp4_path, media_type="video/mp4")
-
-    # Stream fragmented MP4 as ffmpeg writes it
-    async def stream_file():
-        CHUNK = 64 * 1024
-        pos = 0
-        while True:
-            size = mp4_path.stat().st_size
-            if pos < size:
-                with open(mp4_path, "rb") as f:
-                    f.seek(pos)
-                    while pos < size:
-                        data = f.read(min(CHUNK, size - pos))
-                        if not data:
-                            break
-                        pos += len(data)
-                        yield data
-            # If ffmpeg is still running, wait for more data
-            proc = session.process
-            if proc and proc.returncode is None:
-                await asyncio.sleep(0.05)
-            else:
-                # ffmpeg finished — read any remaining bytes
-                final_size = mp4_path.stat().st_size
-                if pos < final_size:
-                    with open(mp4_path, "rb") as f:
-                        f.seek(pos)
-                        while True:
-                            data = f.read(CHUNK)
-                            if not data:
-                                break
-                            yield data
-                break
-
-    return StreamingResponse(stream_file(), media_type="video/mp4")
 
 
 @router.get("/segment/{recording_id}")

@@ -4,7 +4,6 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../config/constants.dart';
 import '../models/camera.dart';
-import '../models/playback_session.dart';
 import '../models/system_status.dart';
 import '../services/stream_api.dart';
 import '../services/recording_api.dart';
@@ -64,8 +63,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<int, VideoController> _pbControllers = {};
   final Map<int, StreamSubscription> _completedSubs = {};
   final Set<int> _pbLoading = {};
-  String? _playbackStartTime;
-  final Map<int, String> _pbStartTimes = {};
+  final Set<int> _pbFailed = {};
   int _generation = 0;
 
   @override
@@ -102,61 +100,59 @@ class _HomeScreenState extends State<HomeScreen> {
       p.stop();
     }
 
-    // Kill old backend ffmpeg processes before starting new ones
-    await widget.recordingApi.stopAllPlayback();
-    if (_generation != gen || !mounted) return;
-
     final enabledCameras = widget.cameras.where((c) => c.enabled).toList();
 
     setState(() {
       _isLive = false;
-      _playbackStartTime = start;
-      _pbStartTimes.clear();
       _pbLoading.clear();
+      _pbFailed.clear();
       for (final cam in enabledCameras) {
         _pbLoading.add(cam.id);
-        _pbStartTimes[cam.id] = start;
       }
     });
 
-    // Fire all API requests in parallel, collect results
-    final futures = <int, Future<PlaybackSession?>>{};
+    // Fire all cameras independently — each opens its player as soon as ready
     for (final cam in enabledCameras) {
-      futures[cam.id] = widget.recordingApi
-          .startPlayback(cam.id, start, widget.quality.param)
-          .then<PlaybackSession?>((s) => s)
-          .catchError((_) => null as PlaybackSession?);
+      _startCameraPlayback(cam.id, start, gen);
     }
+  }
 
-    // Wait for all to complete
-    final results = <int, PlaybackSession?>{};
-    for (final entry in futures.entries) {
-      results[entry.key] = await entry.value;
-    }
+  Future<void> _startCameraPlayback(int cameraId, String start, int gen) async {
+    try {
+      final session = await widget.recordingApi.startPlayback(
+        cameraId, start, widget.quality.param,
+      );
+      if (_generation != gen || !mounted) return;
 
-    if (_generation != gen || !mounted) return;
-
-    // Open all players together for sync
-    for (final entry in results.entries) {
-      final cameraId = entry.key;
-      final session = entry.value;
       _pbLoading.remove(cameraId);
-
-      if (session == null) continue;
-
-      final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
+      final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
       final player = _ensurePlayer(cameraId);
       player.open(Media(fullUrl));
+
+      // Seek to offset within segment
+      if (session.seekSeconds > 1.0) {
+        late StreamSubscription sub;
+        sub = player.stream.duration.listen((dur) {
+          if (dur > Duration.zero && _generation == gen) {
+            player.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
+            sub.cancel();
+          }
+        });
+      }
 
       _completedSubs[cameraId]?.cancel();
       _completedSubs[cameraId] = player.stream.completed.listen((completed) {
         if (completed && session.hasMore && _generation == gen) {
-          _continueCameraPlayback(cameraId, session.windowEnd, gen);
+          _continueCameraPlayback(cameraId, session.segmentEnd, gen);
         }
       });
+      if (mounted) setState(() {});
+    } catch (_) {
+      if (_generation != gen || !mounted) return;
+      _pbLoading.remove(cameraId);
+      _pbFailed.add(cameraId);
+      if (mounted) setState(() {});
     }
-
-    if (mounted) setState(() {});
   }
 
   Future<void> _continueCameraPlayback(int cameraId, String start, int gen) async {
@@ -166,8 +162,7 @@ class _HomeScreenState extends State<HomeScreen> {
         cameraId, start, widget.quality.param,
       );
       if (_generation != gen || !mounted) return;
-      _pbStartTimes[cameraId] = start;
-      final fullUrl = widget.recordingApi.getPlaybackMp4Url(session.playbackUrl);
+      final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
       final player = _pbPlayers[cameraId];
       if (player == null) return;
       player.open(Media(fullUrl));
@@ -175,7 +170,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _completedSubs[cameraId]?.cancel();
       _completedSubs[cameraId] = player.stream.completed.listen((completed) {
         if (completed && session.hasMore && _generation == gen) {
-          _continueCameraPlayback(cameraId, session.windowEnd, gen);
+          _continueCameraPlayback(cameraId, session.segmentEnd, gen);
         }
       });
     } catch (_) {}
@@ -190,28 +185,14 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final p in _pbPlayers.values) {
       p.stop();
     }
-    widget.recordingApi.stopAllPlayback();
     setState(() {
       _isLive = true;
-      _playbackStartTime = null;
-      _pbStartTimes.clear();
       _pbLoading.clear();
+      _pbFailed.clear();
     });
   }
 
   int _getNvrTime() {
-    if (_isLive) return DateTime.now().millisecondsSinceEpoch + widget.tzOffsetMs;
-    if (_playbackStartTime != null) {
-      for (final entry in _pbPlayers.entries) {
-        final p = entry.value;
-        if (p.state.duration > Duration.zero) {
-          final camStart = _pbStartTimes[entry.key] ?? _playbackStartTime!;
-          final startMs = DateTime.parse(camStart).millisecondsSinceEpoch;
-          return startMs + p.state.position.inMilliseconds + widget.tzOffsetMs;
-        }
-      }
-      return DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch + widget.tzOffsetMs;
-    }
     return DateTime.now().millisecondsSinceEpoch + widget.tzOffsetMs;
   }
 
@@ -272,6 +253,7 @@ class _HomeScreenState extends State<HomeScreen> {
               onAddCamera: widget.onAddCamera,
               playbackControllers: _isLive ? const {} : _pbControllers,
               playbackLoading: _isLive ? const {} : _pbLoading,
+              playbackFailed: _isLive ? const {} : _pbFailed,
             ),
           ),
           if (widget.selectedCameraId != null)

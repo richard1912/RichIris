@@ -17,6 +17,7 @@ class CameraGrid extends StatelessWidget {
   final VoidCallback onAddCamera;
   final Map<int, VideoController> playbackControllers;
   final Set<int> playbackLoading;
+  final Set<int> playbackFailed;
 
   const CameraGrid({
     super.key,
@@ -31,6 +32,7 @@ class CameraGrid extends StatelessWidget {
     required this.onAddCamera,
     this.playbackControllers = const {},
     this.playbackLoading = const {},
+    this.playbackFailed = const {},
   });
 
   StreamStatus? _streamFor(int cameraId) {
@@ -68,6 +70,7 @@ class CameraGrid extends StatelessWidget {
           onEdit: () => onEditCamera(cam),
           playbackController: playbackControllers[cam.id],
           playbackLoading: playbackLoading.contains(cam.id),
+          playbackFailed: playbackFailed.contains(cam.id),
         );
       },
     );

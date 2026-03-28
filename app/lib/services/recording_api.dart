@@ -27,7 +27,6 @@ class RecordingApi {
     final resp = await _client.dio.post(
       '/api/recordings/$cameraId/playback',
       queryParameters: {'start': start, 'quality': quality},
-      options: Options(receiveTimeout: const Duration(seconds: 120)),
     );
     return PlaybackSession.fromJson(resp.data as Map<String, dynamic>);
   }
@@ -47,8 +46,8 @@ class RecordingApi {
     }
   }
 
-  String getPlaybackMp4Url(String sessionUrl) {
-    return '${_client.baseUrl}$sessionUrl';
+  String getSegmentUrl(String segmentPath) {
+    return '${_client.baseUrl}$segmentPath';
   }
 
   String getThumbnailUrl(String relativeUrl) {

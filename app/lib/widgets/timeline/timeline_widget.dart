@@ -52,6 +52,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   Timer? _segmentPollTimer;
   Timer? _clipPollTimer;
   bool _manualPan = false;
+  // Playback time tracking — kept here so polling rebuilds can't reset it
+  String? _playbackIso;
+  int? _playbackWallStartMs;
   String? _hoverTime;
   List<ThumbnailInfo> _thumbnails = [];
   double _lastScale = 1.0;
@@ -89,6 +92,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     }
     if (widget.isLive && !oldWidget.isLive) {
       _manualPan = false;
+      _playbackIso = null;
+      _playbackWallStartMs = null;
     }
   }
 
@@ -209,7 +214,12 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       if (!mounted) return;
       if (_manualPan && widget.isLive) return;
       double? hour;
-      if (widget.getNvrTime != null) {
+      if (!widget.isLive && _playbackIso != null && _playbackWallStartMs != null) {
+        // Playback: compute time from local tracking (immune to parent rebuilds)
+        final elapsed = DateTime.now().millisecondsSinceEpoch - _playbackWallStartMs!;
+        final startHour = isoToHour(_playbackIso!);
+        hour = startHour + elapsed / 3600000.0;
+      } else if (widget.getNvrTime != null) {
         final ms = widget.getNvrTime!();
         final dt = DateTime.fromMillisecondsSinceEpoch(ms);
         hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0;
@@ -264,6 +274,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       _manualPan = true;
       _ctrl.setPlayhead(hour);
       final iso = hourToISO(_ctrl.selectedDate, hour);
+      _playbackIso = iso;
+      _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
       widget.onPlayback(iso);
     }
   }
