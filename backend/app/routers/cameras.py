@@ -47,11 +47,14 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
     db.add(camera)
     await db.commit()
     await db.refresh(camera)
-    logger.info("Camera created", extra={"camera_id": camera.id, "name": camera.name})
+    logger.info("Camera created", extra={"camera_id": camera.id, "camera_name": camera.name})
 
     if camera.enabled:
-        mgr = get_stream_manager()
-        await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+        try:
+            mgr = get_stream_manager()
+            await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+        except Exception:
+            logger.exception("Failed to start stream for new camera", extra={"camera_id": camera.id})
 
     return camera
 
