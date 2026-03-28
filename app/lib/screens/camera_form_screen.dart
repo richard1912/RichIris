@@ -17,20 +17,50 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late final TextEditingController _nameCtrl;
   late final TextEditingController _rtspCtrl;
   late final TextEditingController _subStreamCtrl;
+  late final TextEditingController _usernameCtrl;
+  late final TextEditingController _passwordCtrl;
   late bool _enabled;
   late int _rotation;
   bool _saving = false;
   String? _error;
+  bool _obscurePassword = true;
 
   bool get isEditing => widget.camera != null;
+
+  /// Parse credentials from an RTSP URL like rtsp://user:pass@host/path
+  /// Returns (username, password, urlWithoutCreds).
+  static (String, String, String) _parseRtspCreds(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.userInfo.isEmpty) return ('', '', url);
+    final parts = uri.userInfo.split(':');
+    final user = parts.first;
+    final pass = parts.length > 1 ? parts.sublist(1).join(':') : '';
+    final clean = url.replaceFirst('${uri.userInfo}@', '');
+    return (user, pass, clean);
+  }
+
+  /// Inject credentials into an RTSP URL.
+  static String _injectCreds(String url, String user, String pass) {
+    if (user.isEmpty) return url;
+    final creds = pass.isEmpty ? user : '$user:$pass';
+    final re = RegExp(r'^(rtsp://)(.*)$', caseSensitive: false);
+    final m = re.firstMatch(url);
+    if (m == null) return url;
+    return '${m.group(1)}$creds@${m.group(2)}';
+  }
 
   @override
   void initState() {
     super.initState();
+    final (user, pass, mainUrl) =
+        _parseRtspCreds(widget.camera?.rtspUrl ?? '');
+    final (_, _, subUrl) =
+        _parseRtspCreds(widget.camera?.subStreamUrl ?? '');
     _nameCtrl = TextEditingController(text: widget.camera?.name ?? '');
-    _rtspCtrl = TextEditingController(text: widget.camera?.rtspUrl ?? '');
-    _subStreamCtrl =
-        TextEditingController(text: widget.camera?.subStreamUrl ?? '');
+    _rtspCtrl = TextEditingController(text: mainUrl);
+    _subStreamCtrl = TextEditingController(text: subUrl);
+    _usernameCtrl = TextEditingController(text: user);
+    _passwordCtrl = TextEditingController(text: pass);
     _enabled = widget.camera?.enabled ?? true;
     _rotation = widget.camera?.rotation ?? 0;
   }
@@ -40,6 +70,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _nameCtrl.dispose();
     _rtspCtrl.dispose();
     _subStreamCtrl.dispose();
+    _usernameCtrl.dispose();
+    _passwordCtrl.dispose();
     super.dispose();
   }
 
@@ -50,26 +82,26 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       _error = null;
     });
     try {
+      final user = _usernameCtrl.text.trim();
+      final pass = _passwordCtrl.text.trim();
+      final mainUrl = _injectCreds(_rtspCtrl.text.trim(), user, pass);
+      final sub = _subStreamCtrl.text.trim();
+      final subUrl = sub.isNotEmpty ? _injectCreds(sub, user, pass) : null;
+
       if (isEditing) {
         final data = <String, dynamic>{
           'name': _nameCtrl.text.trim(),
-          'rtsp_url': _rtspCtrl.text.trim(),
+          'rtsp_url': mainUrl,
+          'sub_stream_url': subUrl,
           'enabled': _enabled,
           'rotation': _rotation,
         };
-        final sub = _subStreamCtrl.text.trim();
-        if (sub.isNotEmpty) {
-          data['sub_stream_url'] = sub;
-        } else {
-          data['sub_stream_url'] = null;
-        }
         await widget.cameraApi.update(widget.camera!.id, data);
       } else {
         await widget.cameraApi.create(
           name: _nameCtrl.text.trim(),
-          rtspUrl: _rtspCtrl.text.trim(),
-          subStreamUrl:
-              _subStreamCtrl.text.trim().isNotEmpty ? _subStreamCtrl.text.trim() : null,
+          rtspUrl: mainUrl,
+          subStreamUrl: subUrl,
           enabled: _enabled,
           rotation: _rotation,
         );
@@ -142,7 +174,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 controller: _rtspCtrl,
                 decoration: const InputDecoration(
                   labelText: 'RTSP URL',
-                  hintText: 'rtsp://192.168.8.41:554/stream',
+                  hintText: 'rtsp://192.168.8.41/stream1',
                 ),
                 validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
               ),
@@ -151,8 +183,39 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 controller: _subStreamCtrl,
                 decoration: const InputDecoration(
                   labelText: 'Sub-Stream URL (optional)',
-                  hintText: 'rtsp://192.168.8.41:554/sub_stream',
+                  hintText: 'rtsp://192.168.8.41/stream2',
                 ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _usernameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Username (optional)',
+                        hintText: 'admin',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _passwordCtrl,
+                      obscureText: _obscurePassword,
+                      decoration: InputDecoration(
+                        labelText: 'Password (optional)',
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscurePassword
+                              ? Icons.visibility_off
+                              : Icons.visibility),
+                          onPressed: () => setState(
+                              () => _obscurePassword = !_obscurePassword),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 14),
               DropdownButtonFormField<int>(
