@@ -13,7 +13,7 @@ from app.services.job_object import assign_to_job
 logger = logging.getLogger(__name__)
 
 PLAYBACK_DIR = Path("data/playback")
-IDLE_TIMEOUT = 120  # seconds before cleanup
+IDLE_TIMEOUT = 30  # seconds before cleanup
 
 # Quality presets for playback transcoding.
 # direct/high = passthrough (instant), medium/low = NVENC GPU transcode (streamed).
@@ -51,6 +51,7 @@ PLAYBACK_QUALITY: dict[str, dict] = {
 class PlaybackSession:
     session_id: str
     output_dir: Path
+    camera_id: int | None = None
     process: asyncio.subprocess.Process | None = None
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
@@ -71,7 +72,7 @@ class PlaybackManager:
     async def start_session(
         self, session_id: str, segment_paths: list[str],
         seek_seconds: float = 0.0, duration_limit: float = 1800.0,
-        quality: str = "high",
+        quality: str = "high", camera_id: int | None = None,
     ) -> PlaybackSession:
         """Start a playback session. High = instant remux, medium/low = NVENC transcode."""
         # Return existing session if still valid
@@ -80,12 +81,22 @@ class PlaybackManager:
             session.last_access = time.time()
             return session
 
+        # Kill old sessions for the same camera to prevent ffmpeg accumulation
+        if camera_id is not None:
+            stale = [
+                sid for sid, s in self._sessions.items()
+                if s.camera_id == camera_id and sid != session_id
+            ]
+            for sid in stale:
+                logger.info("Evicting old playback session", extra={"session_id": sid, "camera_id": camera_id})
+                await self.stop_session(sid)
+
         self._ensure_cleanup()
 
         output_dir = PLAYBACK_DIR / session_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        session = PlaybackSession(session_id=session_id, output_dir=output_dir)
+        session = PlaybackSession(session_id=session_id, output_dir=output_dir, camera_id=camera_id)
         self._sessions[session_id] = session
 
         config = get_config()

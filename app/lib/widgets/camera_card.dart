@@ -13,6 +13,7 @@ class CameraCard extends StatelessWidget {
   final VoidCallback onEdit;
   final VideoController? playbackController;
   final bool playbackLoading;
+  final bool playbackFailed;
 
   const CameraCard({
     super.key,
@@ -24,6 +25,7 @@ class CameraCard extends StatelessWidget {
     required this.onEdit,
     this.playbackController,
     this.playbackLoading = false,
+    this.playbackFailed = false,
   });
 
   @override
@@ -52,9 +54,28 @@ class CameraCard extends StatelessWidget {
                 children: [
                   if (playbackLoading)
                     const Center(
-                      child: Text('Loading...',
-                          style: TextStyle(
-                              color: Color(0xFF737373), fontSize: 12)),
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFF3B82F6),
+                        ),
+                      ),
+                    )
+                  else if (playbackFailed)
+                    const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.videocam_off,
+                              color: Color(0xFF737373), size: 28),
+                          SizedBox(height: 4),
+                          Text('No recording',
+                              style: TextStyle(
+                                  color: Color(0xFF737373), fontSize: 11)),
+                        ],
+                      ),
                     )
                   else if (playbackController != null)
                     IgnorePointer(
