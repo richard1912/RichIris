@@ -87,9 +87,10 @@ class ThumbnailCapture:
             thumbs_dir.mkdir(parents=True, exist_ok=True)
             out_path = thumbs_dir / f"thumb_{time_str}.jpg"
 
-            # Extract first frame from segment (no seek — reads from keyframe at start)
+            # Extract recent frame from segment (seek near end for freshest frame)
             cmd = [
                 config.ffmpeg.path,
+                "-sseof", "-3",
                 "-i", str(segment),
                 "-frames:v", "1",
                 "-update", "1",
