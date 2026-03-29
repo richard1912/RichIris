@@ -256,63 +256,76 @@ class _MainNavState extends State<_MainNav> {
       );
     }
 
-    // Fullscreen mode: render inline (no Navigator.push) for faster transitions
-    if (_fullscreenCameraId != null) {
-      final cam = widget.cameras.where((c) => c.id == _fullscreenCameraId).firstOrNull;
-      if (cam != null) {
-        return FullscreenScreen(
-          camera: cam,
-          stream: _streamForCamera(_fullscreenCameraId!),
-          quality: widget.quality,
-          streamSource: widget.streamSource,
-          streamApi: widget.streamApi,
-          recordingApi: widget.recordingApi,
-          clipApi: widget.clipApi,
-          systemApi: widget.systemApi,
-          tzOffsetMs: widget.tzOffsetMs,
-          onQualityChanged: widget.onQualityChanged,
-          onStreamSourceChanged: widget.onStreamSourceChanged,
-          onBack: () => setState(() => _fullscreenCameraId = null),
-        );
-      }
-      _fullscreenCameraId = null;
+    // Resolve fullscreen camera
+    final fullscreenCam = _fullscreenCameraId != null
+        ? widget.cameras.where((c) => c.id == _fullscreenCameraId).firstOrNull
+        : null;
+
+    // Camera was removed while in fullscreen — clear it after this frame
+    if (_fullscreenCameraId != null && fullscreenCam == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _fullscreenCameraId = null);
+      });
     }
 
-    return HomeScreen(
-      cameras: widget.cameras,
-      systemStatus: widget.systemStatus,
-      quality: widget.quality,
-      streamSource: widget.streamSource,
-      streamApi: widget.streamApi,
-      recordingApi: widget.recordingApi,
-      clipApi: widget.clipApi,
-      cameraApi: widget.cameraApi,
-      tzOffsetMs: widget.tzOffsetMs,
-      selectedCameraId: _selectedCameraId,
-      onCameraSelected: (id) {
-        if (_selectedCameraId == id) {
-          setState(() => _fullscreenCameraId = id);
-        } else {
-          setState(() => _selectedCameraId = id);
-        }
-      },
-      onQualityChanged: widget.onQualityChanged,
-      onStreamSourceChanged: widget.onStreamSourceChanged,
-      onOpenSystem: () => setState(() => _showSystem = true),
-      onOpenSettings: widget.onOpenSettings,
-      onAddCamera: () async {
-        await Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => CameraFormScreen(cameraApi: widget.cameraApi),
-        ));
-        await widget.onRefreshCameras();
-      },
-      onEditCamera: (cam) async {
-        await Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) =>
-              CameraFormScreen(cameraApi: widget.cameraApi, camera: cam),
-        ));
-        await widget.onRefreshCameras();
-      },
+    // Stack keeps HomeScreen alive (Offstage) so grid feeds don't restart
+    return Stack(
+      children: [
+        Offstage(
+          offstage: fullscreenCam != null,
+          child: HomeScreen(
+            cameras: widget.cameras,
+            systemStatus: widget.systemStatus,
+            quality: widget.quality,
+            streamSource: widget.streamSource,
+            streamApi: widget.streamApi,
+            recordingApi: widget.recordingApi,
+            clipApi: widget.clipApi,
+            cameraApi: widget.cameraApi,
+            tzOffsetMs: widget.tzOffsetMs,
+            selectedCameraId: _selectedCameraId,
+            onCameraSelected: (id) {
+              if (_selectedCameraId == id) {
+                setState(() => _fullscreenCameraId = id);
+              } else {
+                setState(() => _selectedCameraId = id);
+              }
+            },
+            onQualityChanged: widget.onQualityChanged,
+            onStreamSourceChanged: widget.onStreamSourceChanged,
+            onOpenSystem: () => setState(() => _showSystem = true),
+            onOpenSettings: widget.onOpenSettings,
+            onAddCamera: () async {
+              await Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => CameraFormScreen(cameraApi: widget.cameraApi),
+              ));
+              await widget.onRefreshCameras();
+            },
+            onEditCamera: (cam) async {
+              await Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) =>
+                    CameraFormScreen(cameraApi: widget.cameraApi, camera: cam),
+              ));
+              await widget.onRefreshCameras();
+            },
+          ),
+        ),
+        if (fullscreenCam != null)
+          FullscreenScreen(
+            camera: fullscreenCam,
+            stream: _streamForCamera(_fullscreenCameraId!),
+            quality: widget.quality,
+            streamSource: widget.streamSource,
+            streamApi: widget.streamApi,
+            recordingApi: widget.recordingApi,
+            clipApi: widget.clipApi,
+            systemApi: widget.systemApi,
+            tzOffsetMs: widget.tzOffsetMs,
+            onQualityChanged: widget.onQualityChanged,
+            onStreamSourceChanged: widget.onStreamSourceChanged,
+            onBack: () => setState(() => _fullscreenCameraId = null),
+          ),
+      ],
     );
   }
 }

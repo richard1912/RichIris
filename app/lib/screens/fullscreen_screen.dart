@@ -480,9 +480,9 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           ),
         );
       }
-      final url = widget.streamApi.wsUrl(widget.camera.id, widget.streamSource.param, widget.quality.param);
+      final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param);
       return LivePlayer(
-        wsUrl: url,
+        url: url,
         rotation: rot,
         fit: BoxFit.contain,
       );

@@ -8,6 +8,7 @@ import '../models/system_status.dart';
 import '../services/stream_api.dart';
 import '../services/recording_api.dart';
 import '../services/clip_api.dart';
+import '../models/playback_session.dart';
 import '../services/camera_api.dart';
 import '../widgets/camera_grid.dart';
 import '../widgets/quality_selector.dart';
@@ -66,6 +67,10 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<int> _pbFailed = {};
   int _generation = 0;
 
+  // Shared playback clock — single source of truth for all cameras
+  String? _playbackStartIso;
+  int? _playbackWallStartMs;
+
   @override
   void dispose() {
     for (final sub in _completedSubs.values) {
@@ -85,6 +90,14 @@ class _HomeScreenState extends State<HomeScreen> {
       _pbControllers[cameraId] = VideoController(player);
     }
     return _pbPlayers[cameraId]!;
+  }
+
+  /// Current master playback time as ISO string, derived from shared clock.
+  String? _masterTimeIso() {
+    if (_playbackStartIso == null || _playbackWallStartMs == null) return null;
+    final elapsed = DateTime.now().millisecondsSinceEpoch - _playbackWallStartMs!;
+    final start = DateTime.parse(_playbackStartIso!);
+    return start.add(Duration(milliseconds: elapsed)).toIso8601String();
   }
 
   Future<void> _startPlayback(String start) async {
@@ -111,61 +124,93 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
 
-    // Fire all cameras independently — each opens its player as soon as ready
-    for (final cam in enabledCameras) {
-      _startCameraPlayback(cam.id, start, gen);
+    // Fetch all sessions in parallel, then start all players together
+    final sessions = <int, PlaybackSession>{};
+    final futures = enabledCameras.map((cam) async {
+      try {
+        final session = await widget.recordingApi.startPlayback(
+          cam.id, start, widget.quality.param,
+        );
+        sessions[cam.id] = session;
+      } catch (_) {
+        if (_generation == gen && mounted) {
+          _pbFailed.add(cam.id);
+        }
+      }
+    });
+    await Future.wait(futures);
+    if (_generation != gen || !mounted) return;
+
+    // Set shared clock ONCE, then open all players simultaneously
+    _playbackStartIso = start;
+    _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
+
+    for (final entry in sessions.entries) {
+      _pbLoading.remove(entry.key);
+      _openCameraSession(entry.key, entry.value, gen);
     }
+    if (mounted) setState(() {});
   }
 
-  Future<void> _startCameraPlayback(int cameraId, String start, int gen) async {
-    try {
-      final session = await widget.recordingApi.startPlayback(
-        cameraId, start, widget.quality.param,
-      );
-      if (_generation != gen || !mounted) return;
+  /// Opens a player for a single camera session and wires up segment continuation.
+  void _openCameraSession(int cameraId, PlaybackSession session, int gen) {
+    final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
+    final player = _ensurePlayer(cameraId);
+    player.open(Media(fullUrl));
 
-      _pbLoading.remove(cameraId);
-      final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
-      final player = _ensurePlayer(cameraId);
-      player.open(Media(fullUrl));
-
-      // Seek to offset within segment
-      if (session.seekSeconds > 1.0) {
-        late StreamSubscription sub;
-        sub = player.stream.duration.listen((dur) {
-          if (dur > Duration.zero && _generation == gen) {
-            player.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
-            sub.cancel();
-          }
-        });
-      }
-
-      _completedSubs[cameraId]?.cancel();
-      _completedSubs[cameraId] = player.stream.completed.listen((completed) {
-        if (completed && session.hasMore && _generation == gen) {
-          _continueCameraPlayback(cameraId, session.segmentEnd, gen);
+    // Seek to offset within segment
+    if (session.seekSeconds > 1.0) {
+      late StreamSubscription sub;
+      sub = player.stream.duration.listen((dur) {
+        if (dur > Duration.zero && _generation == gen) {
+          player.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
+          sub.cancel();
         }
       });
-      if (mounted) setState(() {});
-    } catch (_) {
-      if (_generation != gen || !mounted) return;
-      _pbLoading.remove(cameraId);
-      _pbFailed.add(cameraId);
-      if (mounted) setState(() {});
     }
+
+    _completedSubs[cameraId]?.cancel();
+    _completedSubs[cameraId] = player.stream.completed.listen((completed) {
+      if (completed && session.hasMore && _generation == gen) {
+        _continueCameraPlayback(cameraId, session.segmentEnd, gen);
+      }
+    });
   }
 
-  Future<void> _continueCameraPlayback(int cameraId, String start, int gen) async {
+  Future<void> _continueCameraPlayback(int cameraId, String segmentEnd, int gen) async {
     if (_generation != gen || !mounted) return;
     try {
       final session = await widget.recordingApi.startPlayback(
-        cameraId, start, widget.quality.param,
+        cameraId, segmentEnd, widget.quality.param,
       );
       if (_generation != gen || !mounted) return;
+
+      // Use master clock to seek into the new segment so this camera
+      // stays aligned with cameras that didn't have a segment boundary.
+      final masterIso = _masterTimeIso();
+      double seekOverride = session.seekSeconds;
+      if (masterIso != null) {
+        final masterTime = DateTime.parse(masterIso);
+        final segStart = DateTime.parse(session.segmentStart.isNotEmpty
+            ? session.segmentStart : segmentEnd);
+        final drift = masterTime.difference(segStart).inMilliseconds / 1000.0;
+        if (drift > 0) seekOverride = drift;
+      }
+
       final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
       final player = _pbPlayers[cameraId];
       if (player == null) return;
       player.open(Media(fullUrl));
+
+      if (seekOverride > 1.0) {
+        late StreamSubscription sub;
+        sub = player.stream.duration.listen((dur) {
+          if (dur > Duration.zero && _generation == gen) {
+            player.seek(Duration(milliseconds: (seekOverride * 1000).round()));
+            sub.cancel();
+          }
+        });
+      }
 
       _completedSubs[cameraId]?.cancel();
       _completedSubs[cameraId] = player.stream.completed.listen((completed) {
@@ -185,6 +230,8 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final p in _pbPlayers.values) {
       p.stop();
     }
+    _playbackStartIso = null;
+    _playbackWallStartMs = null;
     setState(() {
       _isLive = true;
       _pbLoading.clear();
