@@ -52,7 +52,7 @@ class CameraGrid extends StatelessWidget {
         crossAxisCount: columns,
         crossAxisSpacing: 8,
         mainAxisSpacing: 8,
-        childAspectRatio: 16 / 10,
+        childAspectRatio: 16 / 9,
       ),
       itemCount: cameras.length + 1,
       itemBuilder: (context, index) {
@@ -60,7 +60,7 @@ class CameraGrid extends StatelessWidget {
           return _AddCameraCard(onTap: onAddCamera);
         }
         final cam = cameras[index];
-        final url = streamApi.wsUrl(cam.id, streamSource, quality);
+        final url = streamApi.liveUrl(cam.id, streamSource, quality);
         return CameraCard(
           camera: cam,
           stream: _streamFor(cam.id),

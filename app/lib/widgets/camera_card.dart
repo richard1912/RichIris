@@ -84,9 +84,9 @@ class CameraCard extends StatelessWidget {
                   else if (camera.enabled && running)
                     IgnorePointer(
                       child: LivePlayer(
-                        wsUrl: streamUrl,
+                        url: streamUrl,
                         rotation: camera.rotation,
-                        fit: BoxFit.cover,
+                        fit: BoxFit.contain,
                       ),
                     )
                   else
