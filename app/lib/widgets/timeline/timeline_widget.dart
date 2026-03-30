@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../services/recording_api.dart';
 import '../../services/clip_api.dart';
+import '../../services/motion_api.dart';
 import '../../utils/time_utils.dart';
 import '../../config/constants.dart';
 import '../../models/thumbnail_info.dart';
@@ -16,6 +17,7 @@ class TimelineWidget extends StatefulWidget {
   final int cameraId;
   final RecordingApi recordingApi;
   final ClipApi clipApi;
+  final MotionApi motionApi;
   final int tzOffsetMs;
   final bool isLive;
   final bool compact;
@@ -32,6 +34,7 @@ class TimelineWidget extends StatefulWidget {
     required this.cameraId,
     required this.recordingApi,
     required this.clipApi,
+    required this.motionApi,
     required this.tzOffsetMs,
     required this.isLive,
     this.compact = false,
@@ -59,6 +62,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   List<ThumbnailInfo> _thumbnails = [];
   double _lastScale = 1.0;
   bool _wasPinch = false;
+  double? _scaleStartPct;
   final GlobalKey _barKey = GlobalKey();
   OverlayEntry? _thumbOverlay;
   double _thumbLeft = 0;
@@ -122,6 +126,17 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       _ctrl.setSegments(segs);
     } catch (_) {}
     _fetchThumbnails();
+    _fetchMotionEvents();
+  }
+
+  Future<void> _fetchMotionEvents() async {
+    try {
+      final events = await widget.motionApi.fetchEvents(
+        widget.cameraId,
+        _ctrl.selectedDate,
+      );
+      _ctrl.setMotionEvents(events);
+    } catch (_) {}
   }
 
   Future<void> _fetchThumbnails() async {
@@ -700,9 +715,10 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   final pct = details.localPosition.dx / width;
                   _onTimelineTap(pct);
                 },
-                onScaleStart: (_) {
+                onScaleStart: (details) {
                   _lastScale = 1.0;
                   _wasPinch = false;
+                  _scaleStartPct = (details.localFocalPoint.dx / width).clamp(0.0, 1.0);
                 },
                 onScaleUpdate: (details) {
                   if (details.pointerCount >= 2) {
@@ -729,8 +745,12 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                     if (scrub != null) {
                       final pct = _ctrl.hourToViewportPct(scrub);
                       _onTimelineTap(pct);
+                    } else if (_scaleStartPct != null) {
+                      // Quick tap with no movement — scrubHour never set
+                      _onTimelineTap(_scaleStartPct!);
                     }
                   }
+                  _scaleStartPct = null;
                   _ctrl.setScrubHour(null);
                   setState(() => _hoverTime = null);
                   _updateThumbOverlay();

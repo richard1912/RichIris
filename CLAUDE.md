@@ -32,6 +32,7 @@ Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
 - **Live view (HTTP fMP4 — native app)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
 - **Playback remux (no transcode)**: Recordings are HEVC .ts files. All qualities use fragmented MP4 (`-c copy -movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms as soon as the first fragment is written, no waiting for full remux. Browser plays HEVC natively (Chrome 107+, Edge, Safari have hardware HEVC decode). Single files use `-ss` before `-i` for fast keyframe seek. Multiple files use concat demuxer with `-ss` after `-i`. Sessions auto-cleanup after 120s idle.
 - NVIDIA RTX 4080 SUPER available (not currently used — recording is passthrough, live view is zero-transcode via go2rtc)
+- **Motion detection**: OpenCV reads sub-stream RTSP at 2 FPS in a ThreadPoolExecutor (blocking cv2.VideoCapture off async loop). Frame differencing: grayscale → GaussianBlur(21,21) → absdiff → threshold(25) → count changed pixels as percentage. Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. Events stored as MotionEvent rows (start_time, end_time, peak_intensity). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `motion_script` (runs on motion start), `motion_script_off` (runs when motion ends after cooldown). Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes to sensitivity/scripts/enabled take effect immediately via `detector.update_camera()` — no service restart needed. Configurable via camera edit form.
 
 ### Video Quality Selection
 - **Two independent selectors** in header (also in fullscreen view): **Stream** (S1/S2) and **Quality** (Direct/High/Low)
@@ -71,7 +72,8 @@ RichIris/
 │   │   │   ├── clips.py         # Clip export /api/clips (no duration limit)
 │   │   │   ├── recordings.py    # Playback /api/recordings + transcode sessions
 │   │   │   ├── streams.py       # go2rtc stream info /api/streams/{id}/live
-│   │   │   └── system.py        # /api/system/status + storage + retention
+│   │   │   ├── system.py        # /api/system/status + storage + retention
+│   │   │   └── motion.py        # /api/motion events
 │   │   └── services/
 │   │       ├── ffmpeg.py              # Command builder (recording only)
 │   │       ├── stream_manager.py      # FFmpeg recording process lifecycle + go2rtc registration
@@ -80,7 +82,8 @@ RichIris/
 │   │       ├── clip_exporter.py       # Clip export (concat segments → MP4)
 │   │       ├── playback.py            # On-demand HEVC→H.264 transcode for playback
 │   │       ├── thumbnail_capture.py   # Real-time RTSP thumbnail capture
-│   │       └── retention.py           # Age + storage-based retention cleanup
+│   │       ├── retention.py           # Age + storage-based retention cleanup
+│   │       └── motion_detector.py    # OpenCV frame-diff motion detection
 │   ├── requirements.txt
 │   └── run.py                   # Uvicorn entry point (dev)
 ├── go2rtc/
@@ -145,6 +148,7 @@ RichIris/
 - `DELETE /api/clips/{id}` - Delete clip and file
 - `GET /api/recordings/{id}/thumbnails?date=YYYY-MM-DD` - Thumbnail metadata for a date (individual JPEGs)
 - `GET /api/recordings/{id}/thumb/{date}/{filename}` - Serve individual thumbnail JPEG (cached 24h)
+- `GET /api/motion/{id}/events?date=YYYY-MM-DD` - Motion events for a camera on a date
 
 ## Frontend UI Flow
 - **Grid page**: Click camera → selects it (blue ring), shows timeline at bottom. Click same camera again → fullscreen.
@@ -152,11 +156,13 @@ RichIris/
 - **Speed controls**: -32x to 32x. 1x/2x/4x use native `video.playbackRate`. 16x/32x use interval-based jumping. Reverse speeds request new playback sessions at earlier times.
 - **Timeline**: LIVE button, date picker, zoomable timeline bar with blue segments. Mouse wheel zooms (1h-24h range), minimap shown when zoomed for pan navigation. Export clip mode, clips list with download/delete. Trickplay thumbnail preview on hover (individual JPEGs captured from RTSP).
 - **Timeline (Flutter app)**: CustomPainter-based timeline with scrub indicator showing time label. Scroll wheel zoom (Windows), pinch-to-zoom (Android). Mouse hover (Windows) or touch scrub (Android) shows white scrub line with time + trickplay thumbnail via OverlayEntry (floats above timeline, `gaplessPlayback: true` prevents flicker). Tap/release navigates to time and instantly moves red playhead. Playhead timer pauses live-time updates during playback transition (`_manualPan` flag).
+- **Motion events on timeline**: Orange/amber bars above blue recording segments. Visible in both main timeline and minimap. Polled alongside segments (every 15s for today's date).
+
 - **Inline transitions**: Grid↔fullscreen transitions render inline (no Navigator.push) for faster view switching. No route transition animation delay.
 - **Playback**: Uses direct `<video src="...">` for MP4 playback (no HLS.js). MsePlayer is only used for live streams.
 
 ## Key Dependencies
-- **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx
+- **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy
 - **Service**: NSSM (installed via `winget install NSSM.NSSM`)
 - **Live view**: go2rtc (Go binary, RTSP → MSE/WebSocket, installed as Windows service)
 - **Frontend**: react 19, vite, tailwindcss
@@ -175,3 +181,4 @@ RichIris/
 8. Sub-stream live view - use camera's H.264 sub-stream for live, no transcode, no recording interruption (DONE)
 9. go2rtc MSE live view - replaced HLS with go2rtc WebSocket MSE for reliable VPN streaming (DONE)
 10. Flutter native app - Windows + Android app with media_kit, quality selection, timeline interactions (DONE)
+11. Motion detection - OpenCV frame differencing on sub-streams, per-camera sensitivity, timeline overlay, script execution (DONE)

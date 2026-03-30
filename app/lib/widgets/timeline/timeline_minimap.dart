@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../utils/time_utils.dart';
 import 'timeline_controller.dart';
 
 class TimelineMinimap extends StatelessWidget {
@@ -55,6 +56,19 @@ class _MinimapPainter extends CustomPainter {
       final x1 = seg.startHour / 24.0 * size.width;
       final x2 = seg.endHour / 24.0 * size.width;
       canvas.drawRect(Rect.fromLTRB(x1, 2, x2, size.height - 2), segPaint);
+    }
+
+    // Motion events
+    final motionPaint = Paint()..color = const Color(0xFFF59E0B).withValues(alpha: 0.5);
+    for (final event in controller.motionEvents) {
+      final startHour = isoToHour(event.startTime);
+      final endHour = event.endTime != null
+          ? isoToHour(event.endTime!)
+          : startHour + 10 / 3600.0;
+      final x1 = startHour / 24.0 * size.width;
+      final x2 = endHour / 24.0 * size.width;
+      final drawX2 = (x2 - x1 < 1) ? x1 + 1 : x2;
+      canvas.drawRect(Rect.fromLTRB(x1, 1, drawX2, 4), motionPaint);
     }
 
     // Viewport indicator

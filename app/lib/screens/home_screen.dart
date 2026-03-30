@@ -8,6 +8,7 @@ import '../models/system_status.dart';
 import '../services/stream_api.dart';
 import '../services/recording_api.dart';
 import '../services/clip_api.dart';
+import '../services/motion_api.dart';
 import '../models/playback_session.dart';
 import '../services/camera_api.dart';
 import '../widgets/camera_grid.dart';
@@ -22,6 +23,7 @@ class HomeScreen extends StatefulWidget {
   final StreamApi streamApi;
   final RecordingApi recordingApi;
   final ClipApi clipApi;
+  final MotionApi motionApi;
   final CameraApi cameraApi;
   final int tzOffsetMs;
   final int? selectedCameraId;
@@ -42,6 +44,7 @@ class HomeScreen extends StatefulWidget {
     required this.streamApi,
     required this.recordingApi,
     required this.clipApi,
+    required this.motionApi,
     required this.cameraApi,
     required this.tzOffsetMs,
     this.selectedCameraId,
@@ -310,6 +313,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 cameraId: widget.selectedCameraId!,
                 recordingApi: widget.recordingApi,
                 clipApi: widget.clipApi,
+                motionApi: widget.motionApi,
                 tzOffsetMs: widget.tzOffsetMs,
                 isLive: _isLive,
                 compact: true,

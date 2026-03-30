@@ -11,6 +11,9 @@ class CameraCreate(BaseModel):
     sub_stream_url: str | None = None
     enabled: bool = True
     rotation: int = 0
+    motion_sensitivity: int = 0
+    motion_script: str | None = None
+    motion_script_off: str | None = None
 
 
 class CameraUpdate(BaseModel):
@@ -19,6 +22,9 @@ class CameraUpdate(BaseModel):
     sub_stream_url: str | None = None
     enabled: bool | None = None
     rotation: int | None = None
+    motion_sensitivity: int | None = None
+    motion_script: str | None = None
+    motion_script_off: str | None = None
 
 
 class CameraResponse(BaseModel):
@@ -32,7 +38,20 @@ class CameraResponse(BaseModel):
     codec: str | None = None
     fps: float | None = None
     rotation: int = 0
+    motion_sensitivity: int = 0
+    motion_script: str | None = None
+    motion_script_off: str | None = None
     created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MotionEventResponse(BaseModel):
+    id: int
+    camera_id: int
+    start_time: datetime
+    end_time: datetime | None = None
+    peak_intensity: float
 
     model_config = {"from_attributes": True}
 

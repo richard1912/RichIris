@@ -16,13 +16,14 @@ from app.config import get_config
 from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
-from app.routers import cameras, clips, recordings, streams, system
+from app.routers import cameras, clips, motion, recordings, streams, system
 from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
 from app.services.playback import get_playback_manager
 from app.services.stream_manager import get_stream_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
+from app.services.motion_detector import get_motion_detector
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
@@ -57,6 +58,9 @@ async def lifespan(app: FastAPI):
     thumb_capture = get_thumbnail_capture()
     thumb_capture.start(cameras_list)
 
+    motion_detector = get_motion_detector()
+    motion_detector.start(cameras_list)
+
     scan_task = asyncio.create_task(_periodic_scan())
     retention_task = asyncio.create_task(_periodic_retention())
     yield
@@ -64,6 +68,7 @@ async def lifespan(app: FastAPI):
     retention_task.cancel()
 
     logger.info("RichIris NVR shutting down")
+    await motion_detector.stop()
     mgr = get_stream_manager()
     await mgr.stop_all()
     pb = get_playback_manager()
@@ -209,6 +214,7 @@ def create_app() -> FastAPI:
 
     app.include_router(cameras.router)
     app.include_router(clips.router)
+    app.include_router(motion.router)
     app.include_router(recordings.router)
     app.include_router(streams.router)
     app.include_router(system.router)

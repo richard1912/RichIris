@@ -25,8 +25,13 @@ class Camera(Base):
         DateTime, server_default=func.now()
     )
 
+    motion_sensitivity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    motion_script: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    motion_script_off: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     recordings: Mapped[list["Recording"]] = relationship(back_populates="camera")
     clip_exports: Mapped[list["ClipExport"]] = relationship(back_populates="camera")
+    motion_events: Mapped[list["MotionEvent"]] = relationship(back_populates="camera")
 
 
 class Recording(Base):
@@ -58,3 +63,15 @@ class ClipExport(Base):
     )
 
     camera: Mapped["Camera"] = relationship(back_populates="clip_exports")
+
+
+class MotionEvent(Base):
+    __tablename__ = "motion_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[int] = mapped_column(ForeignKey("cameras.id"), nullable=False)
+    start_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    peak_intensity: Mapped[float] = mapped_column(Float, default=0.0)
+
+    camera: Mapped["Camera"] = relationship(back_populates="motion_events")

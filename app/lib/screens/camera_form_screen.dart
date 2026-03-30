@@ -21,6 +21,9 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late final TextEditingController _passwordCtrl;
   late bool _enabled;
   late int _rotation;
+  late int _motionSensitivity;
+  late final TextEditingController _motionScriptCtrl;
+  late final TextEditingController _motionScriptOffCtrl;
   bool _saving = false;
   String? _error;
   bool _obscurePassword = true;
@@ -63,6 +66,9 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _passwordCtrl = TextEditingController(text: pass);
     _enabled = widget.camera?.enabled ?? true;
     _rotation = widget.camera?.rotation ?? 0;
+    _motionSensitivity = widget.camera?.motionSensitivity ?? 0;
+    _motionScriptCtrl = TextEditingController(text: widget.camera?.motionScript ?? '');
+    _motionScriptOffCtrl = TextEditingController(text: widget.camera?.motionScriptOff ?? '');
   }
 
   @override
@@ -72,6 +78,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _subStreamCtrl.dispose();
     _usernameCtrl.dispose();
     _passwordCtrl.dispose();
+    _motionScriptCtrl.dispose();
+    _motionScriptOffCtrl.dispose();
     super.dispose();
   }
 
@@ -95,6 +103,13 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           'sub_stream_url': subUrl,
           'enabled': _enabled,
           'rotation': _rotation,
+          'motion_sensitivity': _motionSensitivity,
+          'motion_script': _motionScriptCtrl.text.trim().isEmpty
+              ? null
+              : _motionScriptCtrl.text.trim(),
+          'motion_script_off': _motionScriptOffCtrl.text.trim().isEmpty
+              ? null
+              : _motionScriptOffCtrl.text.trim(),
         };
         await widget.cameraApi.update(widget.camera!.id, data);
       } else {
@@ -236,6 +251,53 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 onChanged: (v) => setState(() => _enabled = v),
                 contentPadding: EdgeInsets.zero,
               ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  const Text('Motion Detection', style: TextStyle(fontSize: 14)),
+                  const Spacer(),
+                  Text(
+                    _motionSensitivity == 0 ? 'Off' : '$_motionSensitivity',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: _motionSensitivity == 0
+                          ? const Color(0xFF737373)
+                          : const Color(0xFFF59E0B),
+                    ),
+                  ),
+                ],
+              ),
+              Slider(
+                value: _motionSensitivity.toDouble(),
+                min: 0,
+                max: 100,
+                divisions: 20,
+                activeColor: const Color(0xFFF59E0B),
+                label: _motionSensitivity == 0 ? 'Off' : '$_motionSensitivity',
+                onChanged: (v) => setState(() => _motionSensitivity = v.round()),
+              ),
+              if (_motionSensitivity > 0) ...[
+                const SizedBox(height: 6),
+                TextFormField(
+                  controller: _motionScriptCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Motion Start Script (optional)',
+                    hintText: r'C:\scripts\motion_alert.bat',
+                    helperText: 'Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY',
+                    helperMaxLines: 2,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _motionScriptOffCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Motion End Script (optional)',
+                    hintText: r'C:\scripts\motion_end.bat',
+                    helperText: 'Runs after motion stops (10s cooldown)',
+                    helperMaxLines: 2,
+                  ),
+                ),
+              ],
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
