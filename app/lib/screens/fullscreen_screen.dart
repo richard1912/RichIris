@@ -9,6 +9,7 @@ import '../models/system_status.dart';
 import '../services/stream_api.dart';
 import '../services/recording_api.dart';
 import '../services/clip_api.dart';
+import '../services/motion_api.dart';
 import '../services/system_api.dart';
 import '../utils/time_utils.dart';
 import '../utils/format_utils.dart';
@@ -24,6 +25,7 @@ class FullscreenScreen extends StatefulWidget {
   final StreamApi streamApi;
   final RecordingApi recordingApi;
   final ClipApi clipApi;
+  final MotionApi motionApi;
   final SystemApi systemApi;
   final int tzOffsetMs;
   final ValueChanged<Quality> onQualityChanged;
@@ -39,6 +41,7 @@ class FullscreenScreen extends StatefulWidget {
     required this.streamApi,
     required this.recordingApi,
     required this.clipApi,
+    required this.motionApi,
     required this.systemApi,
     required this.tzOffsetMs,
     required this.onQualityChanged,
@@ -374,6 +377,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               cameraId: widget.camera.id,
               recordingApi: widget.recordingApi,
               clipApi: widget.clipApi,
+              motionApi: widget.motionApi,
               tzOffsetMs: _tzOffsetMs,
               isLive: _isLive,
               compact: false,

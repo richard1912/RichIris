@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import '../../config/constants.dart';
+import '../../models/motion_event.dart';
 import '../../models/recording_segment.dart';
 import '../../utils/time_utils.dart';
 
@@ -21,6 +22,8 @@ class TimelineController extends ChangeNotifier {
   double? exportEndHour;
   List<RecordingSegment> _segments = [];
   List<MergedSegment> merged = [];
+  List<MotionEvent> _motionEvents = [];
+  List<MotionEvent> get motionEvents => _motionEvents;
 
   TimelineController({required this.selectedDate})
       : zoomLevel = 1.0,
@@ -83,10 +86,16 @@ class TimelineController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setMotionEvents(List<MotionEvent> events) {
+    _motionEvents = events;
+    notifyListeners();
+  }
+
   void setDate(String date) {
     selectedDate = date;
     _segments = [];
     merged = [];
+    _motionEvents = [];
     exportMode = false;
     exportStartHour = null;
     exportEndHour = null;

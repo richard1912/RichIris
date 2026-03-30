@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
 from app.database import get_db
-from app.models import Camera, ClipExport, Recording
+from app.models import Camera, ClipExport, MotionEvent, Recording
 from app.schemas import CameraCreate, CameraResponse, CameraUpdate
 from app.services.ffmpeg import sanitize_camera_name
+from app.services.motion_detector import get_motion_detector
 from app.services.stream_manager import get_stream_manager
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,9 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         name=data.name, rtsp_url=data.rtsp_url,
         sub_stream_url=data.sub_stream_url or None,
         enabled=data.enabled, rotation=data.rotation,
+        motion_sensitivity=data.motion_sensitivity,
+        motion_script=data.motion_script,
+        motion_script_off=data.motion_script_off,
     )
     db.add(camera)
     await db.commit()
@@ -86,6 +90,12 @@ async def update_camera(
         camera.enabled = data.enabled
     if data.rotation is not None:
         camera.rotation = data.rotation
+    if data.motion_sensitivity is not None:
+        camera.motion_sensitivity = data.motion_sensitivity
+    if "motion_script" in (data.model_fields_set or set()):
+        camera.motion_script = data.motion_script
+    if "motion_script_off" in (data.model_fields_set or set()):
+        camera.motion_script_off = data.motion_script_off
 
     await db.commit()
     await db.refresh(camera)
@@ -100,6 +110,10 @@ async def update_camera(
     elif needs_restart:
         await mgr.stop_stream(camera.id)
         await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+
+    # Update motion detection if settings changed
+    detector = get_motion_detector()
+    await detector.update_camera(camera)
 
     return camera
 
@@ -116,7 +130,7 @@ async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
 
     # Remove DB metadata (recordings + clip exports) so FK constraints don't block delete.
     # Actual video files on disk are NOT deleted.
-    for model in (ClipExport, Recording):
+    for model in (ClipExport, MotionEvent, Recording):
         result = await db.execute(select(model).where(model.camera_id == camera_id))
         for row in result.scalars().all():
             await db.delete(row)

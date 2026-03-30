@@ -13,6 +13,7 @@ import 'services/api_client.dart';
 import 'services/camera_api.dart';
 import 'services/recording_api.dart';
 import 'services/clip_api.dart';
+import 'services/motion_api.dart';
 import 'services/system_api.dart';
 import 'services/stream_api.dart';
 import 'theme.dart';
@@ -29,6 +30,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   CameraApi? _cameraApi;
   RecordingApi? _recordingApi;
   ClipApi? _clipApi;
+  MotionApi? _motionApi;
   SystemApi? _systemApi;
   StreamApi? _streamApi;
 
@@ -83,6 +85,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     _cameraApi = CameraApi(_apiClient!);
     _recordingApi = RecordingApi(_apiClient!);
     _clipApi = ClipApi(_apiClient!);
+    _motionApi = MotionApi(_apiClient!);
     _systemApi = SystemApi(_apiClient!);
     _streamApi = StreamApi(_apiClient!);
     _fetchInitialData();
@@ -152,6 +155,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   cameraApi: _cameraApi!,
                   recordingApi: _recordingApi!,
                   clipApi: _clipApi!,
+                  motionApi: _motionApi!,
                   systemApi: _systemApi!,
                   streamApi: _streamApi!,
                   apiClient: _apiClient!,
@@ -181,6 +185,7 @@ class _MainNav extends StatefulWidget {
   final CameraApi cameraApi;
   final RecordingApi recordingApi;
   final ClipApi clipApi;
+  final MotionApi motionApi;
   final SystemApi systemApi;
   final StreamApi streamApi;
   final ApiClient apiClient;
@@ -199,6 +204,7 @@ class _MainNav extends StatefulWidget {
     required this.cameraApi,
     required this.recordingApi,
     required this.clipApi,
+    required this.motionApi,
     required this.systemApi,
     required this.streamApi,
     required this.apiClient,
@@ -281,6 +287,7 @@ class _MainNavState extends State<_MainNav> {
             streamApi: widget.streamApi,
             recordingApi: widget.recordingApi,
             clipApi: widget.clipApi,
+            motionApi: widget.motionApi,
             cameraApi: widget.cameraApi,
             tzOffsetMs: widget.tzOffsetMs,
             selectedCameraId: _selectedCameraId,
@@ -319,6 +326,7 @@ class _MainNavState extends State<_MainNav> {
             streamApi: widget.streamApi,
             recordingApi: widget.recordingApi,
             clipApi: widget.clipApi,
+            motionApi: widget.motionApi,
             systemApi: widget.systemApi,
             tzOffsetMs: widget.tzOffsetMs,
             onQualityChanged: widget.onQualityChanged,

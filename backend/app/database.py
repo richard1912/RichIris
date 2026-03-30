@@ -87,6 +87,33 @@ async def init_db() -> None:
             logger.info("Migration: added sub_stream_url column to cameras")
         except Exception:
             pass  # Column already exists
+    # Migrate: add motion_sensitivity column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN motion_sensitivity INTEGER NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added motion_sensitivity column to cameras")
+        except Exception:
+            pass  # Column already exists
+    # Migrate: add motion_script column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN motion_script VARCHAR(500)")
+            )
+            logger.info("Migration: added motion_script column to cameras")
+        except Exception:
+            pass  # Column already exists
+    # Migrate: add motion_script_off column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN motion_script_off VARCHAR(500)")
+            )
+            logger.info("Migration: added motion_script_off column to cameras")
+        except Exception:
+            pass  # Column already exists
     logger.info("Database tables created")
 
 

@@ -9,6 +9,9 @@ class Camera {
   final String? codec;
   final double? fps;
   final int rotation;
+  final int motionSensitivity;
+  final String? motionScript;
+  final String? motionScriptOff;
   final String createdAt;
 
   Camera({
@@ -22,6 +25,9 @@ class Camera {
     this.codec,
     this.fps,
     this.rotation = 0,
+    this.motionSensitivity = 0,
+    this.motionScript,
+    this.motionScriptOff,
     required this.createdAt,
   });
 
@@ -36,6 +42,9 @@ class Camera {
         codec: json['codec'] as String?,
         fps: (json['fps'] as num?)?.toDouble(),
         rotation: json['rotation'] as int? ?? 0,
+        motionSensitivity: json['motion_sensitivity'] as int? ?? 0,
+        motionScript: json['motion_script'] as String?,
+        motionScriptOff: json['motion_script_off'] as String?,
         createdAt: json['created_at'] as String,
       );
 
@@ -45,5 +54,7 @@ class Camera {
         if (subStreamUrl != null) 'sub_stream_url': subStreamUrl,
         'enabled': enabled,
         'rotation': rotation,
+        'motion_sensitivity': motionSensitivity,
+        if (motionScript != null) 'motion_script': motionScript,
       };
 }

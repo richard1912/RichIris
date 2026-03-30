@@ -25,6 +25,9 @@ class TimelinePainter extends CustomPainter {
     // Segments (blue bars)
     _drawSegments(canvas, size, vpStart, vpHours);
 
+    // Motion events (orange bars)
+    _drawMotionEvents(canvas, size, vpStart, vpHours);
+
     // Export range overlay (green)
     _drawExportRange(canvas, size, vpStart, vpHours);
 
@@ -95,6 +98,40 @@ class TimelinePainter extends CustomPainter {
           const Radius.circular(2),
         ),
         segPaint,
+      );
+    }
+  }
+
+  void _drawMotionEvents(Canvas canvas, Size size, double vpStart, double vpHours) {
+    if (controller.motionEvents.isEmpty) return;
+    final motionPaint = Paint()..color = const Color(0xFFF59E0B).withValues(alpha: 0.8);
+    final barTop = size.height * 0.08;
+    final barHeight = size.height * 0.18;
+
+    for (final event in controller.motionEvents) {
+      final startHour = isoToHour(event.startTime);
+      final endHour = event.endTime != null
+          ? isoToHour(event.endTime!)
+          : startHour + 10 / 3600.0; // 10-second default for in-progress events
+
+      final x1 = (startHour - vpStart) / vpHours * size.width;
+      final x2 = (endHour - vpStart) / vpHours * size.width;
+      if (x2 < 0 || x1 > size.width) continue;
+
+      // Ensure minimum visible width of 2 pixels
+      final drawX2 = (x2 - x1 < 2) ? x1 + 2 : x2;
+
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTRB(
+            x1.clamp(0, size.width),
+            barTop,
+            drawX2.clamp(0, size.width),
+            barTop + barHeight,
+          ),
+          const Radius.circular(1),
+        ),
+        motionPaint,
       );
     }
   }
