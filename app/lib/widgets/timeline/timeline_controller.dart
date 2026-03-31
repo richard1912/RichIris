@@ -91,6 +91,23 @@ class TimelineController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Returns the motion event at the given hour, or null.
+  /// [padHours] expands the hit target on each side (in hours).
+  MotionEvent? motionEventAtHour(double hour, {double padHours = 0}) {
+    for (final event in _motionEvents) {
+      final startHour = isoToHour(event.startTime);
+      final endHour = event.endTime != null
+          ? isoToHour(event.endTime!)
+          : startHour + 10 / 3600.0;
+      final halfSpan = ((endHour - startHour) / 2).clamp(padHours, double.infinity);
+      final mid = (startHour + endHour) / 2;
+      if (hour >= mid - halfSpan - padHours && hour <= mid + halfSpan + padHours) {
+        return event;
+      }
+    }
+    return null;
+  }
+
   void setDate(String date) {
     selectedDate = date;
     _segments = [];

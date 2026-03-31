@@ -62,6 +62,34 @@ class ThumbnailCapture:
                 return segments[0]
         return None
 
+    async def _extract_frame(self, config, segment: Path, out_path: Path, tp, seek_args: list[str]) -> bool:
+        """Run ffmpeg to extract a single frame. Returns True if a valid thumbnail was produced."""
+        cmd = [
+            config.ffmpeg.path,
+            *seek_args,
+            "-i", str(segment),
+            "-frames:v", "1",
+            "-update", "1",
+            "-vf", f"scale={tp.thumb_width}:{tp.thumb_height}",
+            "-q:v", "5",
+            "-y",
+            str(out_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assign_to_job(proc.pid)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+
+        if proc.returncode != 0:
+            return False
+        if out_path.exists() and out_path.stat().st_size < 2000:
+            out_path.unlink()
+            return False
+        return out_path.exists()
+
     async def _capture_loop(self, camera) -> None:
         config = get_config()
         tp = config.trickplay
@@ -87,48 +115,24 @@ class ThumbnailCapture:
             thumbs_dir.mkdir(parents=True, exist_ok=True)
             out_path = thumbs_dir / f"thumb_{time_str}.jpg"
 
-            # Extract recent frame from segment (seek near end for freshest frame)
-            cmd = [
-                config.ffmpeg.path,
-                "-sseof", "-3",
-                "-i", str(segment),
-                "-frames:v", "1",
-                "-update", "1",
-                "-vf", f"scale={tp.thumb_width}:{tp.thumb_height}",
-                "-q:v", "5",
-                "-y",
-                str(out_path),
-            ]
-
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                assign_to_job(proc.pid)
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                # Try seeking near end first (works for completed segments
+                # and cameras with short GOP intervals)
+                ok = await self._extract_frame(config, segment, out_path, tp,
+                                               ["-sseof", "-10"])
+                if not ok:
+                    # Fallback: read from start (always finds a keyframe,
+                    # needed for actively-writing segments with long GOPs)
+                    ok = await self._extract_frame(config, segment, out_path, tp, [])
 
-                if proc.returncode != 0:
-                    logger.debug("Thumbnail capture failed", extra={
-                        "camera": camera.name,
-                        "returncode": proc.returncode,
-                        "stderr": stderr.decode(errors="replace")[-200:],
-                    })
-                    continue
-
-                # Reject blank frames (< 2KB)
-                if out_path.exists() and out_path.stat().st_size < 2000:
-                    out_path.unlink()
-                    logger.debug("Rejected blank thumbnail", extra={"camera": camera.name})
-                    continue
-
-                if out_path.exists():
+                if ok:
                     logger.debug("Captured thumbnail", extra={
                         "camera": camera.name,
                         "path": str(out_path),
                         "size": out_path.stat().st_size,
                     })
+                else:
+                    logger.debug("Thumbnail capture failed", extra={"camera": camera.name})
 
             except asyncio.TimeoutError:
                 logger.warning("Thumbnail capture timed out", extra={"camera": camera.name})
