@@ -47,6 +47,8 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         motion_sensitivity=data.motion_sensitivity,
         motion_script=data.motion_script,
         motion_script_off=data.motion_script_off,
+        ai_detection=data.ai_detection,
+        ai_confidence_threshold=data.ai_confidence_threshold,
     )
     db.add(camera)
     await db.commit()
@@ -96,6 +98,10 @@ async def update_camera(
         camera.motion_script = data.motion_script
     if "motion_script_off" in (data.model_fields_set or set()):
         camera.motion_script_off = data.motion_script_off
+    if data.ai_detection is not None:
+        camera.ai_detection = data.ai_detection
+    if data.ai_confidence_threshold is not None:
+        camera.ai_confidence_threshold = data.ai_confidence_threshold
 
     await db.commit()
     await db.refresh(camera)

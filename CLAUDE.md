@@ -31,8 +31,9 @@ Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
 - **Live view (go2rtc MSE — web UI)**: go2rtc takes RTSP input (prefers sub-stream URL when configured) and outputs MSE (fMP4 over WebSocket). Frontend opens a WebSocket to go2rtc, sends `{"type":"mse"}`, and receives a continuous push-based stream of fMP4 segments. No HLS, no polling, no file I/O. Works reliably over WireGuard VPN. Streams are registered dynamically by RichIris via go2rtc's REST API on camera startup. **MsePlayer uses a persistent video pool** — video elements and WebSocket connections are kept alive at the module level (`Map<cameraId, StreamEntry>`), surviving React unmount/remount. View transitions (grid↔fullscreen) just move the same `<video>` DOM element between containers via `appendChild`, so the feed is never interrupted.
 - **Live view (HTTP fMP4 — native app)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
 - **Playback remux (no transcode)**: Recordings are HEVC .ts files. All qualities use fragmented MP4 (`-c copy -movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms as soon as the first fragment is written, no waiting for full remux. Browser plays HEVC natively (Chrome 107+, Edge, Safari have hardware HEVC decode). Single files use `-ss` before `-i` for fast keyframe seek. Multiple files use concat demuxer with `-ss` after `-i`. Sessions auto-cleanup after 120s idle.
-- NVIDIA RTX 4080 SUPER available (not currently used — recording is passthrough, live view is zero-transcode via go2rtc)
-- **Motion detection**: OpenCV reads sub-stream RTSP at 2 FPS in a ThreadPoolExecutor (blocking cv2.VideoCapture off async loop). Frame differencing: grayscale → GaussianBlur(21,21) → absdiff → threshold(25) → count changed pixels as percentage. Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. Events stored as MotionEvent rows (start_time, end_time, peak_intensity). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `motion_script` (runs on motion start), `motion_script_off` (runs when motion ends after cooldown). Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes to sensitivity/scripts/enabled take effect immediately via `detector.update_camera()` — no service restart needed. Configurable via camera edit form.
+- NVIDIA RTX 4080 SUPER available (used for AI person detection via YOLO)
+- **Motion detection**: OpenCV reads sub-stream RTSP at 2 FPS in a ThreadPoolExecutor (blocking cv2.VideoCapture off async loop). Frame differencing: grayscale → GaussianBlur(21,21) → absdiff → threshold(25) → count changed pixels as percentage. Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. Events stored as MotionEvent rows (start_time, end_time, peak_intensity, detection_label, detection_confidence). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `motion_script` (runs on motion start), `motion_script_off` (runs when motion ends after cooldown). Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes to sensitivity/scripts/enabled take effect immediately via `detector.update_camera()` — no service restart needed. Configurable via camera edit form.
+- **AI person detection**: Optional per-camera YOLO-based person detection (Frigate-inspired two-stage pipeline). When `ai_detection` is enabled, motion detection acts as a cheap pre-filter — AI inference only runs on frames where motion was already detected. Uses YOLOv8n (nano, ~6MB) on CUDA GPU via `ultralytics` package. Single shared `ObjectDetector` instance serves all cameras. Inference takes ~2-3ms per frame on RTX 4080 SUPER. Per-camera fields: `ai_detection` (bool, default off), `ai_confidence_threshold` (0-100, default 50). When AI is on, motion events only fire when a person is detected above the confidence threshold. Falls back to CPU if CUDA unavailable.
 
 ### Video Quality Selection
 - **Two independent selectors** in header (also in fullscreen view): **Stream** (S1/S2) and **Quality** (Direct/High/Low)
@@ -83,7 +84,8 @@ RichIris/
 │   │       ├── playback.py            # On-demand HEVC→H.264 transcode for playback
 │   │       ├── thumbnail_capture.py   # Real-time RTSP thumbnail capture
 │   │       ├── retention.py           # Age + storage-based retention cleanup
-│   │       └── motion_detector.py    # OpenCV frame-diff motion detection
+│   │       ├── motion_detector.py    # OpenCV frame-diff motion detection
+│   │       └── object_detector.py    # YOLO AI person detection (GPU)
 │   ├── requirements.txt
 │   └── run.py                   # Uvicorn entry point (dev)
 ├── go2rtc/
@@ -162,7 +164,7 @@ RichIris/
 - **Playback**: Uses direct `<video src="...">` for MP4 playback (no HLS.js). MsePlayer is only used for live streams.
 
 ## Key Dependencies
-- **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy
+- **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy, ultralytics (YOLOv8)
 - **Service**: NSSM (installed via `winget install NSSM.NSSM`)
 - **Live view**: go2rtc (Go binary, RTSP → MSE/WebSocket, installed as Windows service)
 - **Frontend**: react 19, vite, tailwindcss
@@ -182,3 +184,4 @@ RichIris/
 9. go2rtc MSE live view - replaced HLS with go2rtc WebSocket MSE for reliable VPN streaming (DONE)
 10. Flutter native app - Windows + Android app with media_kit, quality selection, timeline interactions (DONE)
 11. Motion detection - OpenCV frame differencing on sub-streams, per-camera sensitivity, timeline overlay, script execution (DONE)
+12. AI person detection - YOLOv8n GPU inference gated by motion pre-filter, per-camera toggle + confidence threshold (DONE)

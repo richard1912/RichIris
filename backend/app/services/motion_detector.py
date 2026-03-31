@@ -11,6 +11,7 @@ import numpy as np
 
 from app.database import get_session_factory
 from app.models import MotionEvent
+from app.services.object_detector import get_object_detector
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ COOLDOWN_SECONDS = 10
 DETECT_FPS = 2
 BLUR_SIZE = (21, 21)
 DIFF_THRESHOLD = 25
+MAX_CHANGE_PCT = 40  # Ignore frames where >40% changed (IR switch, exposure shift)
 
 
 class MotionDetector:
@@ -40,6 +42,8 @@ class MotionDetector:
                         cam.sub_stream_url or cam.rtsp_url,
                         cam.motion_sensitivity, cam.motion_script,
                         cam.motion_script_off,
+                        ai_detection=cam.ai_detection,
+                        ai_threshold=cam.ai_confidence_threshold / 100.0,
                     )
                 )
                 self._tasks[cam.id] = task
@@ -73,11 +77,18 @@ class MotionDetector:
         if self._running and camera.motion_sensitivity > 0 and camera.enabled:
             url = camera.sub_stream_url or camera.rtsp_url
             if url:
+                # Ensure object detector is started if AI detection is enabled
+                if camera.ai_detection:
+                    detector = get_object_detector()
+                    await detector.start()
+
                 task = asyncio.create_task(
                     self._detect_loop(
                         camera.id, camera.name, url,
                         camera.motion_sensitivity, camera.motion_script,
                         camera.motion_script_off,
+                        ai_detection=camera.ai_detection,
+                        ai_threshold=camera.ai_confidence_threshold / 100.0,
                     )
                 )
                 self._tasks[cam_id] = task
@@ -86,6 +97,7 @@ class MotionDetector:
     async def _detect_loop(
         self, cam_id: int, cam_name: str, url: str,
         sensitivity: int, script: str | None, script_off: str | None = None,
+        ai_detection: bool = False, ai_threshold: float = 0.5,
     ) -> None:
         """Per-camera detection loop. Runs until cancelled."""
         loop = asyncio.get_event_loop()
@@ -119,8 +131,25 @@ class MotionDetector:
                         _, thresh = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
                         changed_pct = (np.count_nonzero(thresh) / thresh.size) * 100
 
-                        if changed_pct >= threshold_pct:
-                            await self._on_motion(cam_id, cam_name, changed_pct, script, script_off)
+                        if changed_pct > MAX_CHANGE_PCT:
+                            # Whole-frame change = camera artifact (IR switch, exposure)
+                            prev_gray = gray  # reset baseline to new lighting
+                            await self._check_cooldown(cam_id)
+                        elif changed_pct >= threshold_pct:
+                            if ai_detection:
+                                detector = get_object_detector()
+                                detections = await detector.detect_persons(frame, ai_threshold)
+                                if detections:
+                                    best = max(detections, key=lambda d: d.confidence)
+                                    await self._on_motion(
+                                        cam_id, cam_name, changed_pct, script, script_off,
+                                        detection_label=best.label,
+                                        detection_confidence=best.confidence,
+                                    )
+                                else:
+                                    await self._check_cooldown(cam_id)
+                            else:
+                                await self._on_motion(cam_id, cam_name, changed_pct, script, script_off)
                         else:
                             await self._check_cooldown(cam_id)
 
@@ -156,7 +185,11 @@ class MotionDetector:
         ret, frame = cap.read()
         return frame if ret else None
 
-    async def _on_motion(self, cam_id: int, cam_name: str, intensity: float, script: str | None, script_off: str | None = None) -> None:
+    async def _on_motion(
+        self, cam_id: int, cam_name: str, intensity: float,
+        script: str | None, script_off: str | None = None,
+        detection_label: str | None = None, detection_confidence: float | None = None,
+    ) -> None:
         """Handle detected motion - create or update event."""
         now = datetime.now()
         self._last_motion[cam_id] = now
@@ -169,6 +202,8 @@ class MotionDetector:
                     camera_id=cam_id,
                     start_time=now,
                     peak_intensity=intensity,
+                    detection_label=detection_label,
+                    detection_confidence=detection_confidence,
                 )
                 session.add(event)
                 await session.commit()
@@ -176,18 +211,32 @@ class MotionDetector:
                 self._active_events[cam_id] = event.id
                 self._script_off[cam_id] = script_off
 
-            logger.info("Motion started", extra={"camera": cam_name, "intensity": round(intensity, 2)})
+            log_extra = {"camera": cam_name, "intensity": round(intensity, 2)}
+            if detection_label:
+                log_extra["detection"] = detection_label
+                log_extra["confidence"] = round(detection_confidence, 2)
+            logger.info("Motion started", extra=log_extra)
 
             # Execute script if configured
             if script:
-                asyncio.create_task(self._run_script(script, cam_name, now, intensity))
+                asyncio.create_task(self._run_script(
+                    script, cam_name, now, intensity,
+                    detection_label, detection_confidence,
+                ))
         else:
-            # Update peak intensity if higher
+            # Update peak intensity and detection confidence if higher
             factory = get_session_factory()
             async with factory() as session:
                 event = await session.get(MotionEvent, self._active_events[cam_id])
-                if event and intensity > event.peak_intensity:
-                    event.peak_intensity = intensity
+                if event:
+                    if intensity > event.peak_intensity:
+                        event.peak_intensity = intensity
+                    if detection_confidence and (
+                        event.detection_confidence is None
+                        or detection_confidence > event.detection_confidence
+                    ):
+                        event.detection_confidence = detection_confidence
+                        event.detection_label = detection_label
                     await session.commit()
 
     async def _check_cooldown(self, cam_id: int) -> None:
@@ -219,7 +268,10 @@ class MotionDetector:
         if script_off:
             asyncio.create_task(self._run_script(script_off, str(cam_id), datetime.now(), 0.0))
 
-    async def _run_script(self, script: str, cam_name: str, timestamp: datetime, intensity: float) -> None:
+    async def _run_script(
+        self, script: str, cam_name: str, timestamp: datetime, intensity: float,
+        detection_label: str | None = None, detection_confidence: float | None = None,
+    ) -> None:
         """Execute the configured motion script with environment variables."""
         try:
             env = {
@@ -227,6 +279,8 @@ class MotionDetector:
                 "MOTION_CAMERA": cam_name,
                 "MOTION_TIME": timestamp.isoformat(),
                 "MOTION_INTENSITY": str(round(intensity, 2)),
+                "DETECTION_LABEL": detection_label or "",
+                "DETECTION_CONFIDENCE": str(round(detection_confidence, 2)) if detection_confidence else "",
             }
             proc = await asyncio.create_subprocess_shell(
                 script,

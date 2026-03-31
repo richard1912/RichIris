@@ -4,6 +4,8 @@ class MotionEvent {
   final String startTime;
   final String? endTime;
   final double peakIntensity;
+  final String? detectionLabel;
+  final double? detectionConfidence;
 
   MotionEvent({
     required this.id,
@@ -11,6 +13,8 @@ class MotionEvent {
     required this.startTime,
     this.endTime,
     required this.peakIntensity,
+    this.detectionLabel,
+    this.detectionConfidence,
   });
 
   factory MotionEvent.fromJson(Map<String, dynamic> json) => MotionEvent(
@@ -19,5 +23,7 @@ class MotionEvent {
         startTime: json['start_time'] as String,
         endTime: json['end_time'] as String?,
         peakIntensity: (json['peak_intensity'] as num).toDouble(),
+        detectionLabel: json['detection_label'] as String?,
+        detectionConfidence: (json['detection_confidence'] as num?)?.toDouble(),
       );
 }
