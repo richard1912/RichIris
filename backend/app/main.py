@@ -24,6 +24,7 @@ from app.services.playback import get_playback_manager
 from app.services.stream_manager import get_stream_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
 from app.services.motion_detector import get_motion_detector
+from app.services.object_detector import get_object_detector
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
@@ -58,6 +59,11 @@ async def lifespan(app: FastAPI):
     thumb_capture = get_thumbnail_capture()
     thumb_capture.start(cameras_list)
 
+    # Start AI object detector if any camera has AI detection enabled
+    obj_detector = get_object_detector()
+    if any(getattr(cam, 'ai_detection', False) for cam in cameras_list):
+        await obj_detector.start()
+
     motion_detector = get_motion_detector()
     motion_detector.start(cameras_list)
 
@@ -69,6 +75,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("RichIris NVR shutting down")
     await motion_detector.stop()
+    await obj_detector.stop()
     mgr = get_stream_manager()
     await mgr.stop_all()
     pb = get_playback_manager()

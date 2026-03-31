@@ -114,6 +114,42 @@ async def init_db() -> None:
             logger.info("Migration: added motion_script_off column to cameras")
         except Exception:
             pass  # Column already exists
+    # Migrate: add ai_detection column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN ai_detection BOOLEAN NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added ai_detection column to cameras")
+        except Exception:
+            pass  # Column already exists
+    # Migrate: add ai_confidence_threshold column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN ai_confidence_threshold INTEGER NOT NULL DEFAULT 50")
+            )
+            logger.info("Migration: added ai_confidence_threshold column to cameras")
+        except Exception:
+            pass  # Column already exists
+    # Migrate: add detection_label column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE motion_events ADD COLUMN detection_label VARCHAR(50)")
+            )
+            logger.info("Migration: added detection_label column to motion_events")
+        except Exception:
+            pass  # Column already exists
+    # Migrate: add detection_confidence column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE motion_events ADD COLUMN detection_confidence FLOAT")
+            )
+            logger.info("Migration: added detection_confidence column to motion_events")
+        except Exception:
+            pass  # Column already exists
     logger.info("Database tables created")
 
 

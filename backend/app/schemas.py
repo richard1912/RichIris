@@ -14,6 +14,8 @@ class CameraCreate(BaseModel):
     motion_sensitivity: int = 0
     motion_script: str | None = None
     motion_script_off: str | None = None
+    ai_detection: bool = False
+    ai_confidence_threshold: int = 50
 
 
 class CameraUpdate(BaseModel):
@@ -25,6 +27,8 @@ class CameraUpdate(BaseModel):
     motion_sensitivity: int | None = None
     motion_script: str | None = None
     motion_script_off: str | None = None
+    ai_detection: bool | None = None
+    ai_confidence_threshold: int | None = None
 
 
 class CameraResponse(BaseModel):
@@ -41,6 +45,8 @@ class CameraResponse(BaseModel):
     motion_sensitivity: int = 0
     motion_script: str | None = None
     motion_script_off: str | None = None
+    ai_detection: bool = False
+    ai_confidence_threshold: int = 50
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -52,6 +58,8 @@ class MotionEventResponse(BaseModel):
     start_time: datetime
     end_time: datetime | None = None
     peak_intensity: float
+    detection_label: str | None = None
+    detection_confidence: float | None = None
 
     model_config = {"from_attributes": True}
 

@@ -24,6 +24,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late int _motionSensitivity;
   late final TextEditingController _motionScriptCtrl;
   late final TextEditingController _motionScriptOffCtrl;
+  late bool _aiDetection;
+  late int _aiConfidenceThreshold;
   bool _saving = false;
   String? _error;
   bool _obscurePassword = true;
@@ -69,6 +71,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _motionSensitivity = widget.camera?.motionSensitivity ?? 0;
     _motionScriptCtrl = TextEditingController(text: widget.camera?.motionScript ?? '');
     _motionScriptOffCtrl = TextEditingController(text: widget.camera?.motionScriptOff ?? '');
+    _aiDetection = widget.camera?.aiDetection ?? false;
+    _aiConfidenceThreshold = widget.camera?.aiConfidenceThreshold ?? 50;
   }
 
   @override
@@ -110,6 +114,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           'motion_script_off': _motionScriptOffCtrl.text.trim().isEmpty
               ? null
               : _motionScriptOffCtrl.text.trim(),
+          'ai_detection': _aiDetection,
+          'ai_confidence_threshold': _aiConfidenceThreshold,
         };
         await widget.cameraApi.update(widget.camera!.id, data);
       } else {
@@ -278,12 +284,42 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               ),
               if (_motionSensitivity > 0) ...[
                 const SizedBox(height: 6),
+                SwitchListTile(
+                  title: const Text('AI Person Detection'),
+                  subtitle: const Text('Only trigger events when a person is detected'),
+                  value: _aiDetection,
+                  onChanged: (v) => setState(() => _aiDetection = v),
+                  contentPadding: EdgeInsets.zero,
+                  activeColor: const Color(0xFF3B82F6),
+                ),
+                if (_aiDetection) ...[
+                  Row(
+                    children: [
+                      const Text('Confidence Threshold', style: TextStyle(fontSize: 14)),
+                      const Spacer(),
+                      Text(
+                        '$_aiConfidenceThreshold%',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFF3B82F6)),
+                      ),
+                    ],
+                  ),
+                  Slider(
+                    value: _aiConfidenceThreshold.toDouble(),
+                    min: 10,
+                    max: 95,
+                    divisions: 17,
+                    activeColor: const Color(0xFF3B82F6),
+                    label: '$_aiConfidenceThreshold%',
+                    onChanged: (v) => setState(() => _aiConfidenceThreshold = v.round()),
+                  ),
+                ],
+                const SizedBox(height: 6),
                 TextFormField(
                   controller: _motionScriptCtrl,
                   decoration: const InputDecoration(
                     labelText: 'Motion Start Script (optional)',
                     hintText: r'C:\scripts\motion_alert.bat',
-                    helperText: 'Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY',
+                    helperText: 'Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE',
                     helperMaxLines: 2,
                   ),
                 ),
