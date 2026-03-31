@@ -118,8 +118,8 @@ class TimelinePainter extends CustomPainter {
       final x2 = (endHour - vpStart) / vpHours * size.width;
       if (x2 < 0 || x1 > size.width) continue;
 
-      // Ensure minimum visible width of 2 pixels
-      final drawX2 = (x2 - x1 < 2) ? x1 + 2 : x2;
+      // Ensure minimum visible width of 8 pixels for clickability
+      final drawX2 = (x2 - x1 < 8) ? x1 + 8 : x2;
 
       canvas.drawRRect(
         RRect.fromRectAndRadius(

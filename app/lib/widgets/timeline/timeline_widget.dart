@@ -9,6 +9,7 @@ import '../../utils/time_utils.dart';
 import '../../config/constants.dart';
 import '../../models/thumbnail_info.dart';
 import '../../models/clip_export.dart';
+import '../../models/motion_event.dart';
 import 'timeline_controller.dart';
 import 'timeline_painter.dart';
 import 'timeline_minimap.dart';
@@ -68,6 +69,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   double _thumbLeft = 0;
   double _thumbTop = 0;
   String _thumbSrc = '';
+  MotionEvent? _hoverMotionEvent;
 
   // Clip export state
   List<ClipExport> _clips = [];
@@ -200,6 +202,11 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   }
 
   Widget _buildThumbEntry(BuildContext _) {
+    final isMotion = _hoverMotionEvent != null;
+    final borderColor = isMotion
+        ? const Color(0xFFF59E0B)
+        : const Color(0xFF404040);
+
     return Positioned(
       left: _thumbLeft,
       top: _thumbTop,
@@ -209,15 +216,46 @@ class _TimelineWidgetState extends State<TimelineWidget> {
           height: 90,
           decoration: BoxDecoration(
             color: Colors.black,
-            border: Border.all(color: const Color(0xFF404040)),
+            border: Border.all(color: borderColor, width: isMotion ? 2 : 1),
             borderRadius: BorderRadius.circular(4),
           ),
           clipBehavior: Clip.antiAlias,
-          child: Image.network(
-            _thumbSrc,
-            fit: BoxFit.cover,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          child: Stack(
+            children: [
+              Image.network(
+                _thumbSrc,
+                fit: BoxFit.cover,
+                width: 160,
+                height: 90,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              ),
+              if (isMotion && _hoverMotionEvent!.detectionLabel != null)
+                Positioned(
+                  bottom: 4,
+                  left: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0xCC000000),
+                      borderRadius: BorderRadius.circular(3),
+                      border: Border.all(
+                        color: const Color(0xFFF59E0B),
+                        width: 0.5,
+                      ),
+                    ),
+                    child: Text(
+                      '${_hoverMotionEvent!.detectionLabel}'
+                      '${_hoverMotionEvent!.detectionConfidence != null ? ' ${(_hoverMotionEvent!.detectionConfidence! * 100).round()}%' : ''}',
+                      style: const TextStyle(
+                        color: Color(0xFFF59E0B),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),
@@ -281,18 +319,32 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     _fetchSegments();
   }
 
-  void _onTimelineTap(double pct) {
+  void _onTimelineTap(double pct, {double? yFraction}) {
     final hour = _ctrl.viewportPctToHour(pct);
     if (_ctrl.exportMode) {
       _ctrl.setExportPoint(hour);
-    } else {
-      _manualPan = true;
-      _ctrl.setPlayhead(hour);
-      final iso = hourToISO(_ctrl.selectedDate, hour);
-      _playbackIso = iso;
-      _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
-      widget.onPlayback(iso);
+      return;
     }
+
+    double targetHour = hour;
+
+    // Snap to motion event start if tapping in the orange bar zone (top 35%)
+    if (yFraction == null || yFraction <= 0.35) {
+      final box = _barKey.currentContext?.findRenderObject() as RenderBox?;
+      final barWidth = box?.size.width ?? 400;
+      final padHours = 8.0 / barWidth * _ctrl.visibleHours;
+      final hitEvent = _ctrl.motionEventAtHour(hour, padHours: padHours);
+      if (hitEvent != null) {
+        targetHour = isoToHour(hitEvent.startTime);
+      }
+    }
+
+    _manualPan = true;
+    _ctrl.setPlayhead(targetHour);
+    final iso = hourToISO(_ctrl.selectedDate, targetHour);
+    _playbackIso = iso;
+    _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
+    widget.onPlayback(iso);
   }
 
   // --- Clip export ---
@@ -713,7 +765,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               child: GestureDetector(
                 onTapUp: (details) {
                   final pct = details.localPosition.dx / width;
-                  _onTimelineTap(pct);
+                  final yFrac = details.localPosition.dy / barHeight;
+                  _onTimelineTap(pct, yFraction: yFrac);
                 },
                 onScaleStart: (details) {
                   _lastScale = 1.0;
@@ -756,15 +809,29 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   _updateThumbOverlay();
                 },
                 child: MouseRegion(
+                  cursor: _hoverMotionEvent != null
+                      ? SystemMouseCursors.click
+                      : SystemMouseCursors.basic,
                   onHover: (event) {
                     final pct = event.localPosition.dx / width;
                     final hour = _ctrl.viewportPctToHour(pct);
                     _ctrl.setScrubHour(hour);
                     setState(() => _hoverTime = hourToTimeString(hour));
+
+                    // Detect hover over motion event bar (top 35%)
+                    final yFrac = event.localPosition.dy / barHeight;
+                    if (yFrac <= 0.35) {
+                      final padHours = 8.0 / width * _ctrl.visibleHours;
+                      _hoverMotionEvent = _ctrl.motionEventAtHour(hour, padHours: padHours);
+                    } else {
+                      _hoverMotionEvent = null;
+                    }
+
                     _updateThumbOverlay();
                   },
                   onExit: (_) {
                     _ctrl.setScrubHour(null);
+                    _hoverMotionEvent = null;
                     setState(() => _hoverTime = null);
                     _updateThumbOverlay();
                   },
