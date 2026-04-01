@@ -66,10 +66,12 @@ async def scan_new_segments(session: AsyncSession, camera_id: int, camera_name: 
     if not rec_dir.exists():
         return 0
 
-    existing = await _get_existing_paths(session, camera_id)
-
-    # Update existing in-progress segments first
+    # Update existing in-progress segments first (may rename files)
     await _update_in_progress(session, camera_id, config, camera_name)
+
+    # Fetch existing paths AFTER in-progress updates, so renamed files
+    # are not mistakenly registered again as new segments
+    existing = await _get_existing_paths(session, camera_id)
 
     new_segments = _find_new_segments(rec_dir, existing)
 
