@@ -73,6 +73,7 @@ def _configure_root_logger(formatter: logging.Formatter, level: int) -> None:
             log_file,
             maxBytes=10 * 1024 * 1024,  # 10 MB
             backupCount=5,  # Keep 5 old files
+            encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)

@@ -27,16 +27,32 @@ def get_exports_dir() -> Path:
 async def find_overlapping_segments(
     session: AsyncSession, camera_id: int, start: datetime, end: datetime
 ) -> list[Recording]:
-    """Find all recording segments that overlap with [start, end]."""
+    """Find all recording segments that overlap with [start, end].
+
+    Filters by date range in SQL for efficiency and deduplicates by file_path
+    to handle duplicate DB entries (same file registered twice).
+    """
+    # Query a generous date window to catch segments that span midnight
+    query_start = start - timedelta(hours=1)
     result = await session.execute(
         select(Recording)
-        .where(Recording.camera_id == camera_id)
+        .where(
+            Recording.camera_id == camera_id,
+            Recording.start_time >= query_start,
+            Recording.start_time < end,
+        )
         .order_by(Recording.start_time)
     )
     all_segs = result.scalars().all()
 
+    # Deduplicate by file_path — keep the first (earliest start_time) entry
+    seen_paths: set[str] = set()
     overlapping = []
     for seg in all_segs:
+        if seg.file_path in seen_paths:
+            continue
+        seen_paths.add(seg.file_path)
+
         seg_start = seg.start_time
         if seg.end_time:
             seg_end = seg.end_time

@@ -37,6 +37,7 @@ class FFmpegConfig:
 class Go2rtcConfig:
     host: str = "localhost"
     port: int = 1984
+    rtsp_port: int = 8554
 
 
 @dataclass

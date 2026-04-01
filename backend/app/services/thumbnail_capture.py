@@ -1,8 +1,8 @@
 """Real-time thumbnail capture service.
 
-Extracts a single JPEG frame from the latest recording segment on disk at
-configurable intervals. Thumbnails are stored as individual files alongside
-recordings in {recordings_dir}/{camera_name}/{YYYY-MM-DD}/thumbs/thumb_HHMMSS.jpg
+Captures JPEG snapshots from go2rtc's frame API at configurable intervals.
+Thumbnails are stored as individual files in
+{recordings_dir}/{camera_name}/{YYYY-MM-DD}/thumbs/thumb_HHMMSS.jpg
 """
 
 import asyncio
@@ -10,19 +10,22 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+
 from app.config import get_config
 from app.services.ffmpeg import sanitize_camera_name
-from app.services.job_object import assign_to_job
+from app.services.go2rtc_client import get_stream_name
 
 logger = logging.getLogger(__name__)
 
 
 class ThumbnailCapture:
-    """Captures periodic JPEG thumbnails from the latest recording segment."""
+    """Captures periodic JPEG thumbnails from go2rtc live streams."""
 
     def __init__(self):
         self._tasks: list[asyncio.Task] = []
         self._running = False
+        self._client: httpx.AsyncClient | None = None
 
     def start(self, cameras: list) -> None:
         config = get_config()
@@ -30,6 +33,7 @@ class ThumbnailCapture:
             logger.info("Trickplay disabled, skipping thumbnail capture")
             return
         self._running = True
+        self._client = httpx.AsyncClient(timeout=15)
         for cam in cameras:
             task = asyncio.create_task(self._capture_loop(cam))
             self._tasks.append(task)
@@ -42,58 +46,23 @@ class ThumbnailCapture:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+        if self._client:
+            await self._client.aclose()
+            self._client = None
         logger.info("Thumbnail capture stopped")
-
-    def _find_latest_segment(self, safe_name: str) -> Path | None:
-        """Find the most recent .ts segment file for a camera."""
-        config = get_config()
-        cam_dir = Path(config.storage.recordings_dir) / safe_name
-        if not cam_dir.exists():
-            return None
-
-        # Look in date directories, newest first
-        date_dirs = sorted(
-            [d for d in cam_dir.iterdir() if d.is_dir() and d.name != "thumbs"],
-            reverse=True,
-        )
-        for date_dir in date_dirs[:2]:  # Only check today + yesterday
-            segments = sorted(date_dir.glob("*.ts"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if segments:
-                return segments[0]
-        return None
-
-    async def _extract_frame(self, config, segment: Path, out_path: Path, tp, seek_args: list[str]) -> bool:
-        """Run ffmpeg to extract a single frame. Returns True if a valid thumbnail was produced."""
-        cmd = [
-            config.ffmpeg.path,
-            *seek_args,
-            "-i", str(segment),
-            "-frames:v", "1",
-            "-update", "1",
-            "-vf", f"scale={tp.thumb_width}:{tp.thumb_height}",
-            "-q:v", "5",
-            "-y",
-            str(out_path),
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assign_to_job(proc.pid)
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-
-        if proc.returncode != 0:
-            return False
-        if out_path.exists() and out_path.stat().st_size < 2000:
-            out_path.unlink()
-            return False
-        return out_path.exists()
 
     async def _capture_loop(self, camera) -> None:
         config = get_config()
         tp = config.trickplay
         safe_name = sanitize_camera_name(camera.name)
+        stream_name = get_stream_name(camera.name)
+        go2rtc_base = f"http://{config.go2rtc.host}:{config.go2rtc.port}"
+        # Use sub-stream direct for thumbnails — lightweight, no transcode
+        snapshot_url = (
+            f"{go2rtc_base}/api/frame.jpeg"
+            f"?src={stream_name}_s2_direct"
+            f"&width={tp.thumb_width}&height={tp.thumb_height}"
+        )
 
         while self._running:
             try:
@@ -105,37 +74,32 @@ class ThumbnailCapture:
             date_str = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H%M%S")
 
-            # Find latest recording segment to extract frame from
-            segment = self._find_latest_segment(safe_name)
-            if not segment:
-                logger.debug("No segment found for thumbnail", extra={"camera": camera.name})
-                continue
-
             thumbs_dir = Path(config.storage.recordings_dir) / safe_name / date_str / "thumbs"
             thumbs_dir.mkdir(parents=True, exist_ok=True)
             out_path = thumbs_dir / f"thumb_{time_str}.jpg"
 
             try:
-                # Try seeking near end first (works for completed segments
-                # and cameras with short GOP intervals)
-                ok = await self._extract_frame(config, segment, out_path, tp,
-                                               ["-sseof", "-10"])
-                if not ok:
-                    # Fallback: read from start (always finds a keyframe,
-                    # needed for actively-writing segments with long GOPs)
-                    ok = await self._extract_frame(config, segment, out_path, tp, [])
-
-                if ok:
-                    logger.debug("Captured thumbnail", extra={
-                        "camera": camera.name,
-                        "path": str(out_path),
-                        "size": out_path.stat().st_size,
+                resp = await self._client.get(snapshot_url)
+                if resp.status_code != 200:
+                    logger.debug("Snapshot request failed", extra={
+                        "camera": camera.name, "status": resp.status_code,
                     })
-                else:
-                    logger.debug("Thumbnail capture failed", extra={"camera": camera.name})
+                    continue
 
-            except asyncio.TimeoutError:
-                logger.warning("Thumbnail capture timed out", extra={"camera": camera.name})
+                data = resp.content
+                if len(data) < 2000:
+                    logger.debug("Snapshot too small, skipping", extra={
+                        "camera": camera.name, "size": len(data),
+                    })
+                    continue
+
+                out_path.write_bytes(data)
+                logger.debug("Captured thumbnail", extra={
+                    "camera": camera.name,
+                    "path": str(out_path),
+                    "size": len(data),
+                })
+
             except asyncio.CancelledError:
                 return
             except Exception:
