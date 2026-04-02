@@ -258,13 +258,22 @@ class _HomeScreenState extends State<HomeScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text('RichIris', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-            const SizedBox(width: 8),
-            GestureDetector(
-              onTap: () => launchUrl(
+            const SizedBox(width: 12),
+            TextButton.icon(
+              onPressed: () => launchUrl(
                 Uri.parse('https://ko-fi.com/richard1912'),
                 mode: LaunchMode.externalApplication,
               ),
-              child: const Icon(Icons.favorite, color: Colors.redAccent, size: 16),
+              icon: const Icon(Icons.favorite, color: Colors.redAccent, size: 14),
+              label: Text(
+                'Support RichIris on Ko-fi',
+                style: TextStyle(color: Colors.grey[400], fontSize: 12),
+              ),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
             ),
           ],
         ),
