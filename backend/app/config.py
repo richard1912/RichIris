@@ -68,6 +68,7 @@ class CameraConfig:
     rtsp_url: str = ""
     sub_stream_url: str = ""
     enabled: bool = True
+    rotation: int = 0
 
 
 @dataclass
