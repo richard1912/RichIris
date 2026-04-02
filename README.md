@@ -10,8 +10,8 @@ A self-hosted NVR (Network Video Recorder) built with FastAPI, React, and Flutte
 - **Timeline playback** — zoomable 24h timeline, instant fragmented MP4 streaming (< 200ms start), speed controls (-32x to 32x), date picker
 - **Trickplay thumbnails** — real-time thumbnail capture via go2rtc frame API, hover/scrub preview on timeline
 - **Motion detection** — snapshot-based frame differencing with per-camera sensitivity, timeline overlay, configurable script execution on motion start/end
-- **AI person detection** — YOLO11x on CUDA (RTX 4080 SUPER), gated by motion pre-filter, per-camera toggle and confidence threshold
-- **Clip export** — select a time range on the timeline and export an MP4 clip, no duration limit
+- **AI person detection** — YOLO11x on CUDA, gated by motion pre-filter, per-camera toggle and confidence threshold. Falls back to CPU if no GPU available
+- **Clip export** — select a time range on the timeline and export an MP4 clip
 - **Retention management** — configurable max age (days) and max storage (GB), oldest recordings purged first
 - **Multi-camera grid** — click to select, click again for fullscreen with timeline
 - **Native app** — Flutter app for Windows and Android, replaces legacy web UI for live view, playback, and export
