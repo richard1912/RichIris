@@ -230,7 +230,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                 gaplessPlayback: true,
                 errorBuilder: (_, __, ___) => const SizedBox.shrink(),
               ),
-              if (isMotion && _hoverMotionEvent!.detectionLabel != null)
+              if (isMotion)
                 Positioned(
                   bottom: 4,
                   left: 4,
@@ -245,8 +245,14 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                       ),
                     ),
                     child: Text(
-                      '${_hoverMotionEvent!.detectionLabel}'
-                      '${_hoverMotionEvent!.detectionConfidence != null ? ' ${(_hoverMotionEvent!.detectionConfidence! * 100).round()}%' : ''}',
+                      () {
+                        final e = _hoverMotionEvent!;
+                        final minSens = (101 - e.peakIntensity / 0.05).clamp(0, 100).round();
+                        final ai = e.detectionLabel != null
+                            ? '${e.detectionLabel}${e.detectionConfidence != null ? ' ${(e.detectionConfidence! * 100).round()}%' : ''} | '
+                            : '';
+                        return '${ai}min sens $minSens';
+                      }(),
                       style: const TextStyle(
                         color: Color(0xFFF59E0B),
                         fontSize: 9,
