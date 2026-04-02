@@ -32,4 +32,12 @@ class SystemApi {
         await _client.dio.post('/api/system/retention/run');
     return RetentionResult.fromJson(resp.data as Map<String, dynamic>);
   }
+
+  Future<String> fetchRecentLogs({int minutes = 10}) async {
+    final resp = await _client.dio.get(
+      '/api/system/logs',
+      queryParameters: {'minutes': minutes},
+    );
+    return resp.data as String;
+  }
 }

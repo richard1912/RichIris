@@ -285,6 +285,7 @@ class _MainNavState extends State<_MainNav> {
             clipApi: widget.clipApi,
             motionApi: widget.motionApi,
             cameraApi: widget.cameraApi,
+            systemApi: widget.systemApi,
             tzOffsetMs: widget.tzOffsetMs,
             selectedCameraId: _selectedCameraId,
             onCameraSelected: (id) {

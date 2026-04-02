@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -10,6 +11,7 @@ import '../services/stream_api.dart';
 import '../services/recording_api.dart';
 import '../services/clip_api.dart';
 import '../services/motion_api.dart';
+import '../services/system_api.dart';
 import '../models/playback_session.dart';
 import '../services/camera_api.dart';
 import '../widgets/camera_grid.dart';
@@ -26,6 +28,7 @@ class HomeScreen extends StatefulWidget {
   final ClipApi clipApi;
   final MotionApi motionApi;
   final CameraApi cameraApi;
+  final SystemApi systemApi;
   final int tzOffsetMs;
   final int? selectedCameraId;
   final ValueChanged<int> onCameraSelected;
@@ -47,6 +50,7 @@ class HomeScreen extends StatefulWidget {
     required this.clipApi,
     required this.motionApi,
     required this.cameraApi,
+    required this.systemApi,
     required this.tzOffsetMs,
     this.selectedCameraId,
     required this.onCameraSelected,
@@ -247,6 +251,95 @@ class _HomeScreenState extends State<HomeScreen> {
     return DateTime.now().millisecondsSinceEpoch + widget.tzOffsetMs;
   }
 
+  Future<void> _showBugReportDialog(BuildContext context) async {
+    String? logs;
+    bool loading = true;
+    bool copied = false;
+
+    try {
+      logs = await widget.systemApi.fetchRecentLogs(minutes: 10);
+    } catch (e) {
+      logs = 'Failed to fetch logs: $e';
+    }
+    loading = false;
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Report a Bug'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 400,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Logs from the last 10 minutes:',
+                  style: TextStyle(color: Colors.grey[400], fontSize: 13),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: loading
+                      ? const Center(child: CircularProgressIndicator())
+                      : Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.black,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: SelectionArea(
+                            child: SingleChildScrollView(
+                              child: Text(
+                                logs ?? 'No logs available.',
+                                style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 11,
+                                  color: Color(0xFFCCCCCC),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: logs ?? ''));
+                        setDialogState(() => copied = true);
+                      },
+                      icon: Icon(copied ? Icons.check : Icons.copy, size: 16),
+                      label: Text(copied ? 'Copied!' : 'Copy Logs'),
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton.icon(
+                      onPressed: () => launchUrl(
+                        Uri.parse('https://github.com/richard1912/RichIris/issues/new'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      icon: const Icon(Icons.open_in_new, size: 16),
+                      label: const Text('Open GitHub Issues'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final activeCount = widget.systemStatus?.activeStreams ?? 0;
@@ -286,6 +379,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 style: const TextStyle(fontSize: 12, color: Color(0xFF737373)),
               ),
             ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.bug_report, size: 20),
+            tooltip: 'Report a Bug',
+            onPressed: () => _showBugReportDialog(context),
           ),
           if (!_isLive)
             const Padding(
