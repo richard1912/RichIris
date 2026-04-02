@@ -14,7 +14,7 @@ A self-hosted NVR (Network Video Recorder) built with FastAPI, React, and Flutte
 - **Clip export** — select a time range on the timeline and export an MP4 clip
 - **Retention management** — configurable max age (days) and max storage (GB), oldest recordings purged first
 - **Multi-camera grid** — click to select, click again for fullscreen with timeline
-- **Native app** — Flutter app for Windows and Android, replaces legacy web UI for live view, playback, and export
+- **Native apps** — Flutter apps for Windows and Android with full live view, playback, and export (in addition to the web UI at port 8700)
 - **Runs as Windows services** — auto-starts on boot, no console window needed
 - **Single-file config** — all settings in one `config.yaml`
 
