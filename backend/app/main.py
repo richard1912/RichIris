@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     config = get_config()
-    setup_logging(level=config.logging.level, json_output=config.logging.json_output)
+    setup_logging(level=config.logging.level, json_output=config.logging.json_output, timezone=config.logging.timezone)
     logger.info("RichIris NVR starting up")
 
     create_job_object()

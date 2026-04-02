@@ -53,10 +53,11 @@ class ObjectDetector:
         from ultralytics import YOLO
 
         # Store model in data/ directory alongside DB
-        # Use YOLOv8s (small) for better accuracy — still fast on RTX 4080 SUPER (~5-10ms/frame)
+        # Use YOLO11x (extra-large) for highest accuracy (~54.7 mAP50-95 on COCO)
+        # Still fast on RTX 4080 SUPER with CUDA
         model_dir = Path(__file__).resolve().parent.parent.parent.parent / "data"
         model_dir.mkdir(exist_ok=True)
-        model_path = model_dir / "yolov8s.pt"
+        model_path = model_dir / "yolo11x.pt"
         self._model = YOLO(str(model_path))
 
         # Try CUDA, fall back to CPU
@@ -66,11 +67,11 @@ class ObjectDetector:
                 self._model.to("cuda")
                 self._device = "cuda"
                 gpu_name = torch.cuda.get_device_name(0)
-                logger.info("YOLO model loaded on CUDA", extra={"gpu": gpu_name})
+                logger.info("YOLO model loaded on CUDA", extra={"model": model_path.name, "gpu": gpu_name})
             else:
-                logger.warning("CUDA not available, YOLO running on CPU")
+                logger.warning("CUDA not available, YOLO running on CPU", extra={"model": model_path.name})
         except Exception:
-            logger.warning("Failed to use CUDA, YOLO running on CPU")
+            logger.warning("Failed to use CUDA, YOLO running on CPU", extra={"model": model_path.name})
 
     def _fallback_to_cpu(self) -> None:
         """Reload model on CPU after a CUDA error.
@@ -82,7 +83,7 @@ class ObjectDetector:
         try:
             from ultralytics import YOLO
             model_dir = Path(__file__).resolve().parent.parent.parent.parent / "data"
-            model_path = model_dir / "yolov8s.pt"
+            model_path = model_dir / "yolo11x.pt"
             self._model = YOLO(str(model_path))
             # Do NOT call .to("cuda") — stay on CPU
             self._device = "cpu"
