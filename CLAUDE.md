@@ -144,6 +144,7 @@ RichIris/
 - `GET /api/recordings/segment/{recording_id}` - Serve raw recording segment file
 - `GET /api/system/status` - Stream health, camera count
 - `GET /api/system/storage` - Disk usage, per-camera recording stats
+- `GET /api/system/logs?minutes=10` - Recent log lines (plain text, last N minutes)
 - `POST /api/system/retention/run` - Manually trigger retention cleanup
 - `GET /api/health` - Health check
 - `POST /api/clips` - Create clip export (camera_id, start_time, end_time, no duration limit)
