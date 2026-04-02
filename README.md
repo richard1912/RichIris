@@ -1,41 +1,52 @@
 # RichIris NVR
 
-A self-hosted NVR (Network Video Recorder) built with FastAPI and React. Designed for 24/7 recording of RTSP cameras with live view and timeline playback — no cloud, no subscriptions.
+A self-hosted NVR (Network Video Recorder) built with FastAPI, React, and Flutter. Designed for 24/7 recording of RTSP cameras with live view, timeline playback, motion detection, and AI person detection — no cloud, no subscriptions.
 
 ## Features
 
 - **24/7 continuous recording** — HEVC passthrough (no transcode, no GPU usage) into 15-minute `.ts` segments
-- **Live view** — go2rtc MSE streaming over WebSocket (push-based, works reliably over VPN)
-- **Timeline playback** — zoomable 24h timeline, instant MP4 remux (< 1 second), speed controls (-32x to 32x), date picker
-- **Trickplay thumbnails** — real-time RTSP thumbnail capture, hover preview on timeline
+- **Live view** — go2rtc MSE streaming over WebSocket (web) or HTTP fMP4 via media_kit (native app)
+- **Multi-quality streams** — S1/S2 stream selection x Direct/High/Low quality, lazy transcoding (zero resources until a client connects)
+- **Timeline playback** — zoomable 24h timeline, instant fragmented MP4 streaming (< 200ms start), speed controls (-32x to 32x), date picker
+- **Trickplay thumbnails** — real-time thumbnail capture via go2rtc frame API, hover/scrub preview on timeline
+- **Motion detection** — snapshot-based frame differencing with per-camera sensitivity, timeline overlay, configurable script execution on motion start/end
+- **AI person detection** — YOLO11x on CUDA (RTX 4080 SUPER), gated by motion pre-filter, per-camera toggle and confidence threshold
 - **Clip export** — select a time range on the timeline and export an MP4 clip, no duration limit
 - **Retention management** — configurable max age (days) and max storage (GB), oldest recordings purged first
 - **Multi-camera grid** — click to select, click again for fullscreen with timeline
+- **Native app** — Flutter app for Windows and Android, replaces legacy web UI for live view, playback, and export
 - **Runs as Windows services** — auto-starts on boot, no console window needed
 - **Single-file config** — all settings in one `config.yaml`
 
 ## Architecture
 
 ```
-Browser → WebSocket (MSE) → go2rtc ← RTSP sub-stream
-       → FastAPI (port 8700) → FFmpeg (recording, passthrough)
-                             → SQLite (metadata)
-                             → Disk (HEVC .ts segments)
+Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTSP sub-stream
+                          → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
+Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
+                                    |                    |
+                                SQLite DB         G:\RichIris (recordings)
+                                                  data\playback\ (remux cache)
 ```
 
-- **Recording**: One FFmpeg process per camera, codec passthrough (`-c:v copy`), 15-minute `.ts` segments. No GPU, no transcode.
-- **Live view**: [go2rtc](https://github.com/AlexxIT/go2rtc) takes RTSP input and delivers fMP4 over WebSocket (MSE). Prefers the camera's H.264 sub-stream for zero-transcode live view; uses FFmpeg transcode for HEVC sources. The WebSocket is proxied through FastAPI so everything runs on a single port.
-- **Playback**: FFmpeg remuxes HEVC `.ts` to MP4 with `-c copy -movflags +faststart` (< 1 second). Browsers decode HEVC natively (Chrome 107+, Edge, Safari).
+- **Recording**: One FFmpeg process per camera, codec passthrough (`-c:v copy`), 15-minute `.ts` segments. No GPU, no transcode. Watchdog monitors file modification every 2 minutes; stale processes are killed and auto-restarted.
+- **Live view (web)**: [go2rtc](https://github.com/AlexxIT/go2rtc) takes RTSP input and delivers fMP4 over WebSocket (MSE). Persistent video pool keeps connections alive across view transitions.
+- **Live view (native app)**: HTTP fMP4 proxied through FastAPI from go2rtc. Flutter app uses media_kit (libmpv) with low-latency profile. Auto-reconnects on stream errors.
+- **Playback**: Fragmented MP4 (`-c copy -movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms. Browsers and media_kit decode HEVC natively. Sessions auto-cleanup after 120s idle.
+- **Motion detection**: Fetches JPEG snapshots from go2rtc every ~1s. Running weighted-average baseline with adaptive alpha. Sensitivity 0-100 maps to area threshold. 10-second cooldown between events.
+- **AI person detection**: YOLO11x on CUDA, triggered only when motion exceeds threshold. Filters to person class, min bounding box 0.2% of frame area. Falls back to CPU if CUDA unavailable.
 
 ## Requirements
 
 - **Windows 10/11** (runs as Windows services via NSSM)
 - **Python 3.11+**
-- **Node.js 18+** (for building the frontend)
+- **Node.js 18+** (for building the legacy web frontend)
+- **Flutter 3.x** (for building the native app)
 - **FFmpeg** with RTSP support
 - **go2rtc** ([download from releases](https://github.com/AlexxIT/go2rtc/releases))
 - **NSSM** (`winget install NSSM.NSSM`)
 - RTSP-capable IP cameras
+- **Optional**: NVIDIA GPU with CUDA for AI person detection
 
 ## Setup
 
@@ -48,10 +59,20 @@ cd RichIris
 # Backend
 pip install -r backend/requirements.txt
 
-# Frontend
+# Legacy web frontend
 cd frontend
 npm install
 npm run build
+cd ..
+
+# Native app (Windows)
+cd app
+flutter build windows --release
+cd ..
+
+# Native app (Android)
+cd app
+flutter build apk --release
 cd ..
 ```
 
@@ -66,12 +87,6 @@ Edit `config.yaml` with your camera RTSP URLs, storage paths, and FFmpeg path.
 ### 3. Set up go2rtc
 
 Download `go2rtc_win64.zip` from [go2rtc releases](https://github.com/AlexxIT/go2rtc/releases) and extract `go2rtc.exe` into the `go2rtc/` directory.
-
-```bash
-cp go2rtc/go2rtc.yaml.example go2rtc/go2rtc.yaml
-```
-
-Edit `go2rtc/go2rtc.yaml` and set the `ffmpeg.bin` path.
 
 ### 4. Install as Windows services
 
@@ -91,7 +106,9 @@ nssm start RichIris
 
 ### 5. Access
 
-Open `http://localhost:8700` in your browser. API docs at `http://localhost:8700/docs`.
+- **Native app**: Build and run the Flutter app from `app/`
+- **Legacy web UI**: `http://localhost:8700`
+- **API docs**: `http://localhost:8700/docs`
 
 ## Project Structure
 
@@ -101,22 +118,56 @@ RichIris/
 │   ├── app/
 │   │   ├── main.py              # FastAPI app + lifespan
 │   │   ├── config.py            # Settings from config.yaml
+│   │   ├── logging_config.py    # structlog setup
 │   │   ├── database.py          # SQLAlchemy async engine
 │   │   ├── models.py            # Camera, Recording, ClipExport
 │   │   ├── schemas.py           # Pydantic schemas
-│   │   ├── routers/             # API route handlers
-│   │   └── services/            # FFmpeg, recording, playback, go2rtc, clips, retention
+│   │   ├── routers/
+│   │   │   ├── cameras.py       # CRUD /api/cameras
+│   │   │   ├── clips.py         # Clip export /api/clips
+│   │   │   ├── recordings.py    # Playback /api/recordings
+│   │   │   ├── streams.py       # go2rtc stream proxy /api/streams
+│   │   │   ├── system.py        # System status + storage + retention
+│   │   │   └── motion.py        # Motion events /api/motion
+│   │   └── services/
+│   │       ├── ffmpeg.py              # Command builder (recording only)
+│   │       ├── stream_manager.py      # FFmpeg recording lifecycle + go2rtc registration
+│   │       ├── go2rtc_client.py       # REST client for go2rtc
+│   │       ├── recorder.py            # Segment scanner + DB registration
+│   │       ├── clip_exporter.py       # Clip export (concat segments -> MP4)
+│   │       ├── playback.py            # Fragmented MP4 streaming for playback
+│   │       ├── thumbnail_capture.py   # Thumbnail capture via go2rtc frame API
+│   │       ├── retention.py           # Age + storage-based retention cleanup
+│   │       ├── motion_detector.py     # Snapshot-based motion detection
+│   │       └── object_detector.py     # YOLO AI person detection (GPU)
+│   ├── requirements.txt
 │   └── run.py                   # Uvicorn entry point
 ├── go2rtc/
-│   ├── go2rtc.exe               # go2rtc binary (not committed — download separately)
-│   └── go2rtc.yaml.example      # go2rtc config template
-├── frontend/
+│   ├── go2rtc.exe               # go2rtc binary (not committed)
+│   └── go2rtc.yaml              # go2rtc config (streams registered dynamically)
+├── frontend/                    # React 19 + Vite + Tailwind (legacy web UI)
 │   └── src/
 │       ├── App.tsx              # Main app with grid + timeline
 │       ├── api.ts               # API client
 │       └── components/          # CameraGrid, Timeline, MsePlayer, etc.
-├── config.yaml.example          # Main config template
-└── data/                        # Auto-created: DB, playback cache
+├── app/                         # Flutter native app (Windows + Android)
+│   ├── lib/
+│   │   ├── main.dart            # Entry point, MediaKit init
+│   │   ├── app.dart             # MaterialApp, navigation, state
+│   │   ├── config/              # API config, quality tiers, constants
+│   │   ├── models/              # Data classes
+│   │   ├── services/            # API layer (Dio HTTP client)
+│   │   ├── screens/             # Home, Fullscreen, System, Settings
+│   │   ├── widgets/             # CameraGrid, LivePlayer, QualitySelector
+│   │   │   └── timeline/        # CustomPainter timeline + minimap
+│   │   └── utils/               # Time/format utilities
+│   └── pubspec.yaml             # Dependencies: media_kit, dio, shared_preferences
+├── config.yaml                  # Main configuration
+├── data/                        # Auto-created: DB, playback cache
+├── rebuild.bat                  # Frontend build script
+├── service-install.bat          # Install Windows services
+├── service-restart.bat          # Restart services
+└── service-uninstall.bat
 ```
 
 ## Configuration
@@ -131,22 +182,25 @@ See [`config.yaml.example`](config.yaml.example) for all options:
 | `go2rtc` | `host`, `port` |
 | `retention` | `max_age_days`, `max_storage_gb` |
 | `trickplay` | `enabled`, `interval`, `thumb_width`, `thumb_height` |
-| `cameras` | `name`, `rtsp_url`, `sub_stream_url`, `enabled` |
+| `cameras` | `name`, `rtsp_url`, `sub_stream_url`, `enabled`, `motion_sensitivity`, `ai_detection`, `ai_confidence_threshold`, `motion_script`, `motion_script_off` |
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
-| Backend | Python, FastAPI, SQLAlchemy, aiosqlite, structlog |
-| Frontend | React 19, Vite, Tailwind CSS |
-| Live view | go2rtc (MSE/WebSocket) |
+| Backend | Python, FastAPI, SQLAlchemy, aiosqlite, structlog, httpx |
+| Native App | Flutter (Windows + Android), media_kit, Dio |
+| Legacy Frontend | React 19, Vite, Tailwind CSS |
+| Live View | go2rtc (MSE/WebSocket for web, HTTP fMP4 for native) |
 | Recording | FFmpeg (codec passthrough) |
-| Playback | FFmpeg (remux to MP4, no transcode) |
+| Playback | FFmpeg (fragmented MP4 streaming, no transcode) |
+| Motion Detection | OpenCV, NumPy (snapshot-based frame differencing) |
+| AI Detection | YOLO11x, Ultralytics, CUDA |
 | Database | SQLite |
 
 ## VPN Access
 
-Live view uses WebSocket MSE (push-based), which works reliably over WireGuard VPN. Unlike HLS (which relies on polling and can freeze under latency/jitter), MSE receives a continuous stream of fMP4 segments — no polling loops to break.
+Live view uses push-based streaming (WebSocket MSE for web, HTTP fMP4 for native), which works reliably over WireGuard VPN. Unlike HLS polling, the stream is continuous — no polling loops to break under latency/jitter.
 
 ## License
 
