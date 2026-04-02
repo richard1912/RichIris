@@ -1,7 +1,8 @@
 """System status endpoints."""
 
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
@@ -87,21 +88,31 @@ async def get_recent_logs(minutes: int = Query(default=10, ge=1, le=60)):
     if not log_file.exists():
         return PlainTextResponse("No log file found.", status_code=404)
 
-    cutoff = datetime.now(get_tz()) - __import__("datetime").timedelta(minutes=minutes)
+    cutoff = datetime.now(get_tz()) - timedelta(minutes=minutes)
     lines: list[str] = []
+    # Match ISO timestamp, possibly wrapped in ANSI escape codes
+    ts_pattern = re.compile(r"(?:\x1b\[\d+m)*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*[+-]\d{2}:\d{2})")
 
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            # Parse timestamp from structured log lines (ISO format at start)
-            try:
-                # structlog console format: "2026-04-03T10:30:00+11:00 [info     ] ..."
-                ts_str = line.split(" ", 1)[0]
-                ts = datetime.fromisoformat(ts_str)
-                if ts >= cutoff:
-                    lines.append(line)
-            except (ValueError, IndexError):
-                # Continuation line or unparseable — include if we're already collecting
-                if lines:
-                    lines.append(line)
+            m = ts_pattern.match(line)
+            if m:
+                try:
+                    ts = datetime.fromisoformat(m.group(1))
+                    if ts >= cutoff:
+                        lines.append(line)
+                    elif lines:
+                        # Past cutoff window — stop if we already started collecting
+                        # (shouldn't happen with chronological logs, but be safe)
+                        pass
+                except ValueError:
+                    if lines:
+                        lines.append(line)
+            elif lines:
+                lines.append(line)
 
-    return PlainTextResponse("".join(lines) if lines else f"No logs in the last {minutes} minutes.")
+    # Strip ANSI codes from output for clean display
+    ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
+    cleaned = [ansi_escape.sub("", line) for line in lines]
+
+    return PlainTextResponse("".join(cleaned) if cleaned else f"No logs in the last {minutes} minutes.")
