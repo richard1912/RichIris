@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../config/constants.dart';
 import '../models/camera.dart';
@@ -253,7 +254,20 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('RichIris', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('RichIris', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: () => launchUrl(
+                Uri.parse('https://ko-fi.com/richard1912'),
+                mode: LaunchMode.externalApplication,
+              ),
+              child: const Icon(Icons.favorite, color: Colors.redAccent, size: 16),
+            ),
+          ],
+        ),
         actions: [
           Center(
             child: Padding(

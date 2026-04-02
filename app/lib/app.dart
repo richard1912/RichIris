@@ -168,14 +168,8 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   onStreamSourceChanged: _onStreamSourceChanged,
                   onRefreshCameras: _refreshCameras,
                   onRefreshStatus: _refreshStatus,
-                  onOpenSettings: () {
-                    Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => SettingsScreen(
-                        onSaved: _onServerUrlSet,
-                        initialUrl: _serverUrl,
-                      ),
-                    ));
-                  },
+                  onServerUrlChanged: _onServerUrlSet,
+                  serverUrl: _serverUrl,
                 ),
     );
   }
@@ -198,7 +192,8 @@ class _MainNav extends StatefulWidget {
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final Future<void> Function() onRefreshCameras;
   final Future<void> Function() onRefreshStatus;
-  final VoidCallback onOpenSettings;
+  final ValueChanged<String> onServerUrlChanged;
+  final String? serverUrl;
 
   const _MainNav({
     required this.cameraApi,
@@ -217,7 +212,8 @@ class _MainNav extends StatefulWidget {
     required this.onStreamSourceChanged,
     required this.onRefreshCameras,
     required this.onRefreshStatus,
-    required this.onOpenSettings,
+    required this.onServerUrlChanged,
+    required this.serverUrl,
   });
 
   @override
@@ -301,7 +297,14 @@ class _MainNavState extends State<_MainNav> {
             onQualityChanged: widget.onQualityChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onOpenSystem: () => setState(() => _showSystem = true),
-            onOpenSettings: widget.onOpenSettings,
+            onOpenSettings: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => SettingsScreen(
+                  onSaved: widget.onServerUrlChanged,
+                  initialUrl: widget.serverUrl,
+                ),
+              ));
+            },
             onAddCamera: () async {
               await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => CameraFormScreen(cameraApi: widget.cameraApi),
