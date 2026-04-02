@@ -2,6 +2,8 @@
 
 A self-hosted NVR (Network Video Recorder) built with FastAPI, React, and Flutter. Designed for 24/7 recording of RTSP cameras with live view, timeline playback, motion detection, and AI person detection — no cloud, no subscriptions.
 
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/richard1912)
+
 ## Features
 
 - **24/7 continuous recording** — HEVC passthrough (no transcode, no GPU usage) into 15-minute `.ts` segments
