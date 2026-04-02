@@ -111,8 +111,8 @@ async def get_recent_logs(minutes: int = Query(default=10, ge=1, le=60)):
             elif lines:
                 lines.append(line)
 
-    # Strip ANSI codes from output for clean display
+    # Strip ANSI codes from output for clean display, newest first
     ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
-    cleaned = [ansi_escape.sub("", line) for line in lines]
+    cleaned = [ansi_escape.sub("", line) for line in reversed(lines)]
 
     return PlainTextResponse("".join(cleaned) if cleaned else f"No logs in the last {minutes} minutes.")
