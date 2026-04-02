@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../config/api_config.dart';
 import '../services/api_client.dart';
 
@@ -136,6 +137,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
+            const Spacer(),
+            Center(
+              child: TextButton.icon(
+                onPressed: () => launchUrl(
+                  Uri.parse('https://ko-fi.com/richard1912'),
+                  mode: LaunchMode.externalApplication,
+                ),
+                icon: const Icon(Icons.favorite, color: Colors.redAccent, size: 18),
+                label: Text(
+                  'Support RichIris on Ko-fi',
+                  style: TextStyle(color: Colors.grey[400]),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
           ],
         ),
       ),
