@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -58,6 +59,7 @@ class TrickplayConfig:
 class LoggingConfig:
     level: str = "DEBUG"
     json_output: bool = False
+    timezone: str = "Australia/Sydney"
 
 
 @dataclass
@@ -138,3 +140,8 @@ def get_config() -> AppConfig:
     if _config is None:
         _config = load_config()
     return _config
+
+
+def get_tz() -> ZoneInfo:
+    """Return the configured timezone as a ZoneInfo object."""
+    return ZoneInfo(get_config().logging.timezone)

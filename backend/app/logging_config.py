@@ -2,20 +2,32 @@
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import structlog
 
 
-def setup_logging(level: str = "DEBUG", json_output: bool = False) -> None:
+def _make_timestamper(tz: ZoneInfo):
+    """Return a structlog processor that timestamps events in the given timezone."""
+    def timestamper(logger, method, event_dict):
+        event_dict["timestamp"] = datetime.now(tz).isoformat()
+        return event_dict
+    return timestamper
+
+
+def setup_logging(level: str = "DEBUG", json_output: bool = False, timezone: str = "Australia/Sydney") -> None:
     """Configure structured logging for the application."""
     log_level = getattr(logging, level.upper(), logging.DEBUG)
+    tz = ZoneInfo(timezone)
 
     shared_processors = [
         structlog.contextvars.merge_contextvars,
+        structlog.stdlib.ExtraAdder(),
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
+        _make_timestamper(tz),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
     ]
@@ -33,6 +45,7 @@ def setup_logging(level: str = "DEBUG", json_output: bool = False) -> None:
     )
 
     formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=shared_processors,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             renderer,
@@ -41,6 +54,10 @@ def setup_logging(level: str = "DEBUG", json_output: bool = False) -> None:
 
     _configure_root_logger(formatter, log_level)
     _silence_noisy_loggers()
+
+    # App loggers get the configured level (e.g. DEBUG); root stays at INFO
+    # so third-party libraries don't flood with debug output
+    logging.getLogger("app").setLevel(log_level)
 
 
 def _get_renderer(json_output: bool) -> structlog.types.Processor:
@@ -54,7 +71,7 @@ def _configure_root_logger(formatter: logging.Formatter, level: int) -> None:
     """Set up the root logger with stream and file handlers."""
     root = logging.getLogger()
     root.handlers.clear()
-    root.setLevel(level)
+    root.setLevel(logging.INFO)
 
     # Console output (for dev mode) - force UTF-8 to avoid cp1252 errors on Windows
     stdout_stream = open(sys.stdout.fileno(), mode="w", encoding="utf-8", closefd=False)
@@ -83,5 +100,5 @@ def _configure_root_logger(formatter: logging.Formatter, level: int) -> None:
 
 def _silence_noisy_loggers() -> None:
     """Reduce log verbosity for chatty third-party libraries."""
-    for name in ("uvicorn.access", "aiosqlite", "sqlalchemy.engine"):
+    for name in ("uvicorn.access", "aiosqlite", "sqlalchemy.engine", "httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -245,21 +246,50 @@ async def _launch_recording(info: StreamInfo, config: AppConfig) -> None:
     asyncio.create_task(_read_stderr(info, "rec"))
 
 
+# ffmpeg stderr lines matching these (case-insensitive) are worth logging
+_FFMPEG_ERROR_KEYWORDS = re.compile(
+    r"error|warning|fatal|failed|dropping|disconnected|timeout|broken.pipe|killed|exceeded",
+    re.IGNORECASE,
+)
+
+
 async def _read_stderr(info: StreamInfo, label: str) -> None:
-    """Read ffmpeg stderr output for logging."""
+    """Read ffmpeg stderr, log banner once at INFO, then only warnings/errors."""
     proc = info.rec_process
     if not proc or not proc.stderr:
         return
+    banner_logged = False
+    buf = ""
     try:
         while True:
             chunk = await proc.stderr.read(8192)
             if not chunk:
                 break
-            decoded = chunk.decode("utf-8", errors="replace").strip()
-            if decoded:
-                if len(decoded) > 500:
-                    decoded = decoded[:500] + "..."
-                logger.debug(f"ffmpeg-{label}", extra={"camera_id": info.camera_id, "output": decoded})
+            buf += chunk.decode("utf-8", errors="replace")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Log the first batch of lines (codec/stream info banner) once
+                if not banner_logged:
+                    # Banner ends when ffmpeg starts outputting progress (frame= or size=)
+                    if line.startswith("frame=") or line.startswith("size="):
+                        banner_logged = True
+                        continue
+                    logger.info(
+                        f"ffmpeg-{label} init",
+                        extra={"camera_id": info.camera_id, "output": line[:500]},
+                    )
+                    continue
+
+                # After banner, only log lines with warning/error indicators
+                if _FFMPEG_ERROR_KEYWORDS.search(line):
+                    logger.warning(
+                        f"ffmpeg-{label}",
+                        extra={"camera_id": info.camera_id, "output": line[:500]},
+                    )
     except Exception:
         logger.exception(f"ffmpeg-{label} stderr reader failed", extra={"camera_id": info.camera_id})
 

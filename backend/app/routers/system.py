@@ -1,12 +1,13 @@
 """System status endpoints."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_tz
 from app.database import get_db
 from app.models import Camera
 from app.schemas import RetentionResult, StorageStats, StreamStatus, SystemStatus
@@ -20,14 +21,14 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 @router.get("/time")
 async def get_server_time():
     """Return server local time and UTC offset for client timezone alignment."""
-    now = datetime.now()
-    utc_now = datetime.utcnow()
-    # Server's UTC offset in minutes (e.g. +660 for UTC+11)
-    utc_offset_min = round((now - utc_now).total_seconds() / 60)
+    tz = get_tz()
+    now = datetime.now(tz)
+    utc_offset_min = int(now.utcoffset().total_seconds() / 60)
     return {
         "iso": now.isoformat(),
         "epoch_ms": int(now.timestamp() * 1000),
         "utc_offset_min": utc_offset_min,
+        "timezone": str(tz),
     }
 
 
