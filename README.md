@@ -202,6 +202,10 @@ See [`config.yaml.example`](config.yaml.example) for all options:
 
 Live view uses push-based streaming (WebSocket MSE for web, HTTP fMP4 for native), which works reliably over WireGuard VPN. Unlike HLS polling, the stream is continuous — no polling loops to break under latency/jitter.
 
+## Known Issues
+
+- **Reverse playback is glitchy** — negative speed playback (e.g. -2x, -4x) can stutter or jump unexpectedly due to keyframe seeking limitations with HEVC segments
+
 ## License
 
 MIT
