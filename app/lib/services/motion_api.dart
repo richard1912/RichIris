@@ -18,4 +18,8 @@ class MotionApi {
       return [];
     }
   }
+
+  String getEventThumbnailUrl(int cameraId, int eventId) {
+    return '${_client.baseUrl}/api/motion/$cameraId/events/$eventId/thumbnail';
+  }
 }

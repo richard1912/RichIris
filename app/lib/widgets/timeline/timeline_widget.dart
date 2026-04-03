@@ -177,7 +177,18 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       _thumbOverlay = null;
       return;
     }
-    final thumbUrl = _findNearestThumbUrl(scrubHour);
+
+    // Use detection thumbnail if hovering over a detection event that has one
+    String? thumbUrl;
+    if (_hoverMotionEvent != null && _hoverMotionEvent!.hasThumbnail) {
+      thumbUrl = widget.motionApi.getEventThumbnailUrl(
+        _hoverMotionEvent!.cameraId,
+        _hoverMotionEvent!.id,
+      );
+    } else {
+      thumbUrl = _findNearestThumbUrl(scrubHour);
+    }
+
     if (thumbUrl == null) {
       _thumbOverlay?.remove();
       _thumbOverlay = null;
@@ -189,8 +200,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     final barWidth = box.size.width;
     final pct = _ctrl.hourToViewportPct(scrubHour);
     final scrubX = pct * barWidth;
-    const tw = 160.0;
-    const th = 90.0;
+    const tw = 320.0;
+    const th = 180.0;
     _thumbLeft = barPos.dx + (scrubX - tw / 2).clamp(0.0, barWidth - tw);
     _thumbTop = barPos.dy - th - 4;
     _thumbSrc = thumbUrl;
@@ -212,8 +223,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       top: _thumbTop,
       child: IgnorePointer(
         child: Container(
-          width: 160,
-          height: 90,
+          width: 320,
+          height: 180,
           decoration: BoxDecoration(
             color: Colors.black,
             border: Border.all(color: borderColor, width: isMotion ? 2 : 1),
@@ -225,8 +236,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               Image.network(
                 _thumbSrc,
                 fit: BoxFit.cover,
-                width: 160,
-                height: 90,
+                width: 320,
+                height: 180,
                 gaplessPlayback: true,
                 errorBuilder: (_, __, ___) => const SizedBox.shrink(),
               ),

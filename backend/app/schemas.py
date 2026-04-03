@@ -69,8 +69,22 @@ class MotionEventResponse(BaseModel):
     peak_intensity: float
     detection_label: str | None = None
     detection_confidence: float | None = None
+    has_thumbnail: bool = False
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_event(cls, event, camera_id: int | None = None):
+        return cls(
+            id=event.id,
+            camera_id=event.camera_id,
+            start_time=event.start_time,
+            end_time=event.end_time,
+            peak_intensity=event.peak_intensity,
+            detection_label=event.detection_label,
+            detection_confidence=event.detection_confidence,
+            has_thumbnail=bool(event.thumbnail_path),
+        )
 
 
 class RecordingResponse(BaseModel):

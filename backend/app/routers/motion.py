@@ -2,8 +2,10 @@
 
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,4 +36,28 @@ async def get_motion_events(
     )
     events = result.scalars().all()
     logger.debug("Listed motion events", extra={"camera_id": camera_id, "date": date, "count": len(events)})
-    return events
+    return [MotionEventResponse.from_event(e) for e in events]
+
+
+@router.get("/{camera_id}/events/{event_id}/thumbnail")
+async def get_event_thumbnail(
+    camera_id: int,
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the detection thumbnail for a motion event."""
+    event = await db.get(MotionEvent, event_id)
+    if not event or event.camera_id != camera_id:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if not event.thumbnail_path:
+        raise HTTPException(status_code=404, detail="No thumbnail for this event")
+
+    path = Path(event.thumbnail_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Thumbnail file missing")
+
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

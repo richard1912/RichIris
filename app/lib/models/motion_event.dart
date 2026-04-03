@@ -6,6 +6,7 @@ class MotionEvent {
   final double peakIntensity;
   final String? detectionLabel;
   final double? detectionConfidence;
+  final bool hasThumbnail;
 
   MotionEvent({
     required this.id,
@@ -15,6 +16,7 @@ class MotionEvent {
     required this.peakIntensity,
     this.detectionLabel,
     this.detectionConfidence,
+    this.hasThumbnail = false,
   });
 
   factory MotionEvent.fromJson(Map<String, dynamic> json) => MotionEvent(
@@ -25,5 +27,6 @@ class MotionEvent {
         peakIntensity: (json['peak_intensity'] as num).toDouble(),
         detectionLabel: json['detection_label'] as String?,
         detectionConfidence: (json['detection_confidence'] as num?)?.toDouble(),
+        hasThumbnail: json['has_thumbnail'] as bool? ?? false,
       );
 }
