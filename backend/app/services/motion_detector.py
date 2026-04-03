@@ -269,13 +269,15 @@ class MotionDetector:
         """Save the detection frame as a JPEG thumbnail. Returns the file path."""
         try:
             config = get_config()
+            tp = config.trickplay
             safe_name = sanitize_camera_name(cam_name)
             date_str = now.strftime("%Y-%m-%d")
             thumb_dir = Path(config.storage.recordings_dir) / safe_name / date_str / "detection_thumbs"
             thumb_dir.mkdir(parents=True, exist_ok=True)
             filename = f"detect_{now.strftime('%H%M%S_%f')}.jpg"
             path = thumb_dir / filename
-            cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            resized = cv2.resize(frame, (tp.thumb_width, tp.thumb_height), interpolation=cv2.INTER_AREA)
+            cv2.imwrite(str(path), resized, [cv2.IMWRITE_JPEG_QUALITY, 85])
             return str(path)
         except Exception:
             logger.exception("Failed to save detection thumbnail")
