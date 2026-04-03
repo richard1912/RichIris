@@ -15,30 +15,63 @@ logger = logging.getLogger(__name__)
 PLAYBACK_DIR = Path("data/playback")
 IDLE_TIMEOUT = 30  # seconds before cleanup
 
-# Quality presets for playback transcoding.
-# direct = HEVC passthrough (instant remux), high = native res H.264 re-encode,
-# low = native res H.264 reduced bitrate.
-PLAYBACK_QUALITY: dict[str, dict] = {
-    "direct": {
-        "pre_input": [],
-        "codec": ["-c", "copy"],
-        "movflags": "frag_keyframe+empty_moov",
-        "streaming": True,
-    },
-    "high": {
+# Default recording bitrate (kbps) if probing fails.
+DEFAULT_RECORDING_BITRATE_KBPS = 4000
+
+
+async def _probe_file(path: str) -> tuple[int | None, str | None]:
+    """Probe a local .ts file's video bitrate (kbps) and codec via ffprobe."""
+    config = get_config()
+    cmd = [
+        config.ffmpeg.ffprobe_path,
+        "-v", "quiet", "-print_format", "json",
+        "-show_format", "-show_streams", path,
+    ]
+    try:
+        import json as _json
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        data = _json.loads(stdout.decode())
+        bps = data.get("format", {}).get("bit_rate")
+        kbps = int(bps) // 1000 if bps is not None else None
+        codec = None
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                codec = stream.get("codec_name", "").lower() or None
+                break
+        return kbps, codec
+    except Exception:
+        logger.exception("Failed to probe file", extra={"path": path})
+    return None, None
+
+
+def _build_playback_preset(quality: str, source_kbps: int, source_codec: str = "hevc") -> dict:
+    """Build a playback quality preset with source-matched visual quality.
+
+    Recordings are typically HEVC, so H.264 target needs ~2x bitrate for
+    equivalent visual quality.
+    """
+    if quality == "direct":
+        return {
+            "pre_input": [],
+            "codec": ["-c", "copy"],
+            "movflags": "frag_keyframe+empty_moov",
+            "streaming": True,
+        }
+    mult = 2 if source_codec == "hevc" else 1
+    high_kbps = source_kbps * mult
+    high_br = f"{high_kbps}k"
+    low_br = f"{max(high_kbps // 4, 500)}k"
+    bitrate = high_br if quality == "high" else low_br
+    return {
         "pre_input": ["-hwaccel", "cuda"],
-        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-c:a", "copy"],
+        "codec": ["-c:v", "h264_nvenc", "-preset", "p4",
+                  "-b:v", bitrate, "-c:a", "copy"],
         "movflags": "frag_keyframe+empty_moov",
         "streaming": True,
-    },
-    "low": {
-        "pre_input": ["-hwaccel", "cuda"],
-        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "2M",
-                  "-c:a", "copy"],
-        "movflags": "frag_keyframe+empty_moov",
-        "streaming": True,
-    },
-}
+    }
 
 
 @dataclass
@@ -96,7 +129,18 @@ class PlaybackManager:
         config = get_config()
         output_path = output_dir / "playback.mp4"
 
-        preset = PLAYBACK_QUALITY.get(quality, PLAYBACK_QUALITY["high"])
+        # Probe source bitrate and codec from first segment
+        source_kbps = DEFAULT_RECORDING_BITRATE_KBPS
+        source_codec = "hevc"
+        if quality != "direct" and segment_paths:
+            probed_kbps, probed_codec = await _probe_file(segment_paths[0])
+            if probed_kbps:
+                source_kbps = probed_kbps
+            if probed_codec:
+                source_codec = probed_codec
+            logger.info("Probed recording", extra={"kbps": source_kbps, "codec": source_codec, "quality": quality})
+
+        preset = _build_playback_preset(quality, source_kbps, source_codec)
         pre_input = preset["pre_input"]
         codec_args = preset["codec"]
         movflags = preset.get("movflags", "+faststart")

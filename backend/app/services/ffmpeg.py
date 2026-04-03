@@ -94,3 +94,49 @@ async def probe_video_codec(rtsp_url: str, config: AppConfig) -> str | None:
     except Exception:
         logger.exception("Failed to probe video codec", extra={"url": rtsp_url})
     return None
+
+
+async def probe_video_bitrate(rtsp_url: str, config: AppConfig, sample_seconds: int = 5) -> int | None:
+    """Probe an RTSP stream's actual bitrate by sampling a few seconds of data.
+
+    RTSP streams don't declare bitrate in metadata, so we capture a short sample
+    and calculate bitrate from the data size. Returns bitrate in kbps.
+    """
+    import tempfile
+    import os
+
+    logger.debug("Probing video bitrate via sampling", extra={"url": rtsp_url, "seconds": sample_seconds})
+    tmp_path = None
+    try:
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".ts")
+        os.close(tmp_fd)
+
+        cmd = [
+            config.ffmpeg.path,
+            "-y", "-rtsp_transport", config.ffmpeg.rtsp_transport,
+            "-t", str(sample_seconds),
+            "-i", rtsp_url,
+            "-c", "copy",
+            tmp_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=sample_seconds + 15)
+
+        size_bytes = os.path.getsize(tmp_path)
+        if size_bytes > 0:
+            kbps = (size_bytes * 8) // (sample_seconds * 1000)
+            logger.info("Probed video bitrate", extra={"url": rtsp_url, "kbps": kbps})
+            return kbps
+    except Exception:
+        logger.exception("Failed to probe video bitrate", extra={"url": rtsp_url})
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    return None

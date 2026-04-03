@@ -12,12 +12,14 @@ class LivePlayer extends StatefulWidget {
   final String url;
   final int rotation;
   final BoxFit fit;
+  final ValueChanged<Player>? onPlayerCreated;
 
   const LivePlayer({
     super.key,
     required this.url,
     this.rotation = 0,
     this.fit = BoxFit.contain,
+    this.onPlayerCreated,
   });
 
   @override
@@ -52,6 +54,7 @@ class _LivePlayerState extends State<LivePlayer> {
     _controller = VideoController(_player);
     _player.setVolume(0);
     _errorSub = _player.stream.error.listen((_) => _scheduleRetry());
+    widget.onPlayerCreated?.call(_player);
     _open(widget.url);
   }
 
