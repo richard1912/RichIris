@@ -8,8 +8,7 @@ update claude md as needed for code changes
 - **Config**: `config.yaml` (cameras, storage paths, ffmpeg settings, go2rtc)
 - **Recordings**: `G:\RichIris` (segment files per camera per day, named `Camera 1 2026-03-08 13.30 - 13.45.ts`)
 - **Database**: `data/richiris.db` (SQLite, auto-created on first run)
-- **Frontend build**: `cd frontend && npm run build` (served from `frontend/dist/`) — legacy web UI
-- **Native app**: Flutter app in `app/` (Windows + Android), replaces web UI for live/playback/export
+- **App**: Flutter app in `app/` (Windows + Android)
 - **App build (Windows)**: `cd app && flutter build windows --release` → `app/build/windows/x64/runner/Release/`
 - **App build (Android)**: `cd app && flutter build apk --release` → `app/build/app/outputs/flutter-apk/`
 - **API docs**: http://localhost:8700/docs
@@ -18,8 +17,6 @@ update claude md as needed for code changes
 ```
 Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTSP sub-stream
                           → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
-Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
-                          → FastAPI:8700 → FFmpeg subprocesses (recording only)
                                     |                    |
                                 SQLite DB         G:\RichIris (recordings)
                                                   data\playback\ (remux cache)
@@ -28,9 +25,8 @@ Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
 - One ffmpeg process per camera for recording (always on). Live view handled by go2rtc (separate service).
 - Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments are renamed by the scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts` after completion. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
 - **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
-- **Live view (go2rtc MSE — web UI)**: go2rtc takes RTSP input (prefers sub-stream URL when configured) and outputs MSE (fMP4 over WebSocket). Frontend opens a WebSocket to go2rtc, sends `{"type":"mse"}`, and receives a continuous push-based stream of fMP4 segments. No HLS, no polling, no file I/O. Works reliably over WireGuard VPN. Streams are registered dynamically by RichIris via go2rtc's REST API on camera startup. **MsePlayer uses a persistent video pool** — video elements and WebSocket connections are kept alive at the module level (`Map<cameraId, StreamEntry>`), surviving React unmount/remount. View transitions (grid↔fullscreen) just move the same `<video>` DOM element between containers via `appendChild`, so the feed is never interrupted.
-- **Live view (HTTP fMP4 — native app)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
-- **Playback remux (no transcode)**: Recordings are HEVC .ts files. All qualities use fragmented MP4 (`-c copy -movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms as soon as the first fragment is written, no waiting for full remux. Browser plays HEVC natively (Chrome 107+, Edge, Safari have hardware HEVC decode). Single files use `-ss` before `-i` for fast keyframe seek. Multiple files use concat demuxer with `-ss` after `-i`. Sessions auto-cleanup after 120s idle.
+- **Live view (HTTP fMP4)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
+- **Playback remux (no transcode)**: Recordings are HEVC .ts files. All qualities use fragmented MP4 (`-c copy -movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms as soon as the first fragment is written, no waiting for full remux. Single files use `-ss` before `-i` for fast keyframe seek. Multiple files use concat demuxer with `-ss` after `-i`. Sessions auto-cleanup after 120s idle.
 - NVIDIA RTX 4080 SUPER available (used for AI person detection via YOLO)
 - **Motion detection + AI object detection**: Simplified snapshot-based pipeline. Fetches JPEG snapshots from go2rtc's HTTP frame API (`GET /api/frame.jpeg?src={stream}_s2_direct`) every ~1s using httpx (no cv2.VideoCapture — clean HTTP timeouts, no hung threads). go2rtc HTTP API on port **1984**. Motion pre-filter uses running weighted-average baseline: `avg = alpha * frame + (1-alpha) * avg` (alpha=0.2 for first 25 frames, then 0.01). Diff against baseline → GaussianBlur(21,21) → absdiff → threshold(25). `changed_pct > 40%` triggers hard baseline reset (IR switch). Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. When motion exceeds threshold and AI is enabled, frame goes directly to YOLO — if matching object detected above confidence threshold, event fires immediately. No Frigate-style median/history pipeline. Uses YOLO11x on CUDA (RTX 4080 SUPER), min bounding box 0.2% of frame area. Falls back to CPU if CUDA unavailable. **Multi-category detection**: per-camera toggles for persons (COCO class 0), vehicles (bicycle/car/motorcycle/bus/truck — classes 1,2,3,5,7), and animals (bird/cat/dog/horse/sheep/cow/elephant/bear/zebra/giraffe — classes 14-23). `detection_label` stores the specific COCO class name (e.g., "car", "dog"). Events stored as MotionEvent rows (start_time, end_time, peak_intensity, detection_label, detection_confidence). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `ai_detection` (master bool), `ai_detect_persons`/`ai_detect_vehicles`/`ai_detect_animals` (category bools), `ai_confidence_threshold` (0-100), `motion_script` (runs on motion start), `motion_script_off` (runs when motion ends after cooldown). Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes take effect immediately via `detector.update_camera()`. Heartbeat log every 5 min per camera.
 
@@ -44,11 +40,10 @@ Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
   - S2 High: sub-stream H.264 re-encode (native res), S2 Low: 320×180
 - **Playback**: All qualities use fragmented MP4 streaming. Direct/High use `-c copy` (HEVC passthrough). Medium/Low use NVENC GPU transcode (`h264_nvenc`).
   - Direct/High: 3840x2160 (4K native), Medium: 1280x720 @ 2Mbps, Low: 640x360 @ 800kbps
-- Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low` params for both HTTP fMP4 and WebSocket
+- Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low` params for HTTP fMP4
 - Backend uses module-level connection-pooled httpx client for go2rtc fMP4 proxying
 - Stream pre-warming at backend startup triggers go2rtc RTSP connections proactively
 - **Low-latency LivePlayer**: 512KB buffer, mpv `low-latency` profile, `cache=no`, `untimed=yes`, exponential backoff retry (500ms→10s)
-- Legacy web frontend still works (defaults `stream=s2`, maps old quality values)
 
 ### Important: Timezone handling
 - Recordings are stored in the DB as **local time without timezone** (e.g. `2026-03-08T10:36:02`)
@@ -90,18 +85,7 @@ RichIris/
 ├── go2rtc/
 │   ├── go2rtc.exe               # go2rtc binary (RTSP → MSE/WebSocket)
 │   └── go2rtc.yaml              # go2rtc config (API port, streams registered dynamically)
-├── frontend/                    # React 19 + Vite + Tailwind (legacy web UI)
-│   └── src/
-│       ├── App.tsx              # Main app - grid with selectable timeline
-│       ├── api.ts               # API client functions
-│       └── components/
-│           ├── CameraGrid.tsx   # Camera grid with selection highlight
-│           ├── CameraCard.tsx   # Individual camera thumbnail
-│           ├── CameraFullscreen.tsx # Fullscreen view with timeline
-│           ├── MsePlayer.tsx    # go2rtc MSE WebSocket player (persistent video pool)
-│           ├── Timeline.tsx     # 24h timeline bar, date picker, clip export
-│           └── SystemPage.tsx   # System status + storage
-├── app/                         # Flutter native app (Windows + Android)
+├── app/                         # Flutter app (Windows + Android)
 │   ├── lib/
 │   │   ├── main.dart            # Entry point, MediaKit init
 │   │   ├── app.dart             # MaterialApp, navigation, state management
@@ -115,7 +99,7 @@ RichIris/
 │   │   └── utils/               # Time/format utilities
 │   └── pubspec.yaml             # Dependencies: media_kit, dio, shared_preferences
 ├── config.yaml                  # Main configuration (cameras, paths)
-├── rebuild.bat                  # Frontend build script
+├── rebuild.bat                  # Full rebuild (Windows + Android)
 ├── start.bat                    # Quick launcher
 ├── service-install.bat          # Install Windows service
 ├── service-uninstall.bat
@@ -156,22 +140,18 @@ RichIris/
 - `GET /api/recordings/{id}/thumb/{date}/{filename}` - Serve individual thumbnail JPEG (cached 24h)
 - `GET /api/motion/{id}/events?date=YYYY-MM-DD` - Motion events for a camera on a date
 
-## Frontend UI Flow
+## App UI Flow
 - **Grid page**: Click camera → selects it (blue ring), shows timeline at bottom. Click same camera again → fullscreen.
-- **Fullscreen page**: Full video player + timeline + speed controls (shown in playback mode). Click timeline segment → instant MP4 remux (< 1s) → video plays natively (HEVC in browser).
-- **Speed controls**: -32x to 32x. 1x/2x/4x use native `video.playbackRate`. 16x/32x use interval-based jumping. Reverse speeds request new playback sessions at earlier times.
-- **Timeline**: LIVE button, date picker, zoomable timeline bar with blue segments. Mouse wheel zooms (1h-24h range), minimap shown when zoomed for pan navigation. Export clip mode, clips list with download/delete. Trickplay thumbnail preview on hover (individual JPEGs captured from RTSP).
-- **Timeline (Flutter app)**: CustomPainter-based timeline with scrub indicator showing time label. Scroll wheel zoom (Windows), pinch-to-zoom (Android). Mouse hover (Windows) or touch scrub (Android) shows white scrub line with time + trickplay thumbnail via OverlayEntry (floats above timeline, `gaplessPlayback: true` prevents flicker). Tap/release navigates to time and instantly moves red playhead. Playhead timer pauses live-time updates during playback transition (`_manualPan` flag).
+- **Fullscreen page**: Full video player + timeline + speed controls (shown in playback mode). Click timeline segment → instant MP4 remux (< 1s) → video plays via media_kit.
+- **Speed controls**: -32x to 32x. 1x/2x/4x use native playback rate. 16x/32x use interval-based jumping. Reverse speeds request new playback sessions at earlier times.
+- **Timeline**: CustomPainter-based timeline with scrub indicator showing time label. Scroll wheel zoom (Windows), pinch-to-zoom (Android). Mouse hover (Windows) or touch scrub (Android) shows white scrub line with time + trickplay thumbnail via OverlayEntry (floats above timeline, `gaplessPlayback: true` prevents flicker). Tap/release navigates to time and instantly moves red playhead. Playhead timer pauses live-time updates during playback transition (`_manualPan` flag). LIVE button, date picker, zoomable timeline bar with blue segments. Mouse wheel zooms (1h-24h range), minimap shown when zoomed for pan navigation. Export clip mode, clips list with download/delete.
 - **Motion events on timeline**: Color-coded bars above blue recording segments. Person=amber, Vehicle=indigo, Animal=emerald, Motion-only=gray. Visible in both main timeline and minimap. Polled alongside segments (every 15s for today's date).
-
 - **Inline transitions**: Grid↔fullscreen transitions render inline (no Navigator.push) for faster view switching. No route transition animation delay.
-- **Playback**: Uses direct `<video src="...">` for MP4 playback (no HLS.js). MsePlayer is only used for live streams.
 
 ## Key Dependencies
 - **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy, ultralytics (YOLOv8)
 - **Service**: NSSM (installed via `winget install NSSM.NSSM`)
-- **Live view**: go2rtc (Go binary, RTSP → MSE/WebSocket, installed as Windows service)
-- **Frontend**: react 19, vite, tailwindcss
+- **Live view**: go2rtc (Go binary, RTSP → HTTP fMP4, installed as Windows service)
 
 ## Cameras
 6 cameras configured in config.yaml on 192.168.8.41-46. Streams are RTSP, codec is HEVC (H.265) at 4K (3840x2160). Sub-streams are H.264 (used by go2rtc for zero-transcode live view).

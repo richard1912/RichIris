@@ -3,13 +3,9 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import httpx
-from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
 from sqlalchemy import select
 
 from app.config import get_config
@@ -25,8 +21,6 @@ from app.services.stream_manager import get_stream_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
 from app.services.motion_detector import get_motion_detector
 from app.services.object_detector import get_object_detector
-
-FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 logger = logging.getLogger(__name__)
 
@@ -212,13 +206,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:5173"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     app.include_router(cameras.router)
     app.include_router(clips.router)
     app.include_router(motion.router)
@@ -229,20 +216,6 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
-
-    # Serve frontend static build (must be after API routes)
-    if FRONTEND_DIR.is_dir():
-        app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="static")
-
-        @app.get("/{full_path:path}")
-        async def serve_frontend(full_path: str):
-            file = FRONTEND_DIR / full_path
-            if file.is_file():
-                return FileResponse(file)
-            return FileResponse(
-                FRONTEND_DIR / "index.html",
-                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-            )
 
     return app
 
