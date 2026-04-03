@@ -177,6 +177,34 @@ async def init_db() -> None:
             logger.info("Migration: added detection_confidence column to motion_events")
         except Exception:
             pass  # Column already exists
+    # Migrate: add motion_scripts JSON column if missing
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN motion_scripts TEXT")
+            )
+            logger.info("Migration: added motion_scripts column to cameras")
+        except Exception:
+            pass  # Column already exists
+    # Migrate: convert legacy motion_script/motion_script_off to motion_scripts JSON
+    async with engine.begin() as conn:
+        try:
+            rows = (await conn.execute(
+                text("SELECT id, motion_script, motion_script_off FROM cameras WHERE motion_script IS NOT NULL AND (motion_scripts IS NULL OR motion_scripts = '')")
+            )).fetchall()
+            import json
+            for row in rows:
+                cam_id, script_on, script_off = row
+                entry = {"on": script_on, "off": script_off or None,
+                         "persons": True, "vehicles": True, "animals": True, "motion_only": True}
+                await conn.execute(
+                    text("UPDATE cameras SET motion_scripts = :scripts WHERE id = :id"),
+                    {"scripts": json.dumps([entry]), "id": cam_id},
+                )
+            if rows:
+                logger.info("Migration: converted %d cameras from legacy motion_script to motion_scripts", len(rows))
+        except Exception:
+            logger.exception("Migration: failed to convert legacy motion scripts")
     logger.info("Database tables created")
 
 

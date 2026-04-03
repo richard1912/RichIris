@@ -1,6 +1,7 @@
 """Motion detection + AI object detection using go2rtc snapshots and YOLO."""
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime
@@ -60,10 +61,24 @@ class MotionDetector:
         # Keyed by (cam_id, category) — one active event per category per camera
         self._active_events: dict[tuple[int, str], int] = {}
         self._last_motion: dict[tuple[int, str], datetime] = {}
-        self._script_off: dict[tuple[int, str], str | None] = {}
+        self._script_off: dict[tuple[int, str], list[str]] = {}
         self._avg_baseline: dict[int, np.ndarray | None] = {}
         self._baseline_frames: dict[int, int] = {}
         self._client: httpx.AsyncClient | None = None
+
+    @staticmethod
+    def _parse_motion_scripts(camera) -> list[dict]:
+        """Parse motion_scripts JSON from camera, falling back to legacy fields."""
+        if camera.motion_scripts:
+            try:
+                return json.loads(camera.motion_scripts)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # Legacy fallback
+        if camera.motion_script:
+            return [{"on": camera.motion_script, "off": camera.motion_script_off,
+                     "persons": True, "vehicles": True, "animals": True, "motion_only": True}]
+        return []
 
     def start(self, cameras: list) -> None:
         self._running = True
@@ -72,11 +87,11 @@ class MotionDetector:
         for cam in cameras:
             if cam.motion_sensitivity > 0 and (cam.sub_stream_url or cam.rtsp_url):
                 url = _snapshot_url(cam.name, cfg.host, cfg.port)
+                scripts = self._parse_motion_scripts(cam)
                 task = asyncio.create_task(
                     self._detect_loop(
                         cam.id, cam.name, url,
-                        cam.motion_sensitivity, cam.motion_script,
-                        cam.motion_script_off,
+                        cam.motion_sensitivity, scripts,
                         ai_detection=cam.ai_detection,
                         ai_detect_persons=cam.ai_detect_persons,
                         ai_detect_vehicles=cam.ai_detect_vehicles,
@@ -122,11 +137,11 @@ class MotionDetector:
                 await detector.start()
             if self._client is None:
                 self._client = httpx.AsyncClient(timeout=FRAME_TIMEOUT)
+            scripts = self._parse_motion_scripts(camera)
             task = asyncio.create_task(
                 self._detect_loop(
                     camera.id, camera.name, url,
-                    camera.motion_sensitivity, camera.motion_script,
-                    camera.motion_script_off,
+                    camera.motion_sensitivity, scripts,
                     ai_detection=camera.ai_detection,
                     ai_detect_persons=camera.ai_detect_persons,
                     ai_detect_vehicles=camera.ai_detect_vehicles,
@@ -149,7 +164,7 @@ class MotionDetector:
 
     async def _detect_loop(
         self, cam_id: int, cam_name: str, url: str,
-        sensitivity: int, script: str | None, script_off: str | None = None,
+        sensitivity: int, scripts: list[dict],
         ai_detection: bool = False,
         ai_detect_persons: bool = True, ai_detect_vehicles: bool = False,
         ai_detect_animals: bool = False,
@@ -234,7 +249,7 @@ class MotionDetector:
                             for cat_detections in by_cat.values():
                                 best = max(cat_detections, key=lambda d: d.confidence)
                                 await self._on_motion(
-                                    cam_id, cam_name, changed_pct, script, script_off,
+                                    cam_id, cam_name, changed_pct, scripts,
                                     detection_label=best.label,
                                     detection_confidence=best.confidence,
                                     frame=frame,
@@ -242,7 +257,7 @@ class MotionDetector:
                         else:
                             await self._check_cooldown(cam_id)
                     else:
-                        await self._on_motion(cam_id, cam_name, changed_pct, script, script_off, frame=frame)
+                        await self._on_motion(cam_id, cam_name, changed_pct, scripts, frame=frame)
                 else:
                     await self._check_cooldown(cam_id)
 
@@ -283,9 +298,20 @@ class MotionDetector:
             logger.exception("Failed to save detection thumbnail")
             return None
 
+    @staticmethod
+    def _scripts_for_category(scripts: list[dict], category: str) -> list[dict]:
+        """Return script configs that match the given detection category."""
+        cat_key = {
+            "person": "persons",
+            "vehicle": "vehicles",
+            "animal": "animals",
+            "motion": "motion_only",
+        }.get(category, "motion_only")
+        return [s for s in scripts if s.get(cat_key, False)]
+
     async def _on_motion(
         self, cam_id: int, cam_name: str, intensity: float,
-        script: str | None, script_off: str | None = None,
+        scripts: list[dict],
         detection_label: str | None = None, detection_confidence: float | None = None,
         frame: np.ndarray | None = None,
     ) -> None:
@@ -311,7 +337,9 @@ class MotionDetector:
                 await session.commit()
                 await session.refresh(event)
                 self._active_events[key] = event.id
-                self._script_off[key] = script_off
+                # Store off-scripts for this category so _finalize_event can run them
+                matching = self._scripts_for_category(scripts, category)
+                self._script_off[key] = [s.get("off") for s in matching if s.get("off")]
 
             log_extra = {"camera": cam_name, "intensity": round(intensity, 2), "category": category}
             if detection_label:
@@ -321,10 +349,12 @@ class MotionDetector:
                 log_extra["thumbnail"] = thumb_path
             logger.info("Motion started", extra=log_extra)
 
-            if script:
-                asyncio.create_task(self._run_script(
-                    script, cam_name, now, intensity, detection_label, detection_confidence,
-                ))
+            # Run all matching on-scripts for this category
+            for s in matching:
+                if s.get("on"):
+                    asyncio.create_task(self._run_script(
+                        s["on"], cam_name, now, intensity, detection_label, detection_confidence,
+                    ))
         else:
             factory = get_session_factory()
             async with factory() as session:
@@ -354,7 +384,7 @@ class MotionDetector:
     async def _finalize_event(self, key: tuple[int, str]) -> None:
         event_id = self._active_events.pop(key, None)
         self._last_motion.pop(key, None)
-        script_off = self._script_off.pop(key, None)
+        off_scripts = self._script_off.pop(key, None) or []
         if event_id is None:
             return
         factory = get_session_factory()
@@ -364,8 +394,12 @@ class MotionDetector:
                 event.end_time = datetime.now()
                 await session.commit()
         logger.info("Motion ended", extra={"camera_id": key[0], "category": key[1], "event_id": event_id})
-        if script_off:
-            asyncio.create_task(self._run_script(script_off, str(key[0]), datetime.now(), 0.0))
+        # Handle both legacy (single string) and new (list) formats
+        if isinstance(off_scripts, str):
+            off_scripts = [off_scripts]
+        for script_off in off_scripts:
+            if script_off:
+                asyncio.create_task(self._run_script(script_off, str(key[0]), datetime.now(), 0.0))
 
     async def _run_script(
         self, script: str, cam_name: str, timestamp: datetime, intensity: float,

@@ -3,6 +3,24 @@ import '../models/camera.dart';
 import '../services/camera_api.dart';
 import '../utils/detection_colors.dart';
 
+class _ScriptEntry {
+  final TextEditingController onCtrl;
+  final TextEditingController offCtrl;
+  bool persons;
+  bool vehicles;
+  bool animals;
+  bool motionOnly;
+
+  _ScriptEntry({
+    required this.onCtrl,
+    required this.offCtrl,
+    this.persons = true,
+    this.vehicles = true,
+    this.animals = true,
+    this.motionOnly = true,
+  });
+}
+
 class CameraFormScreen extends StatefulWidget {
   final CameraApi cameraApi;
   final Camera? camera;
@@ -23,8 +41,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late bool _enabled;
   late int _rotation;
   late int _motionSensitivity;
-  late final TextEditingController _motionScriptCtrl;
-  late final TextEditingController _motionScriptOffCtrl;
+  late List<_ScriptEntry> _scriptEntries;
   late bool _aiDetection;
   late bool _aiDetectPersons;
   late bool _aiDetectVehicles;
@@ -73,8 +90,16 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _enabled = widget.camera?.enabled ?? true;
     _rotation = widget.camera?.rotation ?? 0;
     _motionSensitivity = widget.camera?.motionSensitivity ?? 0;
-    _motionScriptCtrl = TextEditingController(text: widget.camera?.motionScript ?? '');
-    _motionScriptOffCtrl = TextEditingController(text: widget.camera?.motionScriptOff ?? '');
+    // Build script entries from motionScripts list
+    final scripts = widget.camera?.motionScripts ?? [];
+    _scriptEntries = scripts.map((s) => _ScriptEntry(
+      onCtrl: TextEditingController(text: s.on ?? ''),
+      offCtrl: TextEditingController(text: s.off ?? ''),
+      persons: s.persons,
+      vehicles: s.vehicles,
+      animals: s.animals,
+      motionOnly: s.motionOnly,
+    )).toList();
     _aiDetection = widget.camera?.aiDetection ?? false;
     _aiDetectPersons = widget.camera?.aiDetectPersons ?? true;
     _aiDetectVehicles = widget.camera?.aiDetectVehicles ?? false;
@@ -89,8 +114,10 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _subStreamCtrl.dispose();
     _usernameCtrl.dispose();
     _passwordCtrl.dispose();
-    _motionScriptCtrl.dispose();
-    _motionScriptOffCtrl.dispose();
+    for (final e in _scriptEntries) {
+      e.onCtrl.dispose();
+      e.offCtrl.dispose();
+    }
     super.dispose();
   }
 
@@ -108,6 +135,20 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       final subUrl = sub.isNotEmpty ? _injectCreds(sub, user, pass) : null;
 
       if (isEditing) {
+        // Build motion_scripts from entries (filter out empty ones)
+        final scriptsList = _scriptEntries
+            .where((e) => e.onCtrl.text.trim().isNotEmpty || e.offCtrl.text.trim().isNotEmpty)
+            .map((e) {
+              return <String, dynamic>{
+                'on': e.onCtrl.text.trim().isEmpty ? null : e.onCtrl.text.trim(),
+                'off': e.offCtrl.text.trim().isEmpty ? null : e.offCtrl.text.trim(),
+                'persons': e.persons,
+                'vehicles': e.vehicles,
+                'animals': e.animals,
+                'motion_only': e.motionOnly,
+              };
+            })
+            .toList();
         final data = <String, dynamic>{
           'name': _nameCtrl.text.trim(),
           'rtsp_url': mainUrl,
@@ -115,12 +156,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           'enabled': _enabled,
           'rotation': _rotation,
           'motion_sensitivity': _motionSensitivity,
-          'motion_script': _motionScriptCtrl.text.trim().isEmpty
-              ? null
-              : _motionScriptCtrl.text.trim(),
-          'motion_script_off': _motionScriptOffCtrl.text.trim().isEmpty
-              ? null
-              : _motionScriptOffCtrl.text.trim(),
+          'motion_scripts': scriptsList,
           'ai_detection': _aiDetection,
           'ai_detect_persons': _aiDetectPersons,
           'ai_detect_vehicles': _aiDetectVehicles,
@@ -193,6 +229,140 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
         contentPadding: EdgeInsets.zero,
         activeColor: color,
       ),
+    );
+  }
+
+  Widget _buildScriptsList() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('Scripts', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+            const Spacer(),
+            TextButton.icon(
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('Add Script'),
+              onPressed: () {
+                setState(() {
+                  _scriptEntries.add(_ScriptEntry(
+                    onCtrl: TextEditingController(),
+                    offCtrl: TextEditingController(),
+                  ));
+                });
+              },
+            ),
+          ],
+        ),
+        if (_scriptEntries.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'No scripts configured. Add a script to run on motion/detection events.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+            ),
+          ),
+        for (int i = 0; i < _scriptEntries.length; i++)
+          _buildScriptEntry(i),
+      ],
+    );
+  }
+
+  Widget _buildScriptEntry(int index) {
+    final entry = _scriptEntries[index];
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text('Script ${index + 1}',
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  color: Colors.red[400],
+                  onPressed: () {
+                    setState(() {
+                      _scriptEntries[index].onCtrl.dispose();
+                      _scriptEntries[index].offCtrl.dispose();
+                      _scriptEntries.removeAt(index);
+                    });
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextFormField(
+              controller: entry.onCtrl,
+              decoration: InputDecoration(
+                labelText: 'On Script',
+                hintText: r'C:\scripts\alert.bat',
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              ),
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 8),
+            TextFormField(
+              controller: entry.offCtrl,
+              decoration: InputDecoration(
+                labelText: 'Off Script',
+                hintText: r'C:\scripts\end.bat',
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              ),
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 8),
+            const Text('Trigger for:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 4,
+              runSpacing: 0,
+              children: [
+                _buildScriptCategoryChip('Persons', DetectionColors.person, entry.persons,
+                    (v) => setState(() => entry.persons = v),
+                    active: !_aiDetection || _aiDetectPersons),
+                _buildScriptCategoryChip('Vehicles', DetectionColors.vehicle, entry.vehicles,
+                    (v) => setState(() => entry.vehicles = v),
+                    active: !_aiDetection || _aiDetectVehicles),
+                _buildScriptCategoryChip('Animals', DetectionColors.animal, entry.animals,
+                    (v) => setState(() => entry.animals = v),
+                    active: !_aiDetection || _aiDetectAnimals),
+                _buildScriptCategoryChip('Any motion', Colors.grey, entry.motionOnly,
+                    (v) => setState(() => entry.motionOnly = v),
+                    active: true),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildScriptCategoryChip(String label, Color color, bool value, ValueChanged<bool> onChanged,
+      {bool active = true}) {
+    final showWarning = value && !active;
+    return FilterChip(
+      avatar: showWarning ? Icon(Icons.warning_amber_rounded, size: 14, color: Colors.orange[300]) : null,
+      label: Text(label, style: TextStyle(
+        fontSize: 11,
+        color: value ? (showWarning ? Colors.orange[200] : Colors.white) : Colors.grey[400],
+      )),
+      selected: value,
+      onSelected: onChanged,
+      selectedColor: showWarning ? Colors.orange.withValues(alpha: 0.3) : color.withValues(alpha: 0.8),
+      checkmarkColor: showWarning ? Colors.orange[300] : Colors.white,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      tooltip: showWarning ? '$label detection not enabled above' : null,
     );
   }
 
@@ -384,25 +554,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                   ),
                 ],
                 const SizedBox(height: 6),
-                TextFormField(
-                  controller: _motionScriptCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Motion Start Script (optional)',
-                    hintText: r'C:\scripts\motion_alert.bat',
-                    helperText: 'Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE',
-                    helperMaxLines: 2,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _motionScriptOffCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Motion End Script (optional)',
-                    hintText: r'C:\scripts\motion_end.bat',
-                    helperText: 'Runs after motion stops (10s cooldown)',
-                    helperMaxLines: 2,
-                  ),
-                ),
+                _buildScriptsList(),
               ],
               const SizedBox(height: 20),
               SizedBox(
