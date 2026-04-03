@@ -81,8 +81,8 @@ class TimelinePainter extends CustomPainter {
 
   void _drawSegments(Canvas canvas, Size size, double vpStart, double vpHours) {
     final segPaint = Paint()..color = const Color(0xFF3B82F6).withValues(alpha: 0.6);
-    final barTop = size.height * 0.3;
-    final barHeight = size.height * 0.5;
+    final barTop = size.height * 0.76;
+    final barHeight = size.height * 0.16;
 
     for (final seg in controller.merged) {
       final x1 = (seg.startHour - vpStart) / vpHours * size.width;
@@ -105,36 +105,54 @@ class TimelinePainter extends CustomPainter {
 
   void _drawMotionEvents(Canvas canvas, Size size, double vpStart, double vpHours) {
     if (controller.motionEvents.isEmpty) return;
-    final paint = Paint();
-    final barTop = size.height * 0.08;
-    final barHeight = size.height * 0.18;
 
+    // 4 stacked rows, one per category (below time labels)
+    const categories = DetectionCategory.values;
+    final rowHeight = size.height * 0.14;
+    final rowGap = size.height * 0.015;
+    final startY = size.height * 0.13;
+
+    // Group events by category
+    final grouped = <DetectionCategory, List<dynamic>>{};
     for (final event in controller.motionEvents) {
-      final startHour = isoToHour(event.startTime);
-      final endHour = event.endTime != null
-          ? isoToHour(event.endTime!)
-          : startHour + 10 / 3600.0; // 10-second default for in-progress events
+      final cat = DetectionColors.categoryFor(event.detectionLabel);
+      (grouped[cat] ??= []).add(event);
+    }
 
-      final x1 = (startHour - vpStart) / vpHours * size.width;
-      final x2 = (endHour - vpStart) / vpHours * size.width;
-      if (x2 < 0 || x1 > size.width) continue;
+    final paint = Paint();
 
-      // Ensure minimum visible width of 8 pixels for clickability
-      final drawX2 = (x2 - x1 < 8) ? x1 + 8 : x2;
+    for (int i = 0; i < categories.length; i++) {
+      final cat = categories[i];
+      final events = grouped[cat];
+      if (events == null) continue;
+      final rowTop = startY + i * (rowHeight + rowGap);
 
-      paint.color = DetectionColors.forLabel(event.detectionLabel).withValues(alpha: 0.8);
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTRB(
-            x1.clamp(0, size.width),
-            barTop,
-            drawX2.clamp(0, size.width),
-            barTop + barHeight,
+      for (final event in events) {
+        final startHour = isoToHour(event.startTime);
+        final endHour = event.endTime != null
+            ? isoToHour(event.endTime!)
+            : startHour + 10 / 3600.0;
+
+        final x1 = (startHour - vpStart) / vpHours * size.width;
+        final x2 = (endHour - vpStart) / vpHours * size.width;
+        if (x2 < 0 || x1 > size.width) continue;
+
+        final drawX2 = ((x2 - x1 < 8) ? x1 + 8 : x2);
+
+        paint.color = DetectionColors.forCategory(cat).withValues(alpha: 0.8);
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromLTRB(
+              x1.clamp(0, size.width),
+              rowTop,
+              drawX2.clamp(0, size.width),
+              rowTop + rowHeight,
+            ),
+            const Radius.circular(1),
           ),
-          const Radius.circular(1),
-        ),
-        paint,
-      );
+          paint,
+        );
+      }
     }
   }
 

@@ -51,8 +51,8 @@ class RetentionConfig:
 class TrickplayConfig:
     enabled: bool = True
     interval: int = 60
-    thumb_width: int = 192
-    thumb_height: int = 108
+    thumb_width: int = 384
+    thumb_height: int = 216
 
 
 @dataclass

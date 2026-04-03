@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import '../../config/constants.dart';
 import '../../models/motion_event.dart';
 import '../../models/recording_segment.dart';
+import '../../utils/detection_colors.dart';
 import '../../utils/time_utils.dart';
 
 class MergedSegment {
@@ -91,10 +92,30 @@ class TimelineController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Returns the detection category row at the given y-fraction, or null if
+  /// the cursor is not within a row (e.g. in a gap or below the rows).
+  DetectionCategory? categoryAtYFraction(double yFrac) {
+    const startY = 0.13;
+    const rowHeight = 0.14;
+    const rowGap = 0.015;
+    const rowStride = rowHeight + rowGap; // 0.155
+    if (yFrac < startY) return null;
+    final rowIndex = ((yFrac - startY) / rowStride).floor();
+    if (rowIndex < 0 || rowIndex >= DetectionCategory.values.length) return null;
+    // Check we're within the row, not in the gap
+    final rowTop = startY + rowIndex * rowStride;
+    if (yFrac > rowTop + rowHeight) return null;
+    return DetectionCategory.values[rowIndex];
+  }
+
   /// Returns the motion event at the given hour, or null.
   /// [padHours] expands the hit target on each side (in hours).
-  MotionEvent? motionEventAtHour(double hour, {double padHours = 0}) {
+  /// [category] filters to only events of that category.
+  MotionEvent? motionEventAtHour(double hour, {double padHours = 0, DetectionCategory? category}) {
     for (final event in _motionEvents) {
+      if (category != null && DetectionColors.categoryFor(event.detectionLabel) != category) {
+        continue;
+      }
       final startHour = isoToHour(event.startTime);
       final endHour = event.endTime != null
           ? isoToHour(event.endTime!)
