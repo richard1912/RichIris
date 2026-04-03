@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import httpx
@@ -12,6 +13,7 @@ import numpy as np
 from app.config import get_config
 from app.database import get_session_factory
 from app.models import MotionEvent
+from app.services.ffmpeg import sanitize_camera_name
 from app.services.go2rtc_client import get_stream_name
 from app.services.object_detector import get_object_detector
 
@@ -235,11 +237,12 @@ class MotionDetector:
                                     cam_id, cam_name, changed_pct, script, script_off,
                                     detection_label=best.label,
                                     detection_confidence=best.confidence,
+                                    frame=frame,
                                 )
                         else:
                             await self._check_cooldown(cam_id)
                     else:
-                        await self._on_motion(cam_id, cam_name, changed_pct, script, script_off)
+                        await self._on_motion(cam_id, cam_name, changed_pct, script, script_off, frame=frame)
                 else:
                     await self._check_cooldown(cam_id)
 
@@ -262,10 +265,27 @@ class MotionDetector:
                 logger.exception("Motion detection error", extra={"camera": cam_name})
                 await asyncio.sleep(5)
 
+    def _save_detection_thumbnail(self, cam_name: str, frame: np.ndarray, now: datetime) -> str | None:
+        """Save the detection frame as a JPEG thumbnail. Returns the file path."""
+        try:
+            config = get_config()
+            safe_name = sanitize_camera_name(cam_name)
+            date_str = now.strftime("%Y-%m-%d")
+            thumb_dir = Path(config.storage.recordings_dir) / safe_name / date_str / "detection_thumbs"
+            thumb_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"detect_{now.strftime('%H%M%S_%f')}.jpg"
+            path = thumb_dir / filename
+            cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return str(path)
+        except Exception:
+            logger.exception("Failed to save detection thumbnail")
+            return None
+
     async def _on_motion(
         self, cam_id: int, cam_name: str, intensity: float,
         script: str | None, script_off: str | None = None,
         detection_label: str | None = None, detection_confidence: float | None = None,
+        frame: np.ndarray | None = None,
     ) -> None:
         now = datetime.now()
         category = _label_category(detection_label)
@@ -273,11 +293,17 @@ class MotionDetector:
         self._last_motion[key] = now
 
         if key not in self._active_events:
+            # Save detection thumbnail from the frame that triggered this event
+            thumb_path = None
+            if frame is not None:
+                thumb_path = self._save_detection_thumbnail(cam_name, frame, now)
+
             factory = get_session_factory()
             async with factory() as session:
                 event = MotionEvent(
                     camera_id=cam_id, start_time=now, peak_intensity=intensity,
                     detection_label=detection_label, detection_confidence=detection_confidence,
+                    thumbnail_path=thumb_path,
                 )
                 session.add(event)
                 await session.commit()
@@ -289,6 +315,8 @@ class MotionDetector:
             if detection_label:
                 log_extra["detection"] = detection_label
                 log_extra["confidence"] = round(detection_confidence, 2)
+            if thumb_path:
+                log_extra["thumbnail"] = thumb_path
             logger.info("Motion started", extra=log_extra)
 
             if script:

@@ -80,5 +80,6 @@ class MotionEvent(Base):
     peak_intensity: Mapped[float] = mapped_column(Float, default=0.0)
     detection_label: Mapped[str | None] = mapped_column(String(50), nullable=True)
     detection_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     camera: Mapped["Camera"] = relationship(back_populates="motion_events")
