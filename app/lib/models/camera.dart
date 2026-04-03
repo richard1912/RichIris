@@ -1,3 +1,49 @@
+class MotionScriptConfig {
+  String? on;
+  String? off;
+  bool persons;
+  bool vehicles;
+  bool animals;
+  bool motionOnly;
+
+  MotionScriptConfig({
+    this.on,
+    this.off,
+    this.persons = true,
+    this.vehicles = true,
+    this.animals = true,
+    this.motionOnly = true,
+  });
+
+  factory MotionScriptConfig.fromJson(Map<String, dynamic> json) =>
+      MotionScriptConfig(
+        on: json['on'] as String?,
+        off: json['off'] as String?,
+        persons: json['persons'] as bool? ?? true,
+        vehicles: json['vehicles'] as bool? ?? true,
+        animals: json['animals'] as bool? ?? true,
+        motionOnly: json['motion_only'] as bool? ?? true,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'on': on,
+        'off': off,
+        'persons': persons,
+        'vehicles': vehicles,
+        'animals': animals,
+        'motion_only': motionOnly,
+      };
+
+  MotionScriptConfig copy() => MotionScriptConfig(
+        on: on,
+        off: off,
+        persons: persons,
+        vehicles: vehicles,
+        animals: animals,
+        motionOnly: motionOnly,
+      );
+}
+
 class Camera {
   final int id;
   final String name;
@@ -12,6 +58,7 @@ class Camera {
   final int motionSensitivity;
   final String? motionScript;
   final String? motionScriptOff;
+  final List<MotionScriptConfig> motionScripts;
   final bool aiDetection;
   final bool aiDetectPersons;
   final bool aiDetectVehicles;
@@ -33,6 +80,7 @@ class Camera {
     this.motionSensitivity = 0,
     this.motionScript,
     this.motionScriptOff,
+    this.motionScripts = const [],
     this.aiDetection = false,
     this.aiDetectPersons = true,
     this.aiDetectVehicles = false,
@@ -55,6 +103,10 @@ class Camera {
         motionSensitivity: json['motion_sensitivity'] as int? ?? 0,
         motionScript: json['motion_script'] as String?,
         motionScriptOff: json['motion_script_off'] as String?,
+        motionScripts: (json['motion_scripts'] as List<dynamic>?)
+                ?.map((e) => MotionScriptConfig.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            [],
         aiDetection: json['ai_detection'] as bool? ?? false,
         aiDetectPersons: json['ai_detect_persons'] as bool? ?? true,
         aiDetectVehicles: json['ai_detect_vehicles'] as bool? ?? false,
@@ -71,6 +123,7 @@ class Camera {
         'rotation': rotation,
         'motion_sensitivity': motionSensitivity,
         if (motionScript != null) 'motion_script': motionScript,
+        'motion_scripts': motionScripts.map((s) => s.toJson()).toList(),
         'ai_detection': aiDetection,
         'ai_detect_persons': aiDetectPersons,
         'ai_detect_vehicles': aiDetectVehicles,

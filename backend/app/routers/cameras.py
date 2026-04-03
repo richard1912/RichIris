@@ -1,5 +1,6 @@
 """Camera CRUD API endpoints."""
 
+import json
 import logging
 from pathlib import Path
 
@@ -25,7 +26,7 @@ async def list_cameras(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Camera).order_by(Camera.id))
     cameras = result.scalars().all()
     logger.debug("Listed cameras", extra={"count": len(cameras)})
-    return cameras
+    return [CameraResponse.from_camera(c) for c in cameras]
 
 
 @router.get("/{camera_id}", response_model=CameraResponse)
@@ -34,12 +35,15 @@ async def get_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
-    return camera
+    return CameraResponse.from_camera(camera)
 
 
 @router.post("", response_model=CameraResponse, status_code=201)
 async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
     """Create a new camera."""
+    scripts_json = None
+    if data.motion_scripts:
+        scripts_json = json.dumps([s.model_dump() for s in data.motion_scripts])
     camera = Camera(
         name=data.name, rtsp_url=data.rtsp_url,
         sub_stream_url=data.sub_stream_url or None,
@@ -47,6 +51,7 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         motion_sensitivity=data.motion_sensitivity,
         motion_script=data.motion_script,
         motion_script_off=data.motion_script_off,
+        motion_scripts=scripts_json,
         ai_detection=data.ai_detection,
         ai_detect_persons=data.ai_detect_persons,
         ai_detect_vehicles=data.ai_detect_vehicles,
@@ -65,7 +70,7 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         except Exception:
             logger.exception("Failed to start stream for new camera", extra={"camera_id": camera.id})
 
-    return camera
+    return CameraResponse.from_camera(camera)
 
 
 @router.put("/{camera_id}", response_model=CameraResponse)
@@ -111,6 +116,11 @@ async def update_camera(
         camera.ai_detect_animals = data.ai_detect_animals
     if data.ai_confidence_threshold is not None:
         camera.ai_confidence_threshold = data.ai_confidence_threshold
+    if "motion_scripts" in (data.model_fields_set or set()):
+        if data.motion_scripts is not None:
+            camera.motion_scripts = json.dumps([s.model_dump() for s in data.motion_scripts])
+        else:
+            camera.motion_scripts = None
 
     await db.commit()
     await db.refresh(camera)
@@ -130,7 +140,7 @@ async def update_camera(
     detector = get_motion_detector()
     await detector.update_camera(camera)
 
-    return camera
+    return CameraResponse.from_camera(camera)
 
 
 @router.delete("/{camera_id}", status_code=204)

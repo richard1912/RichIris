@@ -5,6 +5,15 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class MotionScriptConfig(BaseModel):
+    on: str | None = None
+    off: str | None = None
+    persons: bool = True
+    vehicles: bool = True
+    animals: bool = True
+    motion_only: bool = True
+
+
 class CameraCreate(BaseModel):
     name: str
     rtsp_url: str
@@ -14,6 +23,7 @@ class CameraCreate(BaseModel):
     motion_sensitivity: int = 0
     motion_script: str | None = None
     motion_script_off: str | None = None
+    motion_scripts: list[MotionScriptConfig] | None = None
     ai_detection: bool = False
     ai_detect_persons: bool = True
     ai_detect_vehicles: bool = False
@@ -30,6 +40,7 @@ class CameraUpdate(BaseModel):
     motion_sensitivity: int | None = None
     motion_script: str | None = None
     motion_script_off: str | None = None
+    motion_scripts: list[MotionScriptConfig] | None = None
     ai_detection: bool | None = None
     ai_detect_persons: bool | None = None
     ai_detect_vehicles: bool | None = None
@@ -51,6 +62,7 @@ class CameraResponse(BaseModel):
     motion_sensitivity: int = 0
     motion_script: str | None = None
     motion_script_off: str | None = None
+    motion_scripts: list[MotionScriptConfig] = []
     ai_detection: bool = False
     ai_detect_persons: bool = True
     ai_detect_vehicles: bool = False
@@ -59,6 +71,19 @@ class CameraResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_camera(cls, camera):
+        import json
+        scripts = []
+        if camera.motion_scripts:
+            try:
+                scripts = [MotionScriptConfig(**s) for s in json.loads(camera.motion_scripts)]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        data = {c.key: getattr(camera, c.key) for c in camera.__table__.columns}
+        data["motion_scripts"] = scripts
+        return cls(**data)
 
 
 class MotionEventResponse(BaseModel):
