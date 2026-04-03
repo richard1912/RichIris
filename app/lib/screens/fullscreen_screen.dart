@@ -60,6 +60,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   bool _isLive = true;
   bool _paused = false;
   bool _showStats = false;
+  Player? _livePlayer;
+  Timer? _statsTimer;
   int _speed = 1;
   String? _playbackUrl;
   bool _playbackLoading = false;
@@ -87,6 +89,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   @override
   void dispose() {
     _clearSpeedTimer();
+    _statsTimer?.cancel();
     _seekSub?.cancel();
     _pbPlayer?.dispose();
     super.dispose();
@@ -378,15 +381,10 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           children: [
             // Header
             _buildHeader(running),
+            // Video stats
+            if (_showStats) _buildStatsBar(),
             // Video area
-            Expanded(
-              child: Stack(
-                children: [
-                  Positioned.fill(child: _buildVideoArea(running, rot)),
-                  if (_showStats) _buildStatsOverlay(),
-                ],
-              ),
-            ),
+            Expanded(child: _buildVideoArea(running, rot)),
             // Timeline
             TimelineWidget(
               cameraId: widget.camera.id,
@@ -395,6 +393,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               motionApi: widget.motionApi,
               tzOffsetMs: _tzOffsetMs,
               isLive: _isLive,
+              isPaused: _paused,
               compact: false,
               onPlayback: _startPlayback,
               onLive: _goLive,
@@ -444,7 +443,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
             IconButton(
               icon: const Icon(Icons.bar_chart, size: 20),
               tooltip: 'Video Stats',
-              onPressed: () => setState(() => _showStats = !_showStats),
+              onPressed: _toggleStats,
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             ),
@@ -519,6 +518,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param);
       return LivePlayer(
         url: url,
+        onPlayerCreated: (p) => _livePlayer = p,
         rotation: rot,
         fit: BoxFit.contain,
       );
@@ -543,45 +543,88 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     return const SizedBox.shrink();
   }
 
-  Widget _buildStatsOverlay() {
-    final player = _isLive ? null : _pbPlayer;
-    final w = player?.state.width;
-    final h = player?.state.height;
-    final mode = _isLive ? 'Live' : 'Playback';
-    final quality = widget.quality.label;
-    final stream = _isLive ? widget.streamSource.label : 'Recording';
-    final codec = widget.quality == Quality.direct
-        ? (_isLive ? 'Passthrough' : 'HEVC copy')
-        : 'H.264';
+  void _toggleStats() {
+    if (!_showStats) {
+      _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      _statsTimer?.cancel();
+      _statsTimer = null;
+    }
+    setState(() => _showStats = !_showStats);
+  }
 
-    return Positioned(
-      top: 8,
-      left: 8,
-      child: IgnorePointer(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.7),
-            borderRadius: BorderRadius.circular(6),
+  Future<Map<String, String>> _getPlayerStats(Player player) async {
+    final stats = <String, String>{};
+    try {
+      final mpv = player.platform as NativePlayer;
+      final codec = await mpv.getProperty('video-codec');
+      final w = await mpv.getProperty('video-params/w');
+      final h = await mpv.getProperty('video-params/h');
+      // Try multiple mpv FPS properties in order of reliability
+      var fps = '';
+      for (final prop in ['container-fps', 'estimated-vf-fps']) {
+        final val = await mpv.getProperty(prop);
+        final parsed = double.tryParse(val);
+        if (parsed != null && parsed > 0 && parsed <= 120) {
+          fps = val;
+          break;
+        }
+      }
+      final bitrate = await mpv.getProperty('video-bitrate');
+
+      if (codec.isNotEmpty) {
+        // Clean up mpv codec string: "h264 ((null))" → "H.264", "hevc ((null))" → "HEVC"
+        final cleanCodec = codec.split(' ').first.toLowerCase();
+        final displayCodec = switch (cleanCodec) {
+          'h264' => 'H.264',
+          'hevc' || 'h265' => 'HEVC',
+          _ => cleanCodec.toUpperCase(),
+        };
+        stats['Codec'] = displayCodec;
+      }
+      if (w.isNotEmpty && h.isNotEmpty) stats['Resolution'] = '${w}x$h';
+      if (fps.isNotEmpty) {
+        final fpsVal = double.tryParse(fps);
+        stats['FPS'] = fpsVal != null ? fpsVal.toStringAsFixed(1) : fps;
+      }
+      if (bitrate.isNotEmpty) {
+        final bps = double.tryParse(bitrate);
+        if (bps != null && bps > 0) {
+          final kbps = bps / 1000;
+          stats['Bitrate'] = kbps >= 1000
+              ? '${(kbps / 1000).toStringAsFixed(1)} Mbps'
+              : '${kbps.toStringAsFixed(0)} kbps';
+        }
+      }
+    } catch (_) {}
+    return stats;
+  }
+
+  Widget _buildStatsBar() {
+    final player = _isLive ? _livePlayer : _pbPlayer;
+    if (player == null) {
+      return const SizedBox.shrink();
+    }
+
+    return FutureBuilder<Map<String, String>>(
+      future: _getPlayerStats(player),
+      builder: (context, snapshot) {
+        final stats = snapshot.data ?? {};
+        if (stats.isEmpty) return const SizedBox.shrink();
+
+        final parts = stats.entries.map((e) => '${e.key}: ${e.value}').join('  |  ');
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          color: const Color(0xFF1A1A1A),
+          child: Text(
+            parts,
+            style: const TextStyle(fontSize: 11, color: Color(0xFF737373), fontFamily: 'monospace'),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('$mode | $stream | $quality',
-                  style: const TextStyle(fontSize: 11, color: Color(0xFFD4D4D4), fontFamily: 'monospace')),
-              Text('Codec: $codec',
-                  style: const TextStyle(fontSize: 11, color: Color(0xFF737373), fontFamily: 'monospace')),
-              if (w != null && h != null)
-                Text('Resolution: ${w}x$h',
-                    style: const TextStyle(fontSize: 11, color: Color(0xFF737373), fontFamily: 'monospace')),
-              if (player != null)
-                Text('Position: ${player.state.position.inSeconds}s / ${player.state.duration.inSeconds}s',
-                    style: const TextStyle(fontSize: 11, color: Color(0xFF737373), fontFamily: 'monospace')),
-            ],
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 

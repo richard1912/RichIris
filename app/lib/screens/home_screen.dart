@@ -70,6 +70,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   bool _isLive = true;
+  bool _paused = false;
   final Map<int, Player> _pbPlayers = {};
   final Map<int, VideoController> _pbControllers = {};
   final Map<int, StreamSubscription> _completedSubs = {};
@@ -127,6 +128,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _isLive = false;
+      _paused = false;
       widget.onLiveStateChanged(false);
       _pbLoading.clear();
       _pbFailed.clear();
@@ -233,6 +235,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _goLive() {
+    if (_isLive) {
+      setState(() => _paused = !_paused);
+      return;
+    }
     _generation++;
     for (final sub in _completedSubs.values) {
       sub.cancel();
@@ -245,6 +251,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _playbackWallStartMs = null;
     setState(() {
       _isLive = true;
+      _paused = false;
       widget.onLiveStateChanged(true);
       _pbLoading.clear();
       _pbFailed.clear();
@@ -443,6 +450,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 motionApi: widget.motionApi,
                 tzOffsetMs: widget.tzOffsetMs,
                 isLive: _isLive,
+                isPaused: _paused,
                 compact: true,
                 onPlayback: _startPlayback,
                 onLive: _goLive,

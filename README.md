@@ -32,7 +32,7 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTS
 
 - **Recording**: One FFmpeg process per camera, codec passthrough (`-c:v copy`), 15-minute `.ts` segments. No GPU, no transcode. Watchdog monitors file modification every 2 minutes; stale processes are killed and auto-restarted.
 - **Live view**: HTTP fMP4 proxied through FastAPI from [go2rtc](https://github.com/AlexxIT/go2rtc). Flutter app uses media_kit (libmpv) with low-latency profile. Auto-reconnects on stream errors.
-- **Playback**: Fragmented MP4 (`-c copy -movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms. media_kit decodes HEVC natively. Sessions auto-cleanup after 120s idle.
+- **Playback**: Direct = instant remux (`-c copy`), High/Low = H.264 NVENC transcode with source-probed bitrate. All use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms. Sessions auto-cleanup after 120s idle.
 - **Motion detection**: Fetches JPEG snapshots from go2rtc every ~1s. Running weighted-average baseline with adaptive alpha. Sensitivity 0-100 maps to area threshold. 10-second cooldown between events.
 - **AI object detection**: YOLO11x on CUDA, triggered only when motion exceeds threshold. Per-camera toggles for person, vehicle, and animal categories. Stores specific COCO class names (e.g., "car", "dog") as detection labels. Min bounding box 0.2% of frame area. Falls back to CPU if CUDA unavailable.
 
@@ -179,7 +179,7 @@ See [`config.yaml.example`](config.yaml.example) for all options:
 | App | Flutter (Windows + Android), media_kit, Dio |
 | Live View | go2rtc (HTTP fMP4) |
 | Recording | FFmpeg (codec passthrough) |
-| Playback | FFmpeg (fragmented MP4 streaming, no transcode) |
+| Playback | FFmpeg (fragmented MP4 streaming, NVENC transcode for High/Low) |
 | Motion Detection | OpenCV, NumPy (snapshot-based frame differencing) |
 | AI Detection | YOLO11x, Ultralytics, CUDA |
 | Database | SQLite |
@@ -193,8 +193,8 @@ Stream and quality selection are independent — pick a stream source (Main or S
 | Quality | Main Stream | Sub Stream | Server Load |
 |---------|-------------|------------|-------------|
 | **Direct** | Native passthrough (HEVC) | Native passthrough | Zero (no ffmpeg) |
-| **High** | H.264 re-encode, native resolution | H.264 re-encode, native resolution | Moderate |
-| **Low** | H.264 re-encode, reduced bitrate | H.264 re-encode, reduced bitrate | Moderate |
+| **High** | H.264 re-encode, source-matched quality | H.264 re-encode, source-matched quality | Moderate |
+| **Low** | H.264 re-encode, reduced quality | H.264 re-encode, reduced quality | Moderate |
 
 ### Playback (recorded .ts files)
 
@@ -203,8 +203,8 @@ Stream selection does not apply to playback — recordings are always from the m
 | Quality | Processing | Server Load |
 |---------|-----------|-------------|
 | **Direct** | HEVC passthrough (`-c copy`) | Near zero (container remux only) |
-| **High** | H.264 NVENC re-encode, native resolution | GPU |
-| **Low** | H.264 NVENC re-encode, reduced bitrate | GPU |
+| **High** | H.264 NVENC re-encode, source-matched quality | GPU |
+| **Low** | H.264 NVENC re-encode, reduced quality | GPU |
 
 ### Platform Notes
 

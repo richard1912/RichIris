@@ -26,9 +26,9 @@ extension QualityExt on Quality {
       case Quality.direct:
         return 'Native passthrough, no re-encode';
       case Quality.high:
-        return 'H.264 re-encode, native resolution';
+        return 'H.264, source-matched quality';
       case Quality.low:
-        return 'H.264 re-encode, reduced bitrate';
+        return 'H.264, reduced quality';
     }
   }
 

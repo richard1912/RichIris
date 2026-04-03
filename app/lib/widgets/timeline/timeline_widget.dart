@@ -22,6 +22,7 @@ class TimelineWidget extends StatefulWidget {
   final MotionApi motionApi;
   final int tzOffsetMs;
   final bool isLive;
+  final bool isPaused;
   final bool compact;
   final ValueChanged<String> onPlayback;
   final VoidCallback onLive;
@@ -39,6 +40,7 @@ class TimelineWidget extends StatefulWidget {
     required this.motionApi,
     required this.tzOffsetMs,
     required this.isLive,
+    this.isPaused = false,
     this.compact = false,
     required this.onPlayback,
     required this.onLive,
@@ -610,7 +612,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               widget.onLive();
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: widget.isLive ? const Color(0xFFEF4444) : const Color(0xFF404040),
+              backgroundColor: widget.isLive
+                  ? (widget.isPaused ? const Color(0xFFEA580C) : const Color(0xFFEF4444))
+                  : const Color(0xFF404040),
               padding: const EdgeInsets.symmetric(horizontal: 10),
               minimumSize: Size.zero,
             ),
