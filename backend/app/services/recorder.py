@@ -16,6 +16,9 @@ from app.services.ffmpeg import sanitize_camera_name
 
 logger = logging.getLogger(__name__)
 
+# Files that have failed ffprobe — skip on future scans to avoid repeated attempts
+_unprobeble_paths: set[str] = set()
+
 
 def _is_in_progress(seg_path: Path) -> bool:
     """Check if a segment file is still being written by ffmpeg.
@@ -104,7 +107,7 @@ async def _get_existing_paths(session: AsyncSession, camera_id: int) -> set[str]
 def _find_new_segments(rec_dir: Path, existing: set[str]) -> list[Path]:
     """Find .ts files in the recording directory not yet registered."""
     all_segments = sorted(rec_dir.rglob("*.ts"))
-    return [s for s in all_segments if str(s) not in existing]
+    return [s for s in all_segments if str(s) not in existing and str(s) not in _unprobeble_paths]
 
 
 async def _update_in_progress(
@@ -303,5 +306,6 @@ def _probe_duration(seg_path: Path, config: AppConfig) -> float | None:
         data = json.loads(result.stdout)
         return float(data["format"]["duration"])
     except Exception:
+        _unprobeble_paths.add(str(seg_path))
         logger.debug("Could not probe duration", extra={"path": str(seg_path)})
         return None
