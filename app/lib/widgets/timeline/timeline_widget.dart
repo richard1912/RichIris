@@ -334,12 +334,13 @@ class _TimelineWidgetState extends State<TimelineWidget> {
 
     double targetHour = hour;
 
-    // Snap to motion event start if tapping in the orange bar zone (top 35%)
-    if (yFraction == null || yFraction <= 0.35) {
+    // Snap to motion event start if tapping in a detection row — category-aware
+    final tappedCat = yFraction != null ? _ctrl.categoryAtYFraction(yFraction) : null;
+    if (tappedCat != null) {
       final box = _barKey.currentContext?.findRenderObject() as RenderBox?;
       final barWidth = box?.size.width ?? 400;
       final padHours = 8.0 / barWidth * _ctrl.visibleHours;
-      final hitEvent = _ctrl.motionEventAtHour(hour, padHours: padHours);
+      final hitEvent = _ctrl.motionEventAtHour(hour, padHours: padHours, category: tappedCat);
       if (hitEvent != null) {
         targetHour = isoToHour(hitEvent.startTime);
       }
@@ -750,7 +751,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
   Widget _buildTimelineBar() {
-    final barHeight = widget.compact ? 40.0 : 56.0;
+    final barHeight = widget.compact ? 60.0 : 120.0;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -824,11 +825,12 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                     _ctrl.setScrubHour(hour);
                     setState(() => _hoverTime = hourToTimeString(hour));
 
-                    // Detect hover over motion event bar (top 35%)
+                    // Detect hover over detection rows — category-aware
                     final yFrac = event.localPosition.dy / barHeight;
-                    if (yFrac <= 0.35) {
+                    final hoveredCat = _ctrl.categoryAtYFraction(yFrac);
+                    if (hoveredCat != null) {
                       final padHours = 8.0 / width * _ctrl.visibleHours;
-                      _hoverMotionEvent = _ctrl.motionEventAtHour(hour, padHours: padHours);
+                      _hoverMotionEvent = _ctrl.motionEventAtHour(hour, padHours: padHours, category: hoveredCat);
                     } else {
                       _hoverMotionEvent = null;
                     }

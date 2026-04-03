@@ -31,7 +31,7 @@ class TimelineMinimap extends StatelessWidget {
         onPan(targetHour.clamp(0.0, 24.0 - controller.visibleHours));
       },
       child: Container(
-        height: 16,
+        height: 20,
         decoration: BoxDecoration(
           color: const Color(0xFF0A0A0A),
           borderRadius: BorderRadius.circular(2),
@@ -59,9 +59,13 @@ class _MinimapPainter extends CustomPainter {
       canvas.drawRect(Rect.fromLTRB(x1, 2, x2, size.height - 2), segPaint);
     }
 
-    // Motion events
+    // Motion events — stacked rows per category
     final motionPaint = Paint();
+    const cats = DetectionCategory.values;
     for (final event in controller.motionEvents) {
+      final cat = DetectionColors.categoryFor(event.detectionLabel);
+      final rowIdx = cats.indexOf(cat);
+      final rowTop = 1.0 + rowIdx * 3.0;
       final startHour = isoToHour(event.startTime);
       final endHour = event.endTime != null
           ? isoToHour(event.endTime!)
@@ -69,8 +73,8 @@ class _MinimapPainter extends CustomPainter {
       final x1 = startHour / 24.0 * size.width;
       final x2 = endHour / 24.0 * size.width;
       final drawX2 = (x2 - x1 < 1) ? x1 + 1 : x2;
-      motionPaint.color = DetectionColors.forLabel(event.detectionLabel).withValues(alpha: 0.5);
-      canvas.drawRect(Rect.fromLTRB(x1, 1, drawX2, 4), motionPaint);
+      motionPaint.color = DetectionColors.forCategory(cat).withValues(alpha: 0.5);
+      canvas.drawRect(Rect.fromLTRB(x1, rowTop, drawX2, rowTop + 2), motionPaint);
     }
 
     // Viewport indicator
