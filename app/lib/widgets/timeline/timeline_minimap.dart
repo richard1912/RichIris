@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../utils/detection_colors.dart';
 import '../../utils/time_utils.dart';
 import 'timeline_controller.dart';
 
@@ -59,7 +60,7 @@ class _MinimapPainter extends CustomPainter {
     }
 
     // Motion events
-    final motionPaint = Paint()..color = const Color(0xFFF59E0B).withValues(alpha: 0.5);
+    final motionPaint = Paint();
     for (final event in controller.motionEvents) {
       final startHour = isoToHour(event.startTime);
       final endHour = event.endTime != null
@@ -68,6 +69,7 @@ class _MinimapPainter extends CustomPainter {
       final x1 = startHour / 24.0 * size.width;
       final x2 = endHour / 24.0 * size.width;
       final drawX2 = (x2 - x1 < 1) ? x1 + 1 : x2;
+      motionPaint.color = DetectionColors.forLabel(event.detectionLabel).withValues(alpha: 0.5);
       canvas.drawRect(Rect.fromLTRB(x1, 1, drawX2, 4), motionPaint);
     }
 

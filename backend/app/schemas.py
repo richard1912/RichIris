@@ -15,6 +15,9 @@ class CameraCreate(BaseModel):
     motion_script: str | None = None
     motion_script_off: str | None = None
     ai_detection: bool = False
+    ai_detect_persons: bool = True
+    ai_detect_vehicles: bool = False
+    ai_detect_animals: bool = False
     ai_confidence_threshold: int = 50
 
 
@@ -28,6 +31,9 @@ class CameraUpdate(BaseModel):
     motion_script: str | None = None
     motion_script_off: str | None = None
     ai_detection: bool | None = None
+    ai_detect_persons: bool | None = None
+    ai_detect_vehicles: bool | None = None
+    ai_detect_animals: bool | None = None
     ai_confidence_threshold: int | None = None
 
 
@@ -46,6 +52,9 @@ class CameraResponse(BaseModel):
     motion_script: str | None = None
     motion_script_off: str | None = None
     ai_detection: bool = False
+    ai_detect_persons: bool = True
+    ai_detect_vehicles: bool = False
+    ai_detect_animals: bool = False
     ai_confidence_threshold: int = 50
     created_at: datetime
 

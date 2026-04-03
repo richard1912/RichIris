@@ -236,6 +236,13 @@ class _SystemScreenState extends State<SystemScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('Retention', style: TextStyle(fontWeight: FontWeight.w500)),
+            const SizedBox(height: 4),
+            Text(
+              _storage != null
+                  ? 'Deletes recordings older than ${_storage!.maxAgeDays} days, then removes the oldest files if total recordings exceed ${formatBytes(_storage!.maxStorageBytes)}. Runs automatically every 6 hours.'
+                  : 'Deletes recordings older than the configured age limit, then removes the oldest files if storage exceeds the limit. Runs automatically every 6 hours.',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF737373)),
+            ),
             const SizedBox(height: 8),
             Row(
               children: [

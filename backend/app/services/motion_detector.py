@@ -1,4 +1,4 @@
-"""Motion detection + AI person detection using go2rtc snapshots and YOLO."""
+"""Motion detection + AI object detection using go2rtc snapshots and YOLO."""
 
 import asyncio
 import logging
@@ -15,6 +15,19 @@ from app.models import MotionEvent
 from app.services.go2rtc_client import get_stream_name
 from app.services.object_detector import get_object_detector
 
+_VEHICLE_LABELS = {"bicycle", "car", "motorcycle", "bus", "truck"}
+
+
+def _label_category(label: str | None) -> str:
+    """Map a detection label to its category (for event grouping)."""
+    if label is None:
+        return "motion"
+    if label == "person":
+        return "person"
+    if label in _VEHICLE_LABELS:
+        return "vehicle"
+    return "animal"
+
 logger = logging.getLogger(__name__)
 
 COOLDOWN_SECONDS = 10
@@ -27,6 +40,9 @@ MOTION_ALPHA_STARTUP = 0.2
 BASELINE_STARTUP_FRAMES = 25
 FRAME_TIMEOUT = 10.0      # HTTP timeout for snapshot fetch
 HEARTBEAT_INTERVAL = 300   # Log heartbeat every 5 minutes (seconds)
+# Min fraction of a YOLO bbox that must overlap the motion mask to count as "moving".
+# Filters out static objects (e.g. parked cars) that YOLO detects but aren't actually moving.
+MIN_MOTION_OVERLAP = 0.10  # 10% of bbox area must have changed pixels
 
 
 def _snapshot_url(camera_name: str, host: str, port: int) -> str:
@@ -39,9 +55,10 @@ class MotionDetector:
     def __init__(self):
         self._tasks: dict[int, asyncio.Task] = {}
         self._running = False
-        self._active_events: dict[int, int] = {}
-        self._last_motion: dict[int, datetime] = {}
-        self._script_off: dict[int, str | None] = {}
+        # Keyed by (cam_id, category) — one active event per category per camera
+        self._active_events: dict[tuple[int, str], int] = {}
+        self._last_motion: dict[tuple[int, str], datetime] = {}
+        self._script_off: dict[tuple[int, str], str | None] = {}
         self._avg_baseline: dict[int, np.ndarray | None] = {}
         self._baseline_frames: dict[int, int] = {}
         self._client: httpx.AsyncClient | None = None
@@ -59,6 +76,9 @@ class MotionDetector:
                         cam.motion_sensitivity, cam.motion_script,
                         cam.motion_script_off,
                         ai_detection=cam.ai_detection,
+                        ai_detect_persons=cam.ai_detect_persons,
+                        ai_detect_vehicles=cam.ai_detect_vehicles,
+                        ai_detect_animals=cam.ai_detect_animals,
                         ai_threshold=cam.ai_confidence_threshold / 100.0,
                     )
                 )
@@ -87,7 +107,10 @@ class MotionDetector:
             except (asyncio.CancelledError, Exception):
                 pass
             del self._tasks[cam_id]
-            await self._finalize_event(cam_id)
+            # Finalize all active events for this camera
+            keys = [k for k in self._active_events if k[0] == cam_id]
+            for key in keys:
+                await self._finalize_event(key)
 
         if self._running and camera.motion_sensitivity > 0 and camera.enabled:
             cfg = get_config().go2rtc
@@ -103,6 +126,9 @@ class MotionDetector:
                     camera.motion_sensitivity, camera.motion_script,
                     camera.motion_script_off,
                     ai_detection=camera.ai_detection,
+                    ai_detect_persons=camera.ai_detect_persons,
+                    ai_detect_vehicles=camera.ai_detect_vehicles,
+                    ai_detect_animals=camera.ai_detect_animals,
                     ai_threshold=camera.ai_confidence_threshold / 100.0,
                 )
             )
@@ -122,7 +148,10 @@ class MotionDetector:
     async def _detect_loop(
         self, cam_id: int, cam_name: str, url: str,
         sensitivity: int, script: str | None, script_off: str | None = None,
-        ai_detection: bool = False, ai_threshold: float = 0.5,
+        ai_detection: bool = False,
+        ai_detect_persons: bool = True, ai_detect_vehicles: bool = False,
+        ai_detect_animals: bool = False,
+        ai_threshold: float = 0.5,
     ) -> None:
         """Per-camera detection loop: snapshot → motion check → YOLO → event."""
         threshold_pct = (101 - sensitivity) * 0.05
@@ -182,15 +211,31 @@ class MotionDetector:
                 elif changed_pct >= threshold_pct:
                     # Motion detected — run YOLO if AI enabled, otherwise fire event
                     if ai_detection:
+                        from app.services.object_detector import build_class_list
                         detector = get_object_detector()
-                        detections = await detector.detect_persons(frame, ai_threshold)
-                        if detections:
-                            best = max(detections, key=lambda d: d.confidence)
-                            await self._on_motion(
-                                cam_id, cam_name, changed_pct, script, script_off,
-                                detection_label=best.label,
-                                detection_confidence=best.confidence,
-                            )
+                        classes = build_class_list(ai_detect_persons, ai_detect_vehicles, ai_detect_animals)
+                        detections = await detector.detect_objects(frame, ai_threshold, classes=classes) if classes else []
+                        # Filter out static objects: only keep detections whose
+                        # bounding box overlaps sufficiently with the motion mask
+                        moving = []
+                        for d in detections:
+                            roi = thresh[d.y1:d.y2, d.x1:d.x2]
+                            box_area = roi.size
+                            if box_area > 0 and np.count_nonzero(roi) / box_area >= MIN_MOTION_OVERLAP:
+                                moving.append(d)
+                        if moving:
+                            # Group by category, fire one event per category
+                            by_cat: dict[str, list] = {}
+                            for d in moving:
+                                cat = _label_category(d.label)
+                                by_cat.setdefault(cat, []).append(d)
+                            for cat_detections in by_cat.values():
+                                best = max(cat_detections, key=lambda d: d.confidence)
+                                await self._on_motion(
+                                    cam_id, cam_name, changed_pct, script, script_off,
+                                    detection_label=best.label,
+                                    detection_confidence=best.confidence,
+                                )
                         else:
                             await self._check_cooldown(cam_id)
                     else:
@@ -223,9 +268,11 @@ class MotionDetector:
         detection_label: str | None = None, detection_confidence: float | None = None,
     ) -> None:
         now = datetime.now()
-        self._last_motion[cam_id] = now
+        category = _label_category(detection_label)
+        key = (cam_id, category)
+        self._last_motion[key] = now
 
-        if cam_id not in self._active_events:
+        if key not in self._active_events:
             factory = get_session_factory()
             async with factory() as session:
                 event = MotionEvent(
@@ -235,10 +282,10 @@ class MotionDetector:
                 session.add(event)
                 await session.commit()
                 await session.refresh(event)
-                self._active_events[cam_id] = event.id
-                self._script_off[cam_id] = script_off
+                self._active_events[key] = event.id
+                self._script_off[key] = script_off
 
-            log_extra = {"camera": cam_name, "intensity": round(intensity, 2)}
+            log_extra = {"camera": cam_name, "intensity": round(intensity, 2), "category": category}
             if detection_label:
                 log_extra["detection"] = detection_label
                 log_extra["confidence"] = round(detection_confidence, 2)
@@ -251,7 +298,7 @@ class MotionDetector:
         else:
             factory = get_session_factory()
             async with factory() as session:
-                event = await session.get(MotionEvent, self._active_events[cam_id])
+                event = await session.get(MotionEvent, self._active_events[key])
                 if event:
                     if intensity > event.peak_intensity:
                         event.peak_intensity = intensity
@@ -264,16 +311,20 @@ class MotionDetector:
                     await session.commit()
 
     async def _check_cooldown(self, cam_id: int) -> None:
-        if cam_id not in self._active_events:
-            return
-        last = self._last_motion.get(cam_id)
-        if last and (datetime.now() - last).total_seconds() >= COOLDOWN_SECONDS:
-            await self._finalize_event(cam_id)
+        """Check cooldown for all active event categories on this camera."""
+        now = datetime.now()
+        expired = [
+            key for key in self._active_events
+            if key[0] == cam_id
+            and (now - self._last_motion.get(key, now)).total_seconds() >= COOLDOWN_SECONDS
+        ]
+        for key in expired:
+            await self._finalize_event(key)
 
-    async def _finalize_event(self, cam_id: int) -> None:
-        event_id = self._active_events.pop(cam_id, None)
-        self._last_motion.pop(cam_id, None)
-        script_off = self._script_off.pop(cam_id, None)
+    async def _finalize_event(self, key: tuple[int, str]) -> None:
+        event_id = self._active_events.pop(key, None)
+        self._last_motion.pop(key, None)
+        script_off = self._script_off.pop(key, None)
         if event_id is None:
             return
         factory = get_session_factory()
@@ -282,9 +333,9 @@ class MotionDetector:
             if event:
                 event.end_time = datetime.now()
                 await session.commit()
-        logger.info("Motion ended", extra={"camera_id": cam_id, "event_id": event_id})
+        logger.info("Motion ended", extra={"camera_id": key[0], "category": key[1], "event_id": event_id})
         if script_off:
-            asyncio.create_task(self._run_script(script_off, str(cam_id), datetime.now(), 0.0))
+            asyncio.create_task(self._run_script(script_off, str(key[0]), datetime.now(), 0.0))
 
     async def _run_script(
         self, script: str, cam_name: str, timestamp: datetime, intensity: float,

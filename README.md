@@ -1,6 +1,6 @@
 # RichIris NVR
 
-A self-hosted NVR (Network Video Recorder) built with FastAPI, React, and Flutter. Designed for 24/7 recording of RTSP cameras with live view, timeline playback, motion detection, and AI person detection — no cloud, no subscriptions.
+A self-hosted NVR (Network Video Recorder) built with FastAPI, React, and Flutter. Designed for 24/7 recording of RTSP cameras with live view, timeline playback, motion detection, and AI object detection — no cloud, no subscriptions.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/richard1912)
 
@@ -12,7 +12,7 @@ A self-hosted NVR (Network Video Recorder) built with FastAPI, React, and Flutte
 - **Timeline playback** — zoomable 24h timeline, instant fragmented MP4 streaming (< 200ms start), speed controls (-32x to 32x), date picker
 - **Trickplay thumbnails** — real-time thumbnail capture via go2rtc frame API, hover/scrub preview on timeline
 - **Motion detection** — snapshot-based frame differencing with per-camera sensitivity, timeline overlay, configurable script execution on motion start/end
-- **AI person detection** — YOLO11x on CUDA, gated by motion pre-filter, per-camera toggle and confidence threshold. Falls back to CPU if no GPU available
+- **AI object detection** — YOLO11x on CUDA, gated by motion pre-filter. Per-camera category toggles for persons, vehicles (bicycle/car/motorcycle/bus/truck), and animals (bird/cat/dog/horse/sheep/cow/elephant/bear/zebra/giraffe). Color-coded timeline bars: amber for persons, indigo for vehicles, emerald for animals, gray for motion-only. Falls back to CPU if no GPU available
 - **Clip export** — select a time range on the timeline and export an MP4 clip
 - **Retention management** — configurable max age (days) and max storage (GB), oldest recordings purged first
 - **Multi-camera grid** — click to select, click again for fullscreen with timeline
@@ -36,7 +36,7 @@ Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
 - **Live view (native app)**: HTTP fMP4 proxied through FastAPI from go2rtc. Flutter app uses media_kit (libmpv) with low-latency profile. Auto-reconnects on stream errors.
 - **Playback**: Fragmented MP4 (`-c copy -movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms. Browsers and media_kit decode HEVC natively. Sessions auto-cleanup after 120s idle.
 - **Motion detection**: Fetches JPEG snapshots from go2rtc every ~1s. Running weighted-average baseline with adaptive alpha. Sensitivity 0-100 maps to area threshold. 10-second cooldown between events.
-- **AI person detection**: YOLO11x on CUDA, triggered only when motion exceeds threshold. Filters to person class, min bounding box 0.2% of frame area. Falls back to CPU if CUDA unavailable.
+- **AI object detection**: YOLO11x on CUDA, triggered only when motion exceeds threshold. Per-camera toggles for person, vehicle, and animal categories. Stores specific COCO class names (e.g., "car", "dog") as detection labels. Min bounding box 0.2% of frame area. Falls back to CPU if CUDA unavailable.
 
 ## Requirements
 
@@ -48,7 +48,7 @@ Browser (legacy)          → WebSocket (MSE) → FastAPI:8700 → go2rtc:1984
 - **go2rtc** ([download from releases](https://github.com/AlexxIT/go2rtc/releases))
 - **NSSM** (`winget install NSSM.NSSM`)
 - RTSP-capable IP cameras
-- **Optional**: NVIDIA GPU with CUDA for AI person detection
+- **Optional**: NVIDIA GPU with CUDA for AI object detection
 
 ## Setup
 
@@ -141,7 +141,7 @@ RichIris/
 │   │       ├── thumbnail_capture.py   # Thumbnail capture via go2rtc frame API
 │   │       ├── retention.py           # Age + storage-based retention cleanup
 │   │       ├── motion_detector.py     # Snapshot-based motion detection
-│   │       └── object_detector.py     # YOLO AI person detection (GPU)
+│   │       └── object_detector.py     # YOLO AI object detection (GPU)
 │   ├── requirements.txt
 │   └── run.py                   # Uvicorn entry point
 ├── go2rtc/
@@ -184,7 +184,7 @@ See [`config.yaml.example`](config.yaml.example) for all options:
 | `go2rtc` | `host`, `port` |
 | `retention` | `max_age_days`, `max_storage_gb` |
 | `trickplay` | `enabled`, `interval`, `thumb_width`, `thumb_height` |
-| `cameras` | `name`, `rtsp_url`, `sub_stream_url`, `enabled`, `motion_sensitivity`, `ai_detection`, `ai_confidence_threshold`, `motion_script`, `motion_script_off` |
+| `cameras` | `name`, `rtsp_url`, `sub_stream_url`, `enabled`, `motion_sensitivity`, `ai_detection`, `ai_detect_persons`, `ai_detect_vehicles`, `ai_detect_animals`, `ai_confidence_threshold`, `motion_script`, `motion_script_off` |
 
 ## Tech Stack
 
