@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 const kDefaultTimeout = Duration(seconds: 15);
 const kServerUrlKey = 'richiris_server_url';
 const kQualityKey = 'richiris-quality';
+const kPlaybackQualityKey = 'richiris-playback-quality';
 const kStreamSourceKey = 'richiris-stream-source';
 
 Future<String?> getSavedServerUrl() async {

@@ -8,7 +8,7 @@ A self-hosted NVR (Network Video Recorder) built with FastAPI and Flutter. Desig
 
 - **24/7 continuous recording** — HEVC passthrough (no transcode, no GPU usage) into 15-minute `.ts` segments
 - **Live view** — HTTP fMP4 via go2rtc + media_kit (libmpv) with low-latency profile
-- **Multi-quality streams** — S1/S2 stream selection x Direct/High/Low quality, lazy transcoding (zero resources until a client connects)
+- **Multi-quality streams** — Main/Sub stream selection x Direct/High/Low quality, lazy transcoding (zero resources until a client connects)
 - **Timeline playback** — zoomable 24h timeline, instant fragmented MP4 streaming (< 200ms start), speed controls (-32x to 32x), date picker
 - **Trickplay thumbnails** — real-time thumbnail capture via go2rtc frame API, hover/scrub preview on timeline
 - **Motion detection** — snapshot-based frame differencing with per-camera sensitivity, timeline overlay, multiple configurable script pairs with per-category triggers (e.g., run one script for persons, a different script for vehicles)
@@ -183,6 +183,33 @@ See [`config.yaml.example`](config.yaml.example) for all options:
 | Motion Detection | OpenCV, NumPy (snapshot-based frame differencing) |
 | AI Detection | YOLO11x, Ultralytics, CUDA |
 | Database | SQLite |
+
+## Video Quality
+
+Stream and quality selection are independent — pick a stream source (Main or Sub) and a quality tier.
+
+### Live View
+
+| Quality | Main Stream | Sub Stream | Server Load |
+|---------|-------------|------------|-------------|
+| **Direct** | Native passthrough (HEVC) | Native passthrough | Zero (no ffmpeg) |
+| **High** | H.264 re-encode, native resolution | H.264 re-encode, native resolution | Moderate |
+| **Low** | H.264 re-encode, reduced bitrate | H.264 re-encode, reduced bitrate | Moderate |
+
+### Playback (recorded .ts files)
+
+Stream selection does not apply to playback — recordings are always from the main stream.
+
+| Quality | Processing | Server Load |
+|---------|-----------|-------------|
+| **Direct** | HEVC passthrough (`-c copy`) | Near zero (container remux only) |
+| **High** | H.264 NVENC re-encode, native resolution | GPU |
+| **Low** | H.264 NVENC re-encode, reduced bitrate | GPU |
+
+### Platform Notes
+
+- **Windows**: All quality tiers available for both live view and playback
+- **Android**: Direct is hidden for **live view only** (raw RTSP passthrough has compatibility issues with some camera brands). Direct is available for playback (clean fMP4 from ffmpeg). Default quality is Direct on both platforms.
 
 ## VPN Access
 

@@ -1,9 +1,9 @@
 enum StreamSource { s1, s2 }
 
 extension StreamSourceExt on StreamSource {
-  String get label => this == StreamSource.s1 ? 'S1' : 'S2';
+  String get label => this == StreamSource.s1 ? 'Main' : 'Sub';
   String get description =>
-      this == StreamSource.s1 ? 'Main (4K)' : 'Sub';
+      this == StreamSource.s1 ? 'Main' : 'Sub';
   String get param => name;
 }
 
@@ -24,11 +24,11 @@ extension QualityExt on Quality {
   String get description {
     switch (this) {
       case Quality.direct:
-        return 'Raw passthrough (HEVC)';
+        return 'Native passthrough, no re-encode';
       case Quality.high:
-        return 'H.264';
+        return 'H.264 re-encode, native resolution';
       case Quality.low:
-        return 'H.264 low-res';
+        return 'H.264 re-encode, reduced bitrate';
     }
   }
 

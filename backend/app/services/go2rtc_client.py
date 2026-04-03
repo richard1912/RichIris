@@ -15,12 +15,12 @@ logger = logging.getLogger(__name__)
 # source key: "main" = rtsp_url (stream1), "sub" = sub_stream_url (stream2).
 # go2rtc lazily connects — unused quality streams consume zero resources.
 QUALITY_PROFILES: dict[str, tuple[str | None, str]] = {
-    "_s1_direct": (None, "main"),                                        # 4K HEVC passthrough
-    "_s1_high":   ("#video=h264#width=1920#height=1080", "main"),        # 1080p H.264
-    "_s1_low":    ("#video=h264#width=1280#height=720", "main"),         # 720p H.264
-    "_s2_direct": (None, "sub"),                                         # sub-stream passthrough
-    "_s2_high":   ("#video=h264", "sub"),                                # sub-stream re-encode
-    "_s2_low":    ("#video=h264#width=320#height=180", "sub"),           # 320x180 low-bandwidth
+    "_s1_direct": (None, "main"),                                        # native passthrough (HEVC)
+    "_s1_high":   ("#video=h264", "main"),                               # native res H.264 re-encode
+    "_s1_low":    ("#video=h264#raw=-b:v#raw=2M", "main"),                 # native res H.264 reduced bitrate
+    "_s2_direct": (None, "sub"),                                         # native passthrough
+    "_s2_high":   ("#video=h264", "sub"),                                # native res H.264 re-encode
+    "_s2_low":    ("#video=h264#raw=-b:v#raw=500k", "sub"),              # native res H.264 reduced bitrate
 }
 
 
