@@ -320,7 +320,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               style: const TextStyle(fontSize: 13),
             ),
             const SizedBox(height: 8),
-            const Text('Trigger for:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const Text('Execute for:', style: TextStyle(fontSize: 12, color: Colors.grey)),
             const SizedBox(height: 4),
             Wrap(
               spacing: 4,
@@ -400,7 +400,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               TextFormField(
                 controller: _rtspCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'RTSP URL',
+                  labelText: 'Main-Stream RTSP URL',
                   hintText: 'rtsp://192.168.8.41/stream1',
                 ),
                 validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
@@ -409,7 +409,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               TextFormField(
                 controller: _subStreamCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Sub-Stream URL (optional)',
+                  labelText: 'Sub-Stream RTSP URL (optional)',
                   hintText: 'rtsp://192.168.8.41/stream2',
                 ),
               ),

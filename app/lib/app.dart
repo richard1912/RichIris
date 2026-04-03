@@ -36,7 +36,10 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
 
   String? _serverUrl;
   bool _loading = true;
-  Quality _quality = Quality.high;
+  Quality _liveQuality = Quality.high;
+  Quality _playbackQuality = Quality.direct;
+  Quality get _quality => _isLive ? _liveQuality : _playbackQuality;
+  bool _isLive = true;
   StreamSource _streamSource = StreamSource.s2;
   int _tzOffsetMs = 0;
 
@@ -59,9 +62,14 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   Future<void> _loadSettings() async {
     final url = await getSavedServerUrl();
     final prefs = await SharedPreferences.getInstance();
-    final qName = prefs.getString(kQualityKey);
-    final q = Quality.values.firstWhere(
-      (v) => v.name == qName,
+    final lqName = prefs.getString(kQualityKey);
+    final lq = Quality.values.firstWhere(
+      (v) => v.name == lqName,
+      orElse: () => Quality.high,
+    );
+    final pqName = prefs.getString(kPlaybackQualityKey);
+    final pq = Quality.values.firstWhere(
+      (v) => v.name == pqName,
       orElse: () => Quality.direct,
     );
     final sName = prefs.getString(kStreamSourceKey);
@@ -70,7 +78,8 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
       orElse: () => StreamSource.s2,
     );
     setState(() {
-      _quality = q;
+      _liveQuality = lq;
+      _playbackQuality = pq;
       _streamSource = s;
       if (url != null && url.isNotEmpty) {
         _serverUrl = url;
@@ -130,9 +139,18 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   }
 
   void _onQualityChanged(Quality q) async {
-    setState(() => _quality = q);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(kQualityKey, q.name);
+    if (_isLive) {
+      setState(() => _liveQuality = q);
+      await prefs.setString(kQualityKey, q.name);
+    } else {
+      setState(() => _playbackQuality = q);
+      await prefs.setString(kPlaybackQualityKey, q.name);
+    }
+  }
+
+  void _onLiveStateChanged(bool isLive) {
+    setState(() => _isLive = isLive);
   }
 
   void _onStreamSourceChanged(StreamSource s) async {
@@ -165,6 +183,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   streamSource: _streamSource,
                   tzOffsetMs: _tzOffsetMs,
                   onQualityChanged: _onQualityChanged,
+                  onLiveStateChanged: _onLiveStateChanged,
                   onStreamSourceChanged: _onStreamSourceChanged,
                   onRefreshCameras: _refreshCameras,
                   onRefreshStatus: _refreshStatus,
@@ -189,6 +208,7 @@ class _MainNav extends StatefulWidget {
   final StreamSource streamSource;
   final int tzOffsetMs;
   final ValueChanged<Quality> onQualityChanged;
+  final ValueChanged<bool> onLiveStateChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final Future<void> Function() onRefreshCameras;
   final Future<void> Function() onRefreshStatus;
@@ -209,6 +229,7 @@ class _MainNav extends StatefulWidget {
     required this.streamSource,
     required this.tzOffsetMs,
     required this.onQualityChanged,
+    required this.onLiveStateChanged,
     required this.onStreamSourceChanged,
     required this.onRefreshCameras,
     required this.onRefreshStatus,
@@ -296,6 +317,7 @@ class _MainNavState extends State<_MainNav> {
               }
             },
             onQualityChanged: widget.onQualityChanged,
+            onLiveStateChanged: widget.onLiveStateChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onOpenSystem: () => setState(() => _showSystem = true),
             onOpenSettings: () {
@@ -334,6 +356,7 @@ class _MainNavState extends State<_MainNav> {
             systemApi: widget.systemApi,
             tzOffsetMs: widget.tzOffsetMs,
             onQualityChanged: widget.onQualityChanged,
+            onLiveStateChanged: widget.onLiveStateChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onBack: () => setState(() => _fullscreenCameraId = null),
           ),

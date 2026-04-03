@@ -33,6 +33,7 @@ class HomeScreen extends StatefulWidget {
   final int? selectedCameraId;
   final ValueChanged<int> onCameraSelected;
   final ValueChanged<Quality> onQualityChanged;
+  final ValueChanged<bool> onLiveStateChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback onOpenSystem;
   final VoidCallback onOpenSettings;
@@ -55,6 +56,7 @@ class HomeScreen extends StatefulWidget {
     this.selectedCameraId,
     required this.onCameraSelected,
     required this.onQualityChanged,
+    required this.onLiveStateChanged,
     required this.onStreamSourceChanged,
     required this.onOpenSystem,
     required this.onOpenSettings,
@@ -125,6 +127,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _isLive = false;
+      widget.onLiveStateChanged(false);
       _pbLoading.clear();
       _pbFailed.clear();
       for (final cam in enabledCameras) {
@@ -242,6 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _playbackWallStartMs = null;
     setState(() {
       _isLive = true;
+      widget.onLiveStateChanged(true);
       _pbLoading.clear();
       _pbFailed.clear();
     });
@@ -393,9 +397,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: TextStyle(fontSize: 12, color: Color(0xFF3B82F6))),
               ),
             ),
-          StreamSourceSelector(value: widget.streamSource, onChanged: widget.onStreamSourceChanged),
-          const SizedBox(width: 4),
-          QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged),
+          if (_isLive) ...[
+            StreamSourceSelector(value: widget.streamSource, onChanged: widget.onStreamSourceChanged),
+            const SizedBox(width: 4),
+          ],
+          QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged, isLive: _isLive),
           const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.storage, size: 20),

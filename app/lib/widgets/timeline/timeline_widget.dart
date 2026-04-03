@@ -65,6 +65,10 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   double _lastScale = 1.0;
   bool _wasPinch = false;
   double? _scaleStartPct;
+  double? _scaleStartYFrac;
+  Timer? _longPressTimer;
+  Offset? _pointerDownPos;
+  bool _longPressActive = false;
   final GlobalKey _barKey = GlobalKey();
   OverlayEntry? _thumbOverlay;
   double _thumbLeft = 0;
@@ -108,6 +112,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   void dispose() {
     _thumbOverlay?.remove();
     _thumbOverlay = null;
+    _longPressTimer?.cancel();
     _playheadTimer?.cancel();
     _segmentPollTimer?.cancel();
     _clipPollTimer?.cancel();
@@ -355,6 +360,16 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       if (hitEvent != null) {
         targetHour = isoToHour(hitEvent.startTime);
       }
+    }
+
+    // Ignore taps in the future
+    final now = DateTime.now();
+    final todayStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    if (_ctrl.selectedDate == todayStr) {
+      final nowHour = now.hour + now.minute / 60.0 + now.second / 3600.0;
+      if (targetHour > nowHour) return;
+    } else if (_ctrl.selectedDate.compareTo(todayStr) > 0) {
+      return;
     }
 
     _manualPan = true;
@@ -780,6 +795,50 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   _ctrl.zoom(delta, pct);
                 }
               },
+              onPointerDown: (event) {
+                _pointerDownPos = event.localPosition;
+                _longPressActive = false;
+                _longPressTimer?.cancel();
+                _longPressTimer = Timer(const Duration(milliseconds: 400), () {
+                  if (!mounted) return;
+                  _longPressActive = true;
+                  final pos = _pointerDownPos!;
+                  final pct = (pos.dx / width).clamp(0.0, 1.0);
+                  final yFrac = (pos.dy / barHeight).clamp(0.0, 1.0);
+                  final hour = _ctrl.viewportPctToHour(pct);
+                  _ctrl.setScrubHour(hour);
+                  setState(() => _hoverTime = hourToTimeString(hour));
+                  // Check for detection event at hold position
+                  final hoveredCat = _ctrl.categoryAtYFraction(yFrac);
+                  if (hoveredCat != null) {
+                    final padHours = 8.0 / width * _ctrl.visibleHours;
+                    _hoverMotionEvent = _ctrl.motionEventAtHour(hour, padHours: padHours, category: hoveredCat);
+                  } else {
+                    _hoverMotionEvent = null;
+                  }
+                  _updateThumbOverlay();
+                });
+              },
+              onPointerMove: (event) {
+                if (_pointerDownPos != null && !_longPressActive) {
+                  final delta = (event.localPosition - _pointerDownPos!).distance;
+                  if (delta > 20) {
+                    // Finger moved too far — cancel long press, let scale gesture handle it
+                    _longPressTimer?.cancel();
+                  }
+                }
+              },
+              onPointerUp: (_) {
+                _longPressTimer?.cancel();
+                _pointerDownPos = null;
+                if (_longPressActive) {
+                  _longPressActive = false;
+                  _hoverMotionEvent = null;
+                  _ctrl.setScrubHour(null);
+                  setState(() => _hoverTime = null);
+                  _updateThumbOverlay();
+                }
+              },
               child: GestureDetector(
                 onTapUp: (details) {
                   final pct = details.localPosition.dx / width;
@@ -790,6 +849,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   _lastScale = 1.0;
                   _wasPinch = false;
                   _scaleStartPct = (details.localFocalPoint.dx / width).clamp(0.0, 1.0);
+                  _scaleStartYFrac = (details.localFocalPoint.dy / barHeight).clamp(0.0, 1.0);
                 },
                 onScaleUpdate: (details) {
                   if (details.pointerCount >= 2) {
@@ -804,24 +864,38 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                     _updateThumbOverlay();
                   } else if (!_wasPinch) {
                     final pct = (details.localFocalPoint.dx / width).clamp(0.0, 1.0);
+                    final yFrac = (details.localFocalPoint.dy / barHeight).clamp(0.0, 1.0);
                     final hour = _ctrl.viewportPctToHour(pct);
                     _ctrl.setScrubHour(hour);
+                    _scaleStartYFrac = yFrac;
                     setState(() => _hoverTime = hourToTimeString(hour));
+
+                    // Set hover motion event for touch scrub (Android)
+                    final hoveredCat = _ctrl.categoryAtYFraction(yFrac);
+                    if (hoveredCat != null) {
+                      final padHours = 8.0 / width * _ctrl.visibleHours;
+                      _hoverMotionEvent = _ctrl.motionEventAtHour(hour, padHours: padHours, category: hoveredCat);
+                    } else {
+                      _hoverMotionEvent = null;
+                    }
+
                     _updateThumbOverlay();
                   }
                 },
                 onScaleEnd: (_) {
-                  if (!_wasPinch) {
+                  if (!_wasPinch && !_longPressActive) {
                     final scrub = _ctrl.scrubHour;
                     if (scrub != null) {
                       final pct = _ctrl.hourToViewportPct(scrub);
-                      _onTimelineTap(pct);
+                      _onTimelineTap(pct, yFraction: _scaleStartYFrac);
                     } else if (_scaleStartPct != null) {
                       // Quick tap with no movement — scrubHour never set
-                      _onTimelineTap(_scaleStartPct!);
+                      _onTimelineTap(_scaleStartPct!, yFraction: _scaleStartYFrac);
                     }
                   }
                   _scaleStartPct = null;
+                  _scaleStartYFrac = null;
+                  _hoverMotionEvent = null;
                   _ctrl.setScrubHour(null);
                   setState(() => _hoverTime = null);
                   _updateThumbOverlay();

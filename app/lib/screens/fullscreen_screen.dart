@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../config/constants.dart';
 import '../models/camera.dart';
 import '../models/system_status.dart';
@@ -29,6 +30,7 @@ class FullscreenScreen extends StatefulWidget {
   final SystemApi systemApi;
   final int tzOffsetMs;
   final ValueChanged<Quality> onQualityChanged;
+  final ValueChanged<bool> onLiveStateChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback? onBack;
 
@@ -45,6 +47,7 @@ class FullscreenScreen extends StatefulWidget {
     required this.systemApi,
     required this.tzOffsetMs,
     required this.onQualityChanged,
+    required this.onLiveStateChanged,
     required this.onStreamSourceChanged,
     this.onBack,
   });
@@ -56,6 +59,7 @@ class FullscreenScreen extends StatefulWidget {
 class _FullscreenScreenState extends State<FullscreenScreen> {
   bool _isLive = true;
   bool _paused = false;
+  bool _showStats = false;
   int _speed = 1;
   String? _playbackUrl;
   bool _playbackLoading = false;
@@ -143,7 +147,10 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         _playbackUrl = fullUrl;
         _windowEnd = session.segmentEnd;
         _hasMore = session.hasMore;
-        _isLive = false;
+        if (_isLive) {
+          _isLive = false;
+          widget.onLiveStateChanged(false);
+        }
         _playbackStartTime = start;
         _virtualTimeMs = DateTime.parse(start).millisecondsSinceEpoch;
         _playbackLoading = false;
@@ -165,6 +172,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _pbPlayer?.stop();
     setState(() {
       _isLive = true;
+      widget.onLiveStateChanged(true);
       _paused = false;
       _playbackUrl = null;
       _playbackError = null;
@@ -371,7 +379,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
             // Header
             _buildHeader(running),
             // Video area
-            Expanded(child: _buildVideoArea(running, rot)),
+            Expanded(
+              child: Stack(
+                children: [
+                  Positioned.fill(child: _buildVideoArea(running, rot)),
+                  if (_showStats) _buildStatsOverlay(),
+                ],
+              ),
+            ),
             // Timeline
             TimelineWidget(
               cameraId: widget.camera.id,
@@ -426,6 +441,20 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               ),
             ),
             const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.bar_chart, size: 20),
+              tooltip: 'Video Stats',
+              onPressed: () => setState(() => _showStats = !_showStats),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            ),
+            IconButton(
+              icon: const Icon(Icons.bug_report, size: 20),
+              tooltip: 'Report a Bug',
+              onPressed: () => _showBugReportDialog(context),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            ),
             if (_isLive && widget.stream?.uptimeSeconds != null)
               Padding(
                 padding: const EdgeInsets.only(right: 8),
@@ -440,14 +469,17 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                 child: Text('Playback',
                     style: TextStyle(fontSize: 11, color: Color(0xFF3B82F6))),
               ),
-            StreamSourceSelector(
-              value: widget.streamSource,
-              onChanged: widget.onStreamSourceChanged,
-            ),
-            const SizedBox(width: 4),
+            if (_isLive) ...[
+              StreamSourceSelector(
+                value: widget.streamSource,
+                onChanged: widget.onStreamSourceChanged,
+              ),
+              const SizedBox(width: 4),
+            ],
             QualitySelector(
               value: widget.quality,
               onChanged: widget.onQualityChanged,
+              isLive: _isLive,
             ),
           ],
         ),
@@ -509,6 +541,128 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     }
 
     return const SizedBox.shrink();
+  }
+
+  Widget _buildStatsOverlay() {
+    final player = _isLive ? null : _pbPlayer;
+    final w = player?.state.width;
+    final h = player?.state.height;
+    final mode = _isLive ? 'Live' : 'Playback';
+    final quality = widget.quality.label;
+    final stream = _isLive ? widget.streamSource.label : 'Recording';
+    final codec = widget.quality == Quality.direct
+        ? (_isLive ? 'Passthrough' : 'HEVC copy')
+        : 'H.264';
+
+    return Positioned(
+      top: 8,
+      left: 8,
+      child: IgnorePointer(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('$mode | $stream | $quality',
+                  style: const TextStyle(fontSize: 11, color: Color(0xFFD4D4D4), fontFamily: 'monospace')),
+              Text('Codec: $codec',
+                  style: const TextStyle(fontSize: 11, color: Color(0xFF737373), fontFamily: 'monospace')),
+              if (w != null && h != null)
+                Text('Resolution: ${w}x$h',
+                    style: const TextStyle(fontSize: 11, color: Color(0xFF737373), fontFamily: 'monospace')),
+              if (player != null)
+                Text('Position: ${player.state.position.inSeconds}s / ${player.state.duration.inSeconds}s',
+                    style: const TextStyle(fontSize: 11, color: Color(0xFF737373), fontFamily: 'monospace')),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showBugReportDialog(BuildContext context) async {
+    String? logs;
+    bool copied = false;
+
+    try {
+      logs = await widget.systemApi.fetchRecentLogs(minutes: 10);
+    } catch (e) {
+      logs = 'Failed to fetch logs: $e';
+    }
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Report a Bug'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 400,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Logs from the last 10 minutes:',
+                    style: TextStyle(color: Colors.grey[400], fontSize: 13)),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: SelectionArea(
+                      child: SingleChildScrollView(
+                        child: Text(
+                          logs ?? 'No logs available.',
+                          style: const TextStyle(
+                            fontFamily: 'monospace', fontSize: 11, color: Color(0xFFCCCCCC)),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: logs ?? ''));
+                        setDialogState(() => copied = true);
+                      },
+                      icon: Icon(copied ? Icons.check : Icons.copy, size: 16),
+                      label: Text(copied ? 'Copied!' : 'Copy Logs'),
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton.icon(
+                      onPressed: () => launchUrl(
+                        Uri.parse('https://github.com/richard1912/RichIris/issues/new'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      icon: const Icon(Icons.open_in_new, size: 16),
+                      label: const Text('Open GitHub Issues'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _handleKey(KeyEvent event) {

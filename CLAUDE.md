@@ -31,15 +31,16 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTS
 - **Motion detection + AI object detection**: Simplified snapshot-based pipeline. Fetches JPEG snapshots from go2rtc's HTTP frame API (`GET /api/frame.jpeg?src={stream}_s2_direct`) every ~1s using httpx (no cv2.VideoCapture — clean HTTP timeouts, no hung threads). go2rtc HTTP API on port **1984**. Motion pre-filter uses running weighted-average baseline: `avg = alpha * frame + (1-alpha) * avg` (alpha=0.2 for first 25 frames, then 0.01). Diff against baseline → GaussianBlur(21,21) → absdiff → threshold(25). `changed_pct > 40%` triggers hard baseline reset (IR switch). Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. When motion exceeds threshold and AI is enabled, frame goes directly to YOLO — if matching object detected above confidence threshold, event fires immediately. No Frigate-style median/history pipeline. Uses YOLO11x on CUDA (RTX 4080 SUPER), min bounding box 0.2% of frame area. Falls back to CPU if CUDA unavailable. **Multi-category detection**: per-camera toggles for persons (COCO class 0), vehicles (bicycle/car/motorcycle/bus/truck — classes 1,2,3,5,7), and animals (bird/cat/dog/horse/sheep/cow/elephant/bear/zebra/giraffe — classes 14-23). `detection_label` stores the specific COCO class name (e.g., "car", "dog"). Events stored as MotionEvent rows (start_time, end_time, peak_intensity, detection_label, detection_confidence). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `ai_detection` (master bool), `ai_detect_persons`/`ai_detect_vehicles`/`ai_detect_animals` (category bools), `ai_confidence_threshold` (0-100), `motion_scripts` (JSON array of script pairs with per-category triggers). **Multiple script pairs**: each entry has `on`/`off` scripts and category booleans (`persons`, `vehicles`, `animals`, `motion_only`). A script only fires if its category matches the detection — e.g., a script with only `persons: true` won't fire for vehicle detections. Legacy `motion_script`/`motion_script_off` fields auto-migrated to `motion_scripts` on startup. Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes take effect immediately via `detector.update_camera()`. Heartbeat log every 5 min per camera.
 
 ### Video Quality Selection
-- **Two independent selectors** in header (also in fullscreen view): **Stream** (S1/S2) and **Quality** (Direct/High/Low)
+- **Two independent selectors** in header (also in fullscreen view): **Stream** (Main/Sub) and **Quality** (Direct/High/Low)
+  - Stream selector only shown during live view (not during playback — playback uses .ts files, not RTSP)
   - Stream persisted in SharedPreferences key `richiris-stream-source`, Quality in `richiris-quality`
-- **Live streams**: go2rtc registers 6 streams per camera (S1/S2 × Direct/High/Low). Unused quality streams are lazy — zero resources until a client connects.
-  - S1 Direct: raw 4K HEVC passthrough (no ffmpeg, zero CPU)
-  - S1 High: 1920×1080 H.264 transcode, S1 Low: 1280×720 H.264
-  - S2 Direct: raw sub-stream passthrough (H.264, ~640x480, no ffmpeg)
-  - S2 High: sub-stream H.264 re-encode (native res), S2 Low: 320×180
-- **Playback**: All qualities use fragmented MP4 streaming. Direct/High use `-c copy` (HEVC passthrough). Medium/Low use NVENC GPU transcode (`h264_nvenc`).
-  - Direct/High: 3840x2160 (4K native), Medium: 1280x720 @ 2Mbps, Low: 640x360 @ 800kbps
+  - **Android**: Direct quality hidden (raw passthrough has compatibility issues with HTMS cameras). Default quality is High on Android, Direct on Windows.
+- **Live streams**: go2rtc registers 6 streams per camera (Main/Sub × Direct/High/Low). Unused quality streams are lazy — zero resources until a client connects.
+  - Main Direct: raw 4K HEVC passthrough (no ffmpeg, zero CPU)
+  - Main High: native res H.264 re-encode, Main Low: native res H.264 reduced bitrate (2Mbps)
+  - Sub Direct: raw sub-stream passthrough (no ffmpeg)
+  - Sub High: native res H.264 re-encode, Sub Low: native res H.264 reduced bitrate (500kbps)
+- **Playback**: All qualities use fragmented MP4 streaming. Direct = HEVC passthrough (`-c copy`), High = native res H.264 NVENC re-encode, Low = native res H.264 NVENC at 2Mbps.
 - Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low` params for HTTP fMP4
 - Backend uses module-level connection-pooled httpx client for go2rtc fMP4 proxying
 - Stream pre-warming at backend startup triggers go2rtc RTSP connections proactively

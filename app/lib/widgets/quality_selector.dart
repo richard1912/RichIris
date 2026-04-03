@@ -1,7 +1,9 @@
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import '../config/constants.dart';
 
-/// Selector chip for stream source (S1 / S2).
+/// Selector chip for stream source (Main / Sub).
 class StreamSourceSelector extends StatelessWidget {
   final StreamSource value;
   final ValueChanged<StreamSource> onChanged;
@@ -30,24 +32,37 @@ class StreamSourceSelector extends StatelessWidget {
 }
 
 /// Selector chip for quality tier (Direct / High / Low).
+/// On Android live view, Direct is hidden (compatibility issues with raw RTSP passthrough).
+/// Playback Direct is fine on Android (clean fMP4 from ffmpeg).
 class QualitySelector extends StatelessWidget {
   final Quality value;
   final ValueChanged<Quality> onChanged;
+  final bool isLive;
 
   const QualitySelector({
     super.key,
     required this.value,
     required this.onChanged,
+    this.isLive = true,
   });
+
+  static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
+
+  List<Quality> get _availableQualities =>
+      (_isAndroid && isLive) ? Quality.values.where((q) => q != Quality.direct).toList() : Quality.values;
+
+  /// Effective quality shown in the chip — on Android live view, Direct displays as High.
+  Quality get _displayQuality =>
+      (_isAndroid && isLive && value == Quality.direct) ? Quality.high : value;
 
   @override
   Widget build(BuildContext context) {
     return PopupMenuButton<Quality>(
-      initialValue: value,
+      initialValue: _displayQuality,
       onSelected: onChanged,
       tooltip: 'Video quality',
-      child: _SelectorChip(label: value.label),
-      itemBuilder: (_) => Quality.values
+      child: _SelectorChip(label: _displayQuality.label),
+      itemBuilder: (_) => _availableQualities
           .map((q) => PopupMenuItem(
                 value: q,
                 child: Column(

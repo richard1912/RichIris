@@ -16,7 +16,8 @@ PLAYBACK_DIR = Path("data/playback")
 IDLE_TIMEOUT = 30  # seconds before cleanup
 
 # Quality presets for playback transcoding.
-# direct/high = passthrough (instant), medium/low = NVENC GPU transcode (streamed).
+# direct = HEVC passthrough (instant remux), high = native res H.264 re-encode,
+# low = native res H.264 reduced bitrate.
 PLAYBACK_QUALITY: dict[str, dict] = {
     "direct": {
         "pre_input": [],
@@ -25,22 +26,15 @@ PLAYBACK_QUALITY: dict[str, dict] = {
         "streaming": True,
     },
     "high": {
-        "pre_input": [],
-        "codec": ["-c", "copy"],
-        "movflags": "frag_keyframe+empty_moov",
-        "streaming": True,
-    },
-    "medium": {
         "pre_input": ["-hwaccel", "cuda"],
-        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "2M",
-                  "-vf", "scale=1280:720", "-c:a", "copy"],
+        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-c:a", "copy"],
         "movflags": "frag_keyframe+empty_moov",
         "streaming": True,
     },
     "low": {
         "pre_input": ["-hwaccel", "cuda"],
-        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "800k",
-                  "-vf", "scale=640:360", "-c:a", "copy"],
+        "codec": ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "2M",
+                  "-c:a", "copy"],
         "movflags": "frag_keyframe+empty_moov",
         "streaming": True,
     },
