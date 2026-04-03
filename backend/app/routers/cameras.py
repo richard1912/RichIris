@@ -48,6 +48,9 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         motion_script=data.motion_script,
         motion_script_off=data.motion_script_off,
         ai_detection=data.ai_detection,
+        ai_detect_persons=data.ai_detect_persons,
+        ai_detect_vehicles=data.ai_detect_vehicles,
+        ai_detect_animals=data.ai_detect_animals,
         ai_confidence_threshold=data.ai_confidence_threshold,
     )
     db.add(camera)
@@ -100,6 +103,12 @@ async def update_camera(
         camera.motion_script_off = data.motion_script_off
     if data.ai_detection is not None:
         camera.ai_detection = data.ai_detection
+    if data.ai_detect_persons is not None:
+        camera.ai_detect_persons = data.ai_detect_persons
+    if data.ai_detect_vehicles is not None:
+        camera.ai_detect_vehicles = data.ai_detect_vehicles
+    if data.ai_detect_animals is not None:
+        camera.ai_detect_animals = data.ai_detect_animals
     if data.ai_confidence_threshold is not None:
         camera.ai_confidence_threshold = data.ai_confidence_threshold
 

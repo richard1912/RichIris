@@ -13,6 +13,9 @@ class Camera {
   final String? motionScript;
   final String? motionScriptOff;
   final bool aiDetection;
+  final bool aiDetectPersons;
+  final bool aiDetectVehicles;
+  final bool aiDetectAnimals;
   final int aiConfidenceThreshold;
   final String createdAt;
 
@@ -31,6 +34,9 @@ class Camera {
     this.motionScript,
     this.motionScriptOff,
     this.aiDetection = false,
+    this.aiDetectPersons = true,
+    this.aiDetectVehicles = false,
+    this.aiDetectAnimals = false,
     this.aiConfidenceThreshold = 50,
     required this.createdAt,
   });
@@ -50,6 +56,9 @@ class Camera {
         motionScript: json['motion_script'] as String?,
         motionScriptOff: json['motion_script_off'] as String?,
         aiDetection: json['ai_detection'] as bool? ?? false,
+        aiDetectPersons: json['ai_detect_persons'] as bool? ?? true,
+        aiDetectVehicles: json['ai_detect_vehicles'] as bool? ?? false,
+        aiDetectAnimals: json['ai_detect_animals'] as bool? ?? false,
         aiConfidenceThreshold: json['ai_confidence_threshold'] as int? ?? 50,
         createdAt: json['created_at'] as String,
       );
@@ -63,6 +72,9 @@ class Camera {
         'motion_sensitivity': motionSensitivity,
         if (motionScript != null) 'motion_script': motionScript,
         'ai_detection': aiDetection,
+        'ai_detect_persons': aiDetectPersons,
+        'ai_detect_vehicles': aiDetectVehicles,
+        'ai_detect_animals': aiDetectAnimals,
         'ai_confidence_threshold': aiConfidenceThreshold,
       };
 }

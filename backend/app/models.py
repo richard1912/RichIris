@@ -29,6 +29,9 @@ class Camera(Base):
     motion_script: Mapped[str | None] = mapped_column(String(500), nullable=True)
     motion_script_off: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ai_detection: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    ai_detect_persons: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    ai_detect_vehicles: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    ai_detect_animals: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     ai_confidence_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
 
     recordings: Mapped[list["Recording"]] = relationship(back_populates="camera")

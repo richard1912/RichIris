@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'timeline_controller.dart';
+import '../../utils/detection_colors.dart';
 import '../../utils/time_utils.dart';
 
 class TimelinePainter extends CustomPainter {
@@ -104,7 +105,7 @@ class TimelinePainter extends CustomPainter {
 
   void _drawMotionEvents(Canvas canvas, Size size, double vpStart, double vpHours) {
     if (controller.motionEvents.isEmpty) return;
-    final motionPaint = Paint()..color = const Color(0xFFF59E0B).withValues(alpha: 0.8);
+    final paint = Paint();
     final barTop = size.height * 0.08;
     final barHeight = size.height * 0.18;
 
@@ -121,6 +122,7 @@ class TimelinePainter extends CustomPainter {
       // Ensure minimum visible width of 8 pixels for clickability
       final drawX2 = (x2 - x1 < 8) ? x1 + 8 : x2;
 
+      paint.color = DetectionColors.forLabel(event.detectionLabel).withValues(alpha: 0.8);
       canvas.drawRRect(
         RRect.fromRectAndRadius(
           Rect.fromLTRB(
@@ -131,7 +133,7 @@ class TimelinePainter extends CustomPainter {
           ),
           const Radius.circular(1),
         ),
-        motionPaint,
+        paint,
       );
     }
   }

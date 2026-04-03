@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/camera.dart';
 import '../services/camera_api.dart';
+import '../utils/detection_colors.dart';
 
 class CameraFormScreen extends StatefulWidget {
   final CameraApi cameraApi;
@@ -25,6 +26,9 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late final TextEditingController _motionScriptCtrl;
   late final TextEditingController _motionScriptOffCtrl;
   late bool _aiDetection;
+  late bool _aiDetectPersons;
+  late bool _aiDetectVehicles;
+  late bool _aiDetectAnimals;
   late int _aiConfidenceThreshold;
   bool _saving = false;
   String? _error;
@@ -72,6 +76,9 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _motionScriptCtrl = TextEditingController(text: widget.camera?.motionScript ?? '');
     _motionScriptOffCtrl = TextEditingController(text: widget.camera?.motionScriptOff ?? '');
     _aiDetection = widget.camera?.aiDetection ?? false;
+    _aiDetectPersons = widget.camera?.aiDetectPersons ?? true;
+    _aiDetectVehicles = widget.camera?.aiDetectVehicles ?? false;
+    _aiDetectAnimals = widget.camera?.aiDetectAnimals ?? false;
     _aiConfidenceThreshold = widget.camera?.aiConfidenceThreshold ?? 50;
   }
 
@@ -115,6 +122,9 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               ? null
               : _motionScriptOffCtrl.text.trim(),
           'ai_detection': _aiDetection,
+          'ai_detect_persons': _aiDetectPersons,
+          'ai_detect_vehicles': _aiDetectVehicles,
+          'ai_detect_animals': _aiDetectAnimals,
           'ai_confidence_threshold': _aiConfidenceThreshold,
         };
         await widget.cameraApi.update(widget.camera!.id, data);
@@ -158,6 +168,32 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     } catch (e) {
       setState(() => _error = e.toString());
     }
+  }
+
+  Widget _buildCategoryToggle(String label, Color color, bool value, ValueChanged<bool> onChanged) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 16),
+      child: SwitchListTile(
+        title: Row(
+          children: [
+            Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(3),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(label),
+          ],
+        ),
+        value: value,
+        onChanged: onChanged,
+        contentPadding: EdgeInsets.zero,
+        activeColor: color,
+      ),
+    );
   }
 
   @override
@@ -285,14 +321,48 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               if (_motionSensitivity > 0) ...[
                 const SizedBox(height: 6),
                 SwitchListTile(
-                  title: const Text('AI Person Detection'),
-                  subtitle: const Text('Only trigger events when a person is detected'),
+                  title: const Text('AI Object Detection'),
+                  subtitle: const Text('Use YOLO to classify detected motion'),
                   value: _aiDetection,
-                  onChanged: (v) => setState(() => _aiDetection = v),
+                  onChanged: (v) => setState(() {
+                    _aiDetection = v;
+                    // Ensure at least persons enabled when turning on
+                    if (v && !_aiDetectPersons && !_aiDetectVehicles && !_aiDetectAnimals) {
+                      _aiDetectPersons = true;
+                    }
+                  }),
                   contentPadding: EdgeInsets.zero,
                   activeColor: const Color(0xFF3B82F6),
                 ),
                 if (_aiDetection) ...[
+                  _buildCategoryToggle(
+                    'Persons', DetectionColors.person, _aiDetectPersons,
+                    (v) => setState(() {
+                      _aiDetectPersons = v;
+                      if (!_aiDetectPersons && !_aiDetectVehicles && !_aiDetectAnimals) {
+                        _aiDetectPersons = true; // keep at least one enabled
+                      }
+                    }),
+                  ),
+                  _buildCategoryToggle(
+                    'Vehicles', DetectionColors.vehicle, _aiDetectVehicles,
+                    (v) => setState(() {
+                      _aiDetectVehicles = v;
+                      if (!_aiDetectPersons && !_aiDetectVehicles && !_aiDetectAnimals) {
+                        _aiDetectPersons = true;
+                      }
+                    }),
+                  ),
+                  _buildCategoryToggle(
+                    'Animals', DetectionColors.animal, _aiDetectAnimals,
+                    (v) => setState(() {
+                      _aiDetectAnimals = v;
+                      if (!_aiDetectPersons && !_aiDetectVehicles && !_aiDetectAnimals) {
+                        _aiDetectPersons = true;
+                      }
+                    }),
+                  ),
+                  const SizedBox(height: 4),
                   Row(
                     children: [
                       const Text('Confidence Threshold', style: TextStyle(fontSize: 14)),

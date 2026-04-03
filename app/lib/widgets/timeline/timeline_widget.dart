@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../utils/detection_colors.dart';
 import '../../services/recording_api.dart';
 import '../../services/clip_api.dart';
 import '../../services/motion_api.dart';
@@ -203,9 +204,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
 
   Widget _buildThumbEntry(BuildContext _) {
     final isMotion = _hoverMotionEvent != null;
-    final borderColor = isMotion
-        ? const Color(0xFFF59E0B)
-        : const Color(0xFF404040);
+    final motionColor = DetectionColors.forLabel(_hoverMotionEvent?.detectionLabel);
+    final borderColor = isMotion ? motionColor : const Color(0xFF404040);
 
     return Positioned(
       left: _thumbLeft,
@@ -240,7 +240,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                       color: const Color(0xCC000000),
                       borderRadius: BorderRadius.circular(3),
                       border: Border.all(
-                        color: const Color(0xFFF59E0B),
+                        color: motionColor,
                         width: 0.5,
                       ),
                     ),
@@ -253,8 +253,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                             : '';
                         return '${ai}min sens $minSens';
                       }(),
-                      style: const TextStyle(
-                        color: Color(0xFFF59E0B),
+                      style: TextStyle(
+                        color: motionColor,
                         fontSize: 9,
                         fontWeight: FontWeight.w600,
                       ),
