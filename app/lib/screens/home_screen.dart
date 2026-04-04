@@ -265,6 +265,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   int _getNvrTime() {
+    if (!_isLive && _playbackStartIso != null) {
+      // Use a reference player's actual position so the playhead stops
+      // when the stream freezes/buffers instead of advancing blindly.
+      final refId = widget.selectedCameraId;
+      final refPlayer = refId != null ? _pbPlayers[refId] : _pbPlayers.values.firstOrNull;
+      if (refPlayer != null) {
+        final startMs = DateTime.parse(_playbackStartIso!).millisecondsSinceEpoch;
+        return startMs + refPlayer.state.position.inMilliseconds + widget.tzOffsetMs;
+      }
+    }
     return DateTime.now().millisecondsSinceEpoch + widget.tzOffsetMs;
   }
 

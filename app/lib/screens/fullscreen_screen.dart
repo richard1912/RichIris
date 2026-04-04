@@ -139,6 +139,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     setState(() {
       _playbackLoading = true;
       _playbackError = null;
+      _playbackStartTime = start;
     });
     _clearSpeedTimer();
     _speed = 1;
@@ -376,6 +377,10 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
 
   int _getNvrTime() {
     if (_isLive) return DateTime.now().millisecondsSinceEpoch + _tzOffsetMs;
+    // During loading, return the target start time (player position not yet valid)
+    if (_playbackLoading && _playbackStartTime != null) {
+      return DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch + _tzOffsetMs;
+    }
     if (_playbackUrl == null) return DateTime.now().millisecondsSinceEpoch + _tzOffsetMs;
     if (_speed >= 16 || _speed <= -1) return _virtualTimeMs + _tzOffsetMs;
     final p = _pbPlayer;
