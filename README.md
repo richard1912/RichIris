@@ -8,7 +8,7 @@ A self-hosted NVR (Network Video Recorder) built with FastAPI and Flutter. Desig
 
 - **24/7 continuous recording** — HEVC passthrough (no transcode, no GPU usage) into 15-minute `.ts` segments
 - **Live view** — HTTP fMP4 via go2rtc + media_kit (libmpv) with low-latency profile
-- **Multi-quality streams** — Main/Sub stream selection x Direct/High/Low quality, lazy transcoding (zero resources until a client connects)
+- **Multi-quality streams** — Main/Sub stream selection x Direct/High/Low/Ultra Low quality, lazy transcoding (zero resources until a client connects)
 - **Timeline playback** — zoomable 24h timeline, instant fragmented MP4 streaming (< 200ms start), speed controls (-32x to 32x), date picker
 - **Trickplay thumbnails** — real-time thumbnail capture via go2rtc frame API, hover/scrub preview on timeline
 - **Motion detection** — snapshot-based frame differencing with per-camera sensitivity, timeline overlay, multiple configurable script pairs with per-category triggers (e.g., run one script for persons, a different script for vehicles)
@@ -32,7 +32,7 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTS
 
 - **Recording**: One FFmpeg process per camera, codec passthrough (`-c:v copy`), 15-minute `.ts` segments. No GPU, no transcode. Watchdog monitors file modification every 2 minutes; stale processes are killed and auto-restarted.
 - **Live view**: HTTP fMP4 proxied through FastAPI from [go2rtc](https://github.com/AlexxIT/go2rtc). Flutter app uses media_kit (libmpv) with low-latency profile. Auto-reconnects on stream errors.
-- **Playback**: Direct = instant remux (`-c copy`), High/Low = H.264 NVENC transcode with source-probed bitrate. All use fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via StreamingResponse — playback starts in ~200ms. Sessions auto-cleanup after 120s idle.
+- **Playback**: Direct = raw `.ts` file (instant, no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via StreamingResponse. Ultra Low adds 15fps cap, no B-frames, and short GOP for minimal bandwidth. Sessions auto-cleanup after 30s idle.
 - **Motion detection**: Fetches JPEG snapshots from go2rtc every ~1s. Running weighted-average baseline with adaptive alpha. Sensitivity 0-100 maps to area threshold. 10-second cooldown between events.
 - **AI object detection**: YOLO11x on CUDA, triggered only when motion exceeds threshold. Per-camera toggles for person, vehicle, and animal categories. Stores specific COCO class names (e.g., "car", "dog") as detection labels. Min bounding box 0.2% of frame area. Falls back to CPU if CUDA unavailable.
 
@@ -127,7 +127,7 @@ RichIris/
 │   │       ├── go2rtc_client.py       # REST client for go2rtc
 │   │       ├── recorder.py            # Segment scanner + DB registration
 │   │       ├── clip_exporter.py       # Clip export (concat segments -> MP4)
-│   │       ├── playback.py            # Fragmented MP4 streaming for playback
+│   │       ├── playback.py            # HEVC NVENC transcode sessions for playback
 │   │       ├── thumbnail_capture.py   # Thumbnail capture via go2rtc frame API
 │   │       ├── retention.py           # Age + storage-based retention cleanup
 │   │       ├── motion_detector.py     # Snapshot-based motion detection
@@ -179,7 +179,7 @@ See [`config.yaml.example`](config.yaml.example) for all options:
 | App | Flutter (Windows + Android), media_kit, Dio |
 | Live View | go2rtc (HTTP fMP4) |
 | Recording | FFmpeg (codec passthrough) |
-| Playback | FFmpeg (fragmented MP4 streaming, NVENC transcode for High/Low) |
+| Playback | FFmpeg (raw .ts for Direct, HEVC NVENC transcode for High/Low/Ultra Low) |
 | Motion Detection | OpenCV, NumPy (snapshot-based frame differencing) |
 | AI Detection | YOLO11x, Ultralytics, CUDA |
 | Database | SQLite |
@@ -193,8 +193,9 @@ Stream and quality selection are independent — pick a stream source (Main or S
 | Quality | Main Stream | Sub Stream | Server Load |
 |---------|-------------|------------|-------------|
 | **Direct** | Native passthrough (HEVC) | Native passthrough | Zero (no ffmpeg) |
-| **High** | H.264 re-encode, source-matched quality | H.264 re-encode, source-matched quality | Moderate |
-| **Low** | H.264 re-encode, reduced quality | H.264 re-encode, reduced quality | Moderate |
+| **High** | HEVC re-encode, source-matched quality | HEVC re-encode, source-matched quality | Moderate |
+| **Low** | HEVC re-encode, 1/8 source bitrate | HEVC re-encode, 1/8 source bitrate | Moderate |
+| **Ultra Low** | HEVC re-encode, 1/16 bitrate, 15fps, no B-frames | HEVC re-encode, 1/16 bitrate, 15fps, no B-frames | Low |
 
 ### Playback (recorded .ts files)
 
@@ -202,14 +203,15 @@ Stream selection does not apply to playback — recordings are always from the m
 
 | Quality | Processing | Server Load |
 |---------|-----------|-------------|
-| **Direct** | HEVC passthrough (`-c copy`) | Near zero (container remux only) |
-| **High** | H.264 NVENC re-encode, source-matched quality | GPU |
-| **Low** | H.264 NVENC re-encode, reduced quality | GPU |
+| **Direct** | Raw `.ts` file, no processing | Zero |
+| **High** | HEVC NVENC re-encode, source-matched quality | GPU |
+| **Low** | HEVC NVENC re-encode, 1/8 source bitrate | GPU |
+| **Ultra Low** | HEVC NVENC re-encode, 1/16 bitrate, 15fps, no B-frames, short GOP | GPU (light) |
 
 ### Platform Notes
 
 - **Windows**: All quality tiers available for both live view and playback
-- **Android**: Direct is hidden for **live view only** (raw RTSP passthrough has compatibility issues with some camera brands). Direct is available for playback (clean fMP4 from ffmpeg). Default quality is Direct on both platforms.
+- **Android**: Direct is hidden for **live view only** (raw RTSP passthrough has compatibility issues with some camera brands). Direct is available for playback. Default quality is Direct on both platforms.
 
 ## VPN Access
 

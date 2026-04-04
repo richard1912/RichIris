@@ -48,10 +48,11 @@ async def _probe_file(path: str) -> tuple[int | None, str | None]:
 
 
 def _build_playback_preset(quality: str, source_kbps: int, source_codec: str = "hevc") -> dict:
-    """Build a playback quality preset with source-matched visual quality.
+    """Build a playback quality preset.
 
-    Recordings are typically HEVC, so H.264 target needs ~2x bitrate for
-    equivalent visual quality.
+    High = HEVC re-encode at source bitrate.
+    Low = 1/8 of source bitrate.
+    Ultra-low = 1/16 of source bitrate, 15fps, no B-frames, short GOP.
     """
     if quality == "direct":
         return {
@@ -60,14 +61,24 @@ def _build_playback_preset(quality: str, source_kbps: int, source_codec: str = "
             "movflags": "frag_keyframe+empty_moov",
             "streaming": True,
         }
-    mult = 2 if source_codec == "hevc" else 1
-    high_kbps = source_kbps * mult
-    high_br = f"{high_kbps}k"
-    low_br = f"{max(high_kbps // 4, 500)}k"
+    high_br = f"{source_kbps}k"
+    low_br = f"{max(source_kbps // 8, 500)}k"
+    ultralow_br = f"{max(source_kbps // 16, 300)}k"
+
+    if quality == "ultralow":
+        return {
+            "pre_input": ["-hwaccel", "cuda"],
+            "codec": ["-c:v", "hevc_nvenc", "-preset", "p4",
+                      "-b:v", ultralow_br, "-r", "15", "-bf", "0", "-g", "30",
+                      "-c:a", "copy"],
+            "movflags": "frag_keyframe+empty_moov",
+            "streaming": True,
+        }
+
     bitrate = high_br if quality == "high" else low_br
     return {
         "pre_input": ["-hwaccel", "cuda"],
-        "codec": ["-c:v", "h264_nvenc", "-preset", "p4",
+        "codec": ["-c:v", "hevc_nvenc", "-preset", "p4",
                   "-b:v", bitrate, "-c:a", "copy"],
         "movflags": "frag_keyframe+empty_moov",
         "streaming": True,

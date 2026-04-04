@@ -37,26 +37,29 @@ def _build_quality_profiles(
 ) -> dict[str, tuple[str | None, str]]:
     """Build quality profiles with probed bitrates.
 
-    High = source-matched visual quality (2x bitrate for HEVC→H.264 conversion).
-    Low = 1/4 of High bitrate.
+    High = source-matched visual quality (HEVC re-encode at source bitrate).
+    Low = 1/8 of High bitrate.
+    Ultra-low = 1/16 of source bitrate, 15fps, no B-frames, short GOP.
     """
-    # HEVC→H.264 needs ~2x bitrate for equivalent visual quality
-    main_mult = 2 if main_codec == "hevc" else 1
-    sub_mult = 2 if sub_codec == "hevc" else 1
-    main_high_kbps = main_kbps * main_mult
-    sub_high_kbps = sub_kbps * sub_mult
-    main_high = _format_bitrate(main_high_kbps)
-    main_low = _format_bitrate(max(main_high_kbps // 4, 500))
-    sub_high = _format_bitrate(sub_high_kbps)
-    sub_low = _format_bitrate(max(sub_high_kbps // 4, 250))
+    main_high = _format_bitrate(main_kbps)
+    main_low = _format_bitrate(max(main_kbps // 8, 500))
+    main_ultralow = _format_bitrate(max(main_kbps // 16, 300))
+    sub_high = _format_bitrate(sub_kbps)
+    sub_low = _format_bitrate(max(sub_kbps // 8, 250))
+    sub_ultralow = _format_bitrate(max(sub_kbps // 16, 150))
+
+    # Ultra-low: 15fps, no B-frames, short GOP (30 frames = 2s at 15fps)
+    ul_extra = "#raw=-r#raw=15#raw=-bf#raw=0#raw=-g#raw=30"
 
     return {
-        "_s1_direct": (None, "main"),
-        "_s1_high":   (f"#video=h264#raw=-b:v#raw={main_high}", "main"),
-        "_s1_low":    (f"#video=h264#raw=-b:v#raw={main_low}", "main"),
-        "_s2_direct": (None, "sub"),
-        "_s2_high":   (f"#video=h264#raw=-b:v#raw={sub_high}", "sub"),
-        "_s2_low":    (f"#video=h264#raw=-b:v#raw={sub_low}", "sub"),
+        "_s1_direct":   (None, "main"),
+        "_s1_high":     (f"#video=h265#raw=-b:v#raw={main_high}", "main"),
+        "_s1_low":      (f"#video=h265#raw=-b:v#raw={main_low}", "main"),
+        "_s1_ultralow": (f"#video=h265#raw=-b:v#raw={main_ultralow}{ul_extra}", "main"),
+        "_s2_direct":   (None, "sub"),
+        "_s2_high":     (f"#video=h265#raw=-b:v#raw={sub_high}", "sub"),
+        "_s2_low":      (f"#video=h265#raw=-b:v#raw={sub_low}", "sub"),
+        "_s2_ultralow": (f"#video=h265#raw=-b:v#raw={sub_ultralow}{ul_extra}", "sub"),
     }
 
 
@@ -77,7 +80,7 @@ class Go2rtcClient:
         """Register camera streams with go2rtc at all quality levels.
 
         Probes camera bitrates via ffprobe, then registers 6 variants:
-        S1/S2 × Direct/High/Low. High matches source bitrate, Low is 1/4.
+        S1/S2 × Direct/High/Low. High matches source bitrate, Low is 1/8.
         """
         stream_name = get_stream_name(camera_name)
         sub_url = sub_stream_url or rtsp_url
@@ -132,7 +135,8 @@ class Go2rtcClient:
     async def remove_stream(self, camera_name: str) -> None:
         """Remove all quality variants of a camera stream from go2rtc."""
         stream_name = get_stream_name(camera_name)
-        suffixes = ["_s1_direct", "_s1_high", "_s1_low", "_s2_direct", "_s2_high", "_s2_low"]
+        suffixes = ["_s1_direct", "_s1_high", "_s1_low", "_s1_ultralow",
+                    "_s2_direct", "_s2_high", "_s2_low", "_s2_ultralow"]
 
         async def _remove_one(client: httpx.AsyncClient, key: str) -> None:
             url = f"{self._base_url}/api/streams?src={quote(key)}"

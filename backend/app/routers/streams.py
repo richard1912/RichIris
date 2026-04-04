@@ -52,7 +52,7 @@ async def proxy_fmp4(camera_id: int, stream: str = "s2", quality: str = "direct"
 
     if stream not in ("s1", "s2"):
         stream = "s2"
-    if quality not in ("direct", "high", "low"):
+    if quality not in ("direct", "high", "low", "ultralow"):
         quality = "direct"
 
     config = get_config()
@@ -91,7 +91,7 @@ async def proxy_ws(websocket: WebSocket, camera_id: int):
     ws_quality = websocket.query_params.get("quality", "direct")
     if ws_stream not in ("s1", "s2"):
         ws_stream = "s2"
-    if ws_quality not in ("direct", "high", "low"):
+    if ws_quality not in ("direct", "high", "low", "ultralow"):
         ws_quality = "direct"
     stream_name = f"{base_name}_{ws_stream}_{ws_quality}"
     go2rtc_url = f"ws://127.0.0.1:{config.go2rtc.port}/api/ws?src={stream_name}"
