@@ -115,7 +115,7 @@ RichIris/
 │   └── run.py                   # Uvicorn entry point (dev)
 ├── go2rtc/
 │   ├── go2rtc.exe               # go2rtc binary (RTSP → MSE/WebSocket)
-│   └── go2rtc.yaml              # go2rtc config (API port, streams registered dynamically)
+│   └── go2rtc.yaml              # go2rtc config (generated at startup, all streams baked in)
 ├── app/                         # Flutter app (Windows + Android)
 │   ├── lib/
 │   │   ├── main.dart            # Entry point, MediaKit init

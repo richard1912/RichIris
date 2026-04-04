@@ -51,29 +51,24 @@ def _build_quality_profiles(
     # Ultra-low: 15fps, no B-frames, short GOP (30 frames = 2s at 15fps)
     ul_extra = "#raw=-r#raw=15#raw=-bf#raw=0#raw=-g#raw=30"
 
-    # Use H.264 output for transcoded streams. go2rtc 1.9.14 has a nil pointer
-    # bug in h265.RTPDepay that crashes when writing HEVC fMP4 to HTTP clients.
-    # H.264 fMP4 output is stable. Direct streams still pass through native codec.
-    # HEVC source → H.264 output needs ~2x bitrate for equivalent visual quality.
-    main_mult = 2 if main_codec == "hevc" else 1
-    sub_mult = 2 if sub_codec == "hevc" else 1
-
-    main_high = _format_bitrate(main_kbps * main_mult)
-    main_low = _format_bitrate(max(main_kbps * main_mult // 8, 500))
-    main_ultralow = _format_bitrate(max(main_kbps * main_mult // 16, 300))
-    sub_high = _format_bitrate(sub_kbps * sub_mult)
-    sub_low = _format_bitrate(max(sub_kbps * sub_mult // 8, 250))
-    sub_ultralow = _format_bitrate(max(sub_kbps * sub_mult // 16, 150))
+    # Use HEVC output — matches source codec, supports 8K resolution (no 4096
+    # width limit like H.264 NVENC), and is more efficient at the same bitrate.
+    main_high = _format_bitrate(main_kbps)
+    main_low = _format_bitrate(max(main_kbps // 8, 500))
+    main_ultralow = _format_bitrate(max(main_kbps // 16, 300))
+    sub_high = _format_bitrate(sub_kbps)
+    sub_low = _format_bitrate(max(sub_kbps // 8, 250))
+    sub_ultralow = _format_bitrate(max(sub_kbps // 16, 150))
 
     return {
         "_s1_direct":   (None, "main"),
-        "_s1_high":     (f"#video=h264#raw=-b:v#raw={main_high}", "main"),
-        "_s1_low":      (f"#video=h264#raw=-b:v#raw={main_low}", "main"),
-        "_s1_ultralow": (f"#video=h264#raw=-b:v#raw={main_ultralow}{ul_extra}", "main"),
+        "_s1_high":     (f"#video=h265#raw=-b:v#raw={main_high}", "main"),
+        "_s1_low":      (f"#video=h265#raw=-b:v#raw={main_low}", "main"),
+        "_s1_ultralow": (f"#video=h265#raw=-b:v#raw={main_ultralow}{ul_extra}", "main"),
         "_s2_direct":   (None, "sub"),
-        "_s2_high":     (f"#video=h264#raw=-b:v#raw={sub_high}", "sub"),
-        "_s2_low":      (f"#video=h264#raw=-b:v#raw={sub_low}", "sub"),
-        "_s2_ultralow": (f"#video=h264#raw=-b:v#raw={sub_ultralow}{ul_extra}", "sub"),
+        "_s2_high":     (f"#video=h265#raw=-b:v#raw={sub_high}", "sub"),
+        "_s2_low":      (f"#video=h265#raw=-b:v#raw={sub_low}", "sub"),
+        "_s2_ultralow": (f"#video=h265#raw=-b:v#raw={sub_ultralow}{ul_extra}", "sub"),
     }
 
 
@@ -184,25 +179,19 @@ class Go2rtcClient:
             await asyncio.gather(*tasks)
 
     async def register_streams_from_config(self, streams: dict[str, list[str]]) -> None:
-        """Register pre-built streams one at a time to avoid go2rtc concurrent map writes.
-
-        Only registers direct (passthrough) streams at startup — these don't
-        trigger ffmpeg/RTSP internally. Transcoded streams are registered
-        on-demand when a client requests a specific quality.
+        """Register ALL streams one at a time to avoid go2rtc concurrent map writes.
 
         streams: dict from build_streams_config() — {name: [source_url]}
+        Transcoded streams are lazy in go2rtc — defining them doesn't start
+        ffmpeg until a client actually requests the stream.
         """
-        self._all_streams = streams  # Cache for on-demand registration
-
-        direct = {k: v for k, v in streams.items() if k.endswith("_direct")}
-
         async with httpx.AsyncClient(timeout=15) as client:
-            for key, sources in direct.items():
+            for key, sources in streams.items():
                 await self._register_one_stream(client, key, sources)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
 
-        logger.info("Direct streams registered with go2rtc", extra={
-            "direct": len(direct), "total_available": len(streams),
+        logger.info("All streams registered with go2rtc", extra={
+            "count": len(streams),
         })
 
     async def ensure_stream_registered(self, stream_name: str) -> None:
