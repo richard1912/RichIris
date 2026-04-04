@@ -105,9 +105,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'RichIris NVR Server',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+            Row(
+              children: [
+                Image.asset('assets/logo.png', height: 48, filterQuality: FilterQuality.medium),
+                const SizedBox(width: 12),
+                const Text(
+                  'NVR Server',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+                ),
+              ],
             ),
             const SizedBox(height: 8),
             Text(
