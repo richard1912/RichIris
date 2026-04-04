@@ -127,6 +127,15 @@ copy "%DL_CACHE%\ffprobe.exe" "%DIST%\dependencies\" >nul
 copy "%DL_CACHE%\go2rtc.exe" "%DIST%\dependencies\go2rtc\" >nul
 copy "%DL_CACHE%\nssm.exe" "%DIST%\" >nul
 
+:: Copy YOLO ONNX model (for AI object detection)
+if exist "%ROOT%data\yolo11x.onnx" (
+    mkdir "%DIST%\models" 2>nul
+    copy "%ROOT%data\yolo11x.onnx" "%DIST%\models\" >nul
+    echo      Bundled YOLO ONNX model
+) else (
+    echo      WARNING: yolo11x.onnx not found in data\ - AI detection will not work
+)
+
 :: Generate default bootstrap.yaml
 (
 echo data_dir: "C:/ProgramData/RichIris"
