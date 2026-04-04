@@ -39,6 +39,7 @@ a = Analysis(
         'app.routers.motion',
         'app.routers.recordings',
         'app.routers.settings',
+        'app.routers.storage',
         'app.routers.streams',
         'app.routers.system',
         'app.services.clip_exporter',
@@ -52,6 +53,7 @@ a = Analysis(
         'app.services.recorder',
         'app.services.retention',
         'app.services.settings',
+        'app.services.storage_migration',
         'app.services.stream_manager',
         'app.services.thumbnail_capture',
         # structlog

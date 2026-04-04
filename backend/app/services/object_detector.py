@@ -199,18 +199,26 @@ class ObjectDetector:
         """Blocking model load (runs in executor)."""
         import onnxruntime as ort
 
-        from app.config import get_bootstrap
+        from app.config import get_app_dir, get_bootstrap
         data_dir = Path(get_bootstrap().data_dir)
-        model_path = data_dir / "yolo11x.onnx"
+        app_dir = get_app_dir()
 
-        if not model_path.exists():
-            # Check legacy location
-            legacy_path = Path(__file__).resolve().parent.parent.parent.parent / "data" / "yolo11x.onnx"
-            if legacy_path.exists():
-                model_path = legacy_path
-            else:
-                logger.error("YOLO ONNX model not found", extra={"path": str(model_path)})
-                return
+        # Search order: data_dir → bundled models/ → dev data/ → legacy data/
+        candidates = [
+            data_dir / "yolo11x.onnx",
+            app_dir / "models" / "yolo11x.onnx",
+            app_dir / "data" / "yolo11x.onnx",
+            Path(__file__).resolve().parent.parent.parent.parent / "data" / "yolo11x.onnx",
+        ]
+        model_path = None
+        for p in candidates:
+            if p.exists():
+                model_path = p
+                break
+
+        if model_path is None:
+            logger.error("YOLO ONNX model not found", extra={"searched": [str(c) for c in candidates]})
+            return
 
         # Try DirectML (GPU) first, then CPU
         providers_to_try = [
