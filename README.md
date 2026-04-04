@@ -1,6 +1,6 @@
 # RichIris NVR
 
-A self-hosted NVR (Network Video Recorder) built with FastAPI and Flutter. Designed for 24/7 recording of RTSP cameras with live view, timeline playback, motion detection, and AI object detection — no cloud, no subscriptions.
+A self-hosted NVR (Network Video Recorder) built with FastAPI and Flutter. Designed for 24/7 recording of RTSP cameras with live view, timeline playback, motion detection, and AI object detection. Free and open source - no cloud, no subscriptions.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/richard1912)
 
