@@ -13,6 +13,8 @@ class LivePlayer extends StatefulWidget {
   final int rotation;
   final BoxFit fit;
   final ValueChanged<Player>? onPlayerCreated;
+  final Player? player;
+  final VideoController? controller;
 
   const LivePlayer({
     super.key,
@@ -20,6 +22,8 @@ class LivePlayer extends StatefulWidget {
     this.rotation = 0,
     this.fit = BoxFit.contain,
     this.onPlayerCreated,
+    this.player,
+    this.controller,
   });
 
   @override
@@ -27,8 +31,9 @@ class LivePlayer extends StatefulWidget {
 }
 
 class _LivePlayerState extends State<LivePlayer> {
-  late final Player _player;
-  late final VideoController _controller;
+  late Player _player;
+  late VideoController _controller;
+  bool _isExternal = false;
   Timer? _retryTimer;
   int _retryMs = 500;
   StreamSubscription? _errorSub;
@@ -36,26 +41,36 @@ class _LivePlayerState extends State<LivePlayer> {
   @override
   void initState() {
     super.initState();
-    _player = Player(
-      configuration: PlayerConfiguration(
-        vo: 'gpu',
-        logLevel: MPVLogLevel.warn,
-      ),
-    );
-    // Low-latency live stream settings for mpv
-    final mpv = _player.platform as NativePlayer;
-    mpv.setProperty('profile', 'low-latency');
-    mpv.setProperty('cache', 'no');
-    mpv.setProperty('cache-pause', 'no');
-    mpv.setProperty('untimed', 'yes');
-    mpv.setProperty('demuxer-max-bytes', '524288'); // 512KB buffer
-    mpv.setProperty('demuxer-readahead-secs', '0');
-    mpv.setProperty('hwdec', 'auto');               // HEVC hardware decode
-    _controller = VideoController(_player);
+    if (widget.player != null && widget.controller != null) {
+      _player = widget.player!;
+      _controller = widget.controller!;
+      _isExternal = true;
+    } else {
+      _player = Player(
+        configuration: PlayerConfiguration(
+          vo: 'gpu',
+          logLevel: MPVLogLevel.warn,
+        ),
+      );
+      final mpv = _player.platform as NativePlayer;
+      mpv.setProperty('profile', 'low-latency');
+      mpv.setProperty('cache', 'no');
+      mpv.setProperty('cache-pause', 'no');
+      mpv.setProperty('untimed', 'yes');
+      mpv.setProperty('demuxer-max-bytes', '524288');
+      mpv.setProperty('demuxer-readahead-secs', '0');
+      mpv.setProperty('hwdec', 'auto');
+      _controller = VideoController(_player);
+    }
     _player.setVolume(0);
     _errorSub = _player.stream.error.listen((_) => _scheduleRetry());
     widget.onPlayerCreated?.call(_player);
-    _open(widget.url);
+    // External players that already have media loaded are mid-stream
+    // (e.g. grid→fullscreen transition) — don't re-open.
+    // Fresh external players (no media yet) still need to be opened.
+    if (!_isExternal || _player.state.playlist.medias.isEmpty) {
+      _open(widget.url);
+    }
   }
 
   void _open(String url) {
@@ -88,7 +103,9 @@ class _LivePlayerState extends State<LivePlayer> {
   void dispose() {
     _retryTimer?.cancel();
     _errorSub?.cancel();
-    _player.dispose();
+    if (!_isExternal) {
+      _player.dispose();
+    }
     super.dispose();
   }
 

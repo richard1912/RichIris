@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'config/api_config.dart';
 import 'config/constants.dart';
@@ -245,6 +247,9 @@ class _MainNavState extends State<_MainNav> {
   int? _selectedCameraId;
   int? _fullscreenCameraId;
   bool _showSystem = false;
+  final Map<int, Player> _livePlayers = {};
+  final Map<int, VideoController> _liveControllers = {};
+  Quality? _frozenGridQuality; // quality the grid last used; frozen while fullscreen
 
   @override
   void initState() {
@@ -260,6 +265,35 @@ class _MainNavState extends State<_MainNav> {
       await widget.onRefreshStatus();
       return mounted;
     });
+  }
+
+  @override
+  void dispose() {
+    for (final p in _livePlayers.values) {
+      p.dispose();
+    }
+    super.dispose();
+  }
+
+  void _ensureLivePlayer(int cameraId) {
+    if (_livePlayers.containsKey(cameraId)) return;
+    final player = Player(
+      configuration: PlayerConfiguration(
+        vo: 'gpu',
+        logLevel: MPVLogLevel.warn,
+      ),
+    );
+    final mpv = player.platform as NativePlayer;
+    mpv.setProperty('profile', 'low-latency');
+    mpv.setProperty('cache', 'no');
+    mpv.setProperty('cache-pause', 'no');
+    mpv.setProperty('untimed', 'yes');
+    mpv.setProperty('demuxer-max-bytes', '524288');
+    mpv.setProperty('demuxer-readahead-secs', '0');
+    mpv.setProperty('hwdec', 'auto');
+    player.setVolume(0);
+    _livePlayers[cameraId] = player;
+    _liveControllers[cameraId] = VideoController(player);
   }
 
   StreamStatus? _streamForCamera(int cameraId) {
@@ -279,6 +313,27 @@ class _MainNavState extends State<_MainNav> {
       );
     }
 
+    // Pre-create players for all enabled, running cameras
+    for (final cam in widget.cameras) {
+      final stream = _streamForCamera(cam.id);
+      if (cam.enabled && (stream?.running ?? false)) {
+        _ensureLivePlayer(cam.id);
+      }
+    }
+    // Prune players for removed cameras
+    final cameraIds = widget.cameras.map((c) => c.id).toSet();
+    _livePlayers.keys.where((id) => !cameraIds.contains(id)).toList().forEach((id) {
+      _livePlayers.remove(id)?.dispose();
+      _liveControllers.remove(id);
+    });
+
+    // Freeze grid quality while fullscreen is active so grid streams
+    // don't compete with the fullscreen feed on quality changes.
+    if (_fullscreenCameraId == null) {
+      _frozenGridQuality = widget.quality;
+    }
+    final gridQuality = _frozenGridQuality ?? widget.quality;
+
     // Resolve fullscreen camera
     final fullscreenCam = _fullscreenCameraId != null
         ? widget.cameras.where((c) => c.id == _fullscreenCameraId).firstOrNull
@@ -292,14 +347,25 @@ class _MainNavState extends State<_MainNav> {
     }
 
     // Stack keeps HomeScreen alive (Offstage) so grid feeds don't restart
-    return Stack(
+    return PopScope(
+      canPop: _selectedCameraId == null && fullscreenCam == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          if (_fullscreenCameraId != null) {
+            setState(() => _fullscreenCameraId = null);
+          } else if (_selectedCameraId != null) {
+            setState(() => _selectedCameraId = null);
+          }
+        }
+      },
+      child: Stack(
       children: [
         Offstage(
           offstage: fullscreenCam != null,
           child: HomeScreen(
             cameras: widget.cameras,
             systemStatus: widget.systemStatus,
-            quality: widget.quality,
+            quality: gridQuality,
             streamSource: widget.streamSource,
             streamApi: widget.streamApi,
             recordingApi: widget.recordingApi,
@@ -308,6 +374,9 @@ class _MainNavState extends State<_MainNav> {
             cameraApi: widget.cameraApi,
             systemApi: widget.systemApi,
             tzOffsetMs: widget.tzOffsetMs,
+            livePlayers: _livePlayers,
+            liveControllers: _liveControllers,
+            fullscreenCameraId: _fullscreenCameraId,
             selectedCameraId: _selectedCameraId,
             onCameraSelected: (id) {
               if (_selectedCameraId == id) {
@@ -344,7 +413,12 @@ class _MainNavState extends State<_MainNav> {
           ),
         ),
         if (fullscreenCam != null)
-          FullscreenScreen(
+          PopScope(
+            canPop: false,
+            onPopInvokedWithResult: (didPop, _) {
+              if (!didPop) setState(() => _fullscreenCameraId = null);
+            },
+            child: FullscreenScreen(
             camera: fullscreenCam,
             stream: _streamForCamera(_fullscreenCameraId!),
             quality: widget.quality,
@@ -355,12 +429,14 @@ class _MainNavState extends State<_MainNav> {
             motionApi: widget.motionApi,
             systemApi: widget.systemApi,
             tzOffsetMs: widget.tzOffsetMs,
+            livePlayer: _livePlayers[_fullscreenCameraId],
+            liveController: _liveControllers[_fullscreenCameraId],
             onQualityChanged: widget.onQualityChanged,
             onLiveStateChanged: widget.onLiveStateChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onBack: () => setState(() => _fullscreenCameraId = null),
-          ),
+          )),
       ],
-    );
+    ));
   }
 }

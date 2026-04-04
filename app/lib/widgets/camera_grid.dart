@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../models/camera.dart';
 import '../models/system_status.dart';
@@ -15,6 +16,9 @@ class CameraGrid extends StatelessWidget {
   final ValueChanged<int> onCameraSelected;
   final ValueChanged<Camera> onEditCamera;
   final VoidCallback onAddCamera;
+  final Map<int, Player> livePlayers;
+  final Map<int, VideoController> liveControllers;
+  final int? fullscreenCameraId;
   final Map<int, VideoController> playbackControllers;
   final Set<int> playbackLoading;
   final Set<int> playbackFailed;
@@ -30,6 +34,9 @@ class CameraGrid extends StatelessWidget {
     required this.onCameraSelected,
     required this.onEditCamera,
     required this.onAddCamera,
+    this.livePlayers = const {},
+    this.liveControllers = const {},
+    this.fullscreenCameraId,
     this.playbackControllers = const {},
     this.playbackLoading = const {},
     this.playbackFailed = const {},
@@ -61,6 +68,7 @@ class CameraGrid extends StatelessWidget {
         }
         final cam = cameras[index];
         final url = streamApi.liveUrl(cam.id, streamSource, quality);
+        final isFullscreen = cam.id == fullscreenCameraId;
         return CameraCard(
           camera: cam,
           stream: _streamFor(cam.id),
@@ -68,6 +76,9 @@ class CameraGrid extends StatelessWidget {
           selected: selectedCameraId == cam.id,
           onTap: () => onCameraSelected(cam.id),
           onEdit: () => onEditCamera(cam),
+          livePlayer: livePlayers[cam.id],
+          liveController: liveControllers[cam.id],
+          isFullscreen: isFullscreen,
           playbackController: playbackControllers[cam.id],
           playbackLoading: playbackLoading.contains(cam.id),
           playbackFailed: playbackFailed.contains(cam.id),

@@ -33,6 +33,8 @@ class FullscreenScreen extends StatefulWidget {
   final ValueChanged<bool> onLiveStateChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback? onBack;
+  final Player? livePlayer;
+  final VideoController? liveController;
 
   const FullscreenScreen({
     super.key,
@@ -50,6 +52,8 @@ class FullscreenScreen extends StatefulWidget {
     required this.onLiveStateChanged,
     required this.onStreamSourceChanged,
     this.onBack,
+    this.livePlayer,
+    this.liveController,
   });
 
   @override
@@ -533,6 +537,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param);
       return LivePlayer(
         url: url,
+        player: widget.livePlayer,
+        controller: widget.liveController,
         onPlayerCreated: (p) => _livePlayer = p,
         rotation: rot,
         fit: BoxFit.contain,
@@ -618,7 +624,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   }
 
   Widget _buildStatsBar() {
-    final player = _isLive ? _livePlayer : _pbPlayer;
+    final player = _isLive ? (widget.livePlayer ?? _livePlayer) : _pbPlayer;
     if (player == null) {
       return const SizedBox.shrink();
     }
