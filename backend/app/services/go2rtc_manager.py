@@ -144,10 +144,9 @@ async def _monitor_go2rtc() -> None:
 
         binary_dir = Path(binary).parent
 
-        # Bake only direct streams into config (transcoded registered on-demand)
+        # Bake all streams into config
         streams = await _build_streams_from_db()
-        direct_streams = {k: v for k, v in streams.items() if k.endswith("_direct")}
-        config_path = _generate_go2rtc_config(binary_dir, streams=direct_streams)
+        config_path = _generate_go2rtc_config(binary_dir, streams=streams)
 
         from app.config import get_bootstrap
         log_path = Path(get_bootstrap().data_dir) / "logs" / "go2rtc.log"
@@ -164,11 +163,11 @@ async def _monitor_go2rtc() -> None:
             from app.services.go2rtc_client import notify_go2rtc_restart, get_go2rtc_client
             notify_go2rtc_restart()
 
-            # Cache all streams for on-demand registration
+            # Re-register all streams sequentially
             client = get_go2rtc_client()
-            client._all_streams = streams
+            await client.register_streams_from_config(streams)
 
-            logger.info("go2rtc restarted", extra={"pid": _process.pid, "streams": len(direct_streams)})
+            logger.info("go2rtc restarted", extra={"pid": _process.pid, "streams": len(streams)})
 
         except Exception:
             logger.exception("Failed to restart go2rtc")

@@ -58,24 +58,21 @@ async def lifespan(app: FastAPI):
     # Load enabled cameras for go2rtc config and stream startup
     cameras_list = await _load_enabled_cameras()
 
-    # Build go2rtc streams config — only direct streams baked into config.
-    # Transcoded streams registered on-demand to avoid go2rtc concurrent map crash.
+    # Build go2rtc streams config
     from app.services.go2rtc_client import build_streams_config, get_go2rtc_client
     streams_config = build_streams_config([
         (cam.name, cam.rtsp_url, cam.sub_stream_url) for cam in cameras_list
     ])
-    # Split: direct streams into config, transcoded cached for on-demand
-    direct_streams = {k: v for k, v in streams_config.items() if k.endswith("_direct")}
 
     from app.services.go2rtc_manager import start_go2rtc, stop_go2rtc
-    await start_go2rtc(streams=direct_streams)
+    await start_go2rtc(streams=streams_config)
 
     # Verify go2rtc is reachable (live view depends on it, recording does not)
     await _check_go2rtc_health()
 
-    # Cache all streams (including transcoded) for on-demand registration
+    # Register all streams (serialized to avoid go2rtc concurrent map crash)
     client = get_go2rtc_client()
-    client._all_streams = streams_config
+    await client.register_streams_from_config(streams_config)
 
     # Start recording ffmpeg processes
     await _start_camera_recordings(cameras_list)
