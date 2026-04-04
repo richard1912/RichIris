@@ -14,6 +14,7 @@ import '../services/motion_api.dart';
 import '../services/system_api.dart';
 import '../utils/time_utils.dart';
 import '../utils/format_utils.dart';
+import '../models/playback_ref.dart';
 import '../widgets/live_player.dart';
 import '../widgets/quality_selector.dart';
 import '../widgets/timeline/timeline_widget.dart';
@@ -35,6 +36,11 @@ class FullscreenScreen extends StatefulWidget {
   final VoidCallback? onBack;
   final Player? livePlayer;
   final VideoController? liveController;
+  final PlaybackRef playbackRef;
+  final String? initialPlaybackTime;
+  final Player? initialPbPlayer;
+  final VideoController? initialPbController;
+  final String? initialPlaybackStartTime;
 
   const FullscreenScreen({
     super.key,
@@ -54,6 +60,11 @@ class FullscreenScreen extends StatefulWidget {
     this.onBack,
     this.livePlayer,
     this.liveController,
+    required this.playbackRef,
+    this.initialPlaybackTime,
+    this.initialPbPlayer,
+    this.initialPbController,
+    this.initialPlaybackStartTime,
   });
 
   @override
@@ -81,6 +92,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   // Playback player
   Player? _pbPlayer;
   VideoController? _pbController;
+  bool _adoptedPlayer = false; // true = using grid's player, don't dispose
 
   int _tzOffsetMs = 0;
 
@@ -88,10 +100,31 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   void initState() {
     super.initState();
     _tzOffsetMs = widget.tzOffsetMs;
+    widget.playbackRef.getNvrTime = _getNvrTime;
     // Stats shown by default — start refresh timer
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
+    // Seamless playback handoff: adopt grid's player directly (no new session)
+    if (widget.initialPbPlayer != null) {
+      _adoptedPlayer = true;
+      _pbPlayer = widget.initialPbPlayer;
+      _pbController = widget.initialPbController ?? VideoController(_pbPlayer!);
+      _isLive = false;
+      _playbackStartTime = widget.initialPlaybackStartTime;
+      _playbackUrl = 'adopted';
+      _virtualTimeMs = _playbackStartTime != null
+          ? DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch
+          : 0;
+      widget.playbackRef.isLive = false;
+      widget.onLiveStateChanged(false);
+      // Grid's completed listener handles segment continuation on the shared player
+    } else if (widget.initialPlaybackTime != null) {
+      // Fallback: no shared player available, start fresh session
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _startPlayback(widget.initialPlaybackTime!);
+      });
+    }
   }
 
   @override
@@ -110,7 +143,9 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _clearSpeedTimer();
     _statsTimer?.cancel();
     _seekSub?.cancel();
-    _pbPlayer?.dispose();
+    if (!_adoptedPlayer) {
+      _pbPlayer?.dispose();
+    }
     super.dispose();
   }
 
@@ -136,6 +171,12 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   }
 
   Future<void> _startPlayback(String start) async {
+    // Release adopted player if any — we're creating our own session
+    if (_adoptedPlayer) {
+      _adoptedPlayer = false;
+      _pbPlayer = null;
+      _pbController = null;
+    }
     setState(() {
       _playbackLoading = true;
       _playbackError = null;
@@ -172,6 +213,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         _hasMore = session.hasMore;
         if (_isLive) {
           _isLive = false;
+          widget.playbackRef.isLive = false;
           widget.onLiveStateChanged(false);
         }
         _playbackStartTime = start;
@@ -192,9 +234,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       return;
     }
     _clearSpeedTimer();
-    _pbPlayer?.stop();
+    if (!_adoptedPlayer) {
+      _pbPlayer?.stop();
+    }
+    // Release adopted reference without stopping grid's player
+    _adoptedPlayer = false;
     setState(() {
       _isLive = true;
+      widget.playbackRef.isLive = true;
       widget.onLiveStateChanged(true);
       _paused = false;
       _playbackUrl = null;
@@ -424,6 +471,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               speed: _speed,
               onSpeedChanged: _onSpeedChanged,
               getNvrTime: _getNvrTime,
+              initialDate: widget.initialPlaybackTime?.substring(0, 10),
             ),
           ],
         ),

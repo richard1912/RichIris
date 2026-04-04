@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'config/api_config.dart';
 import 'config/constants.dart';
 import 'models/camera.dart';
+import 'models/playback_ref.dart';
+import 'utils/time_utils.dart';
 import 'models/system_status.dart';
 import 'screens/home_screen.dart';
 import 'screens/fullscreen_screen.dart';
@@ -251,6 +253,17 @@ class _MainNavState extends State<_MainNav> {
   final Map<int, VideoController> _liveControllers = {};
   Quality? _frozenGridQuality; // quality the grid last used; frozen while fullscreen
 
+  // Shared playback state for seamless grid <-> fullscreen transitions
+  final PlaybackRef _gridRef = PlaybackRef();
+  final PlaybackRef _fullscreenRef = PlaybackRef();
+  String? _fullscreenInitialTime;
+  Player? _handoffPlayer;
+  VideoController? _handoffController;
+  String? _handoffStartTime;
+  String? _resumePlaybackTime;
+  int _resumePlaybackGen = 0;
+  int _resumeLiveGen = 0;
+
   @override
   void initState() {
     super.initState();
@@ -264,6 +277,33 @@ class _MainNavState extends State<_MainNav> {
       await widget.onRefreshCameras();
       await widget.onRefreshStatus();
       return mounted;
+    });
+  }
+
+  void _exitFullscreen() {
+    // Transfer fullscreen playback state back to grid
+    if (!_fullscreenRef.isLive && _fullscreenRef.getNvrTime != null) {
+      // Fullscreen was in playback — restart grid at fullscreen's current time
+      // But skip if grid is already playing at approximately the same time
+      final fsTime = _fullscreenRef.getNvrTime!();
+      final gridTime = _gridRef.getNvrTime?.call();
+      final timeDrift = gridTime != null ? (fsTime - gridTime).abs() : double.infinity;
+      if (_gridRef.isLive || timeDrift > 5000) {
+        _resumePlaybackTime = formatLocalISOFromMs(fsTime - widget.tzOffsetMs);
+        _resumePlaybackGen++;
+      }
+    } else if (_fullscreenRef.isLive && !_gridRef.isLive) {
+      // Fullscreen went live but grid is still in playback — make grid go live
+      _resumeLiveGen++;
+    }
+    _fullscreenRef.isLive = true;
+    _fullscreenRef.getNvrTime = null;
+    setState(() {
+      _fullscreenCameraId = null;
+      _fullscreenInitialTime = null;
+      _handoffPlayer = null;
+      _handoffController = null;
+      _handoffStartTime = null;
     });
   }
 
@@ -352,7 +392,7 @@ class _MainNavState extends State<_MainNav> {
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) {
           if (_fullscreenCameraId != null) {
-            setState(() => _fullscreenCameraId = null);
+            _exitFullscreen();
           } else if (_selectedCameraId != null) {
             setState(() => _selectedCameraId = null);
           }
@@ -380,7 +420,26 @@ class _MainNavState extends State<_MainNav> {
             selectedCameraId: _selectedCameraId,
             onCameraSelected: (id) {
               if (_selectedCameraId == id) {
-                setState(() => _fullscreenCameraId = id);
+                // Entering fullscreen — capture grid playback state
+                String? playbackTime;
+                Player? pbPlayer;
+                VideoController? pbController;
+                String? pbStartTime;
+                if (!_gridRef.isLive && _gridRef.getNvrTime != null) {
+                  final nvrMs = _gridRef.getNvrTime!();
+                  playbackTime = formatLocalISOFromMs(nvrMs - widget.tzOffsetMs);
+                  // Hand off the grid's player for seamless transition
+                  pbPlayer = _gridRef.getPlayer?.call(id);
+                  pbController = _gridRef.getController?.call(id);
+                  pbStartTime = _gridRef.playbackStartIso;
+                }
+                setState(() {
+                  _fullscreenCameraId = id;
+                  _fullscreenInitialTime = playbackTime;
+                  _handoffPlayer = pbPlayer;
+                  _handoffController = pbController;
+                  _handoffStartTime = pbStartTime;
+                });
               } else {
                 setState(() => _selectedCameraId = id);
               }
@@ -410,13 +469,17 @@ class _MainNavState extends State<_MainNav> {
               ));
               await widget.onRefreshCameras();
             },
+            playbackRef: _gridRef,
+            resumePlaybackTime: _resumePlaybackTime,
+            resumePlaybackGen: _resumePlaybackGen,
+            resumeLiveGen: _resumeLiveGen,
           ),
         ),
         if (fullscreenCam != null)
           PopScope(
             canPop: false,
             onPopInvokedWithResult: (didPop, _) {
-              if (!didPop) setState(() => _fullscreenCameraId = null);
+              if (!didPop) _exitFullscreen();
             },
             child: FullscreenScreen(
             camera: fullscreenCam,
@@ -434,7 +497,12 @@ class _MainNavState extends State<_MainNav> {
             onQualityChanged: widget.onQualityChanged,
             onLiveStateChanged: widget.onLiveStateChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
-            onBack: () => setState(() => _fullscreenCameraId = null),
+            onBack: _exitFullscreen,
+            playbackRef: _fullscreenRef,
+            initialPlaybackTime: _fullscreenInitialTime,
+            initialPbPlayer: _handoffPlayer,
+            initialPbController: _handoffController,
+            initialPlaybackStartTime: _handoffStartTime,
           )),
       ],
     ));

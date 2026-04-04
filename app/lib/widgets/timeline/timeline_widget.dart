@@ -31,6 +31,8 @@ class TimelineWidget extends StatefulWidget {
   /// Called periodically to get the current NVR time in ms.
   /// Returns null if unknown.
   final int Function()? getNvrTime;
+  /// If set, the timeline starts on this date instead of today.
+  final String? initialDate;
 
   const TimelineWidget({
     super.key,
@@ -47,6 +49,7 @@ class TimelineWidget extends StatefulWidget {
     this.speed,
     this.onSpeedChanged,
     this.getNvrTime,
+    this.initialDate,
   });
 
   @override
@@ -86,7 +89,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   @override
   void initState() {
     super.initState();
-    _ctrl = TimelineController(selectedDate: todayDate(tzOffsetMs: widget.tzOffsetMs));
+    _ctrl = TimelineController(selectedDate: widget.initialDate ?? todayDate(tzOffsetMs: widget.tzOffsetMs));
     _ctrl.addListener(_onCtrlChange);
     _fetchSegments();
     _startPlayheadTimer();
@@ -102,6 +105,10 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       _clips = [];
       _showClips = false;
       _stopClipPolling();
+    }
+    if (widget.initialDate != null && widget.initialDate != oldWidget.initialDate) {
+      _ctrl.setDate(widget.initialDate!);
+      _fetchSegments();
     }
     if (widget.isLive && !oldWidget.isLive) {
       _manualPan = false;
