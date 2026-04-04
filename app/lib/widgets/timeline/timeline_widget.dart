@@ -59,9 +59,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   Timer? _segmentPollTimer;
   Timer? _clipPollTimer;
   bool _manualPan = false;
-  // Playback time tracking — kept here so polling rebuilds can't reset it
-  String? _playbackIso;
-  int? _playbackWallStartMs;
+  /// After a timeline tap, hold the playhead position for a short time so that
+  /// the player has time to load before getNvrTime starts driving it.
+  int _playheadHoldUntilMs = 0;
   String? _hoverTime;
   List<ThumbnailInfo> _thumbnails = [];
   double _lastScale = 1.0;
@@ -105,8 +105,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     }
     if (widget.isLive && !oldWidget.isLive) {
       _manualPan = false;
-      _playbackIso = null;
-      _playbackWallStartMs = null;
+      _playheadHoldUntilMs = 0;
     }
   }
 
@@ -290,13 +289,12 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     _playheadTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
       if (!mounted) return;
       if (_manualPan && widget.isLive) return;
+      // After a timeline tap, hold the playhead in place until the player loads
+      if (DateTime.now().millisecondsSinceEpoch < _playheadHoldUntilMs) return;
       double? hour;
-      if (!widget.isLive && _playbackIso != null && _playbackWallStartMs != null) {
-        // Playback: compute time from local tracking (immune to parent rebuilds)
-        final elapsed = DateTime.now().millisecondsSinceEpoch - _playbackWallStartMs!;
-        final startHour = isoToHour(_playbackIso!);
-        hour = startHour + elapsed / 3600000.0;
-      } else if (widget.getNvrTime != null) {
+      if (widget.getNvrTime != null) {
+        // Use actual player position — stops advancing when stream
+        // freezes, buffers, or fails to load.
         final ms = widget.getNvrTime!();
         final dt = DateTime.fromMillisecondsSinceEpoch(ms);
         hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0;
@@ -376,9 +374,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
 
     _manualPan = true;
     _ctrl.setPlayhead(targetHour);
+    // Hold the playhead at the tapped position for 3s while the player loads
+    _playheadHoldUntilMs = DateTime.now().millisecondsSinceEpoch + 3000;
     final iso = hourToISO(_ctrl.selectedDate, targetHour);
-    _playbackIso = iso;
-    _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
     widget.onPlayback(iso);
   }
 
