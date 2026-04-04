@@ -30,6 +30,9 @@ class HomeScreen extends StatefulWidget {
   final CameraApi cameraApi;
   final SystemApi systemApi;
   final int tzOffsetMs;
+  final Map<int, Player> livePlayers;
+  final Map<int, VideoController> liveControllers;
+  final int? fullscreenCameraId;
   final int? selectedCameraId;
   final ValueChanged<int> onCameraSelected;
   final ValueChanged<Quality> onQualityChanged;
@@ -53,6 +56,9 @@ class HomeScreen extends StatefulWidget {
     required this.cameraApi,
     required this.systemApi,
     required this.tzOffsetMs,
+    required this.livePlayers,
+    required this.liveControllers,
+    this.fullscreenCameraId,
     this.selectedCameraId,
     required this.onCameraSelected,
     required this.onQualityChanged,
@@ -435,6 +441,9 @@ class _HomeScreenState extends State<HomeScreen> {
               onCameraSelected: widget.onCameraSelected,
               onEditCamera: widget.onEditCamera,
               onAddCamera: widget.onAddCamera,
+              livePlayers: _isLive ? widget.livePlayers : const {},
+              liveControllers: _isLive ? widget.liveControllers : const {},
+              fullscreenCameraId: widget.fullscreenCameraId,
               playbackControllers: _isLive ? const {} : _pbControllers,
               playbackLoading: _isLive ? const {} : _pbLoading,
               playbackFailed: _isLive ? const {} : _pbFailed,

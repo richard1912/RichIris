@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../models/camera.dart';
 import '../models/system_status.dart';
@@ -11,6 +12,9 @@ class CameraCard extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback onEdit;
+  final Player? livePlayer;
+  final VideoController? liveController;
+  final bool isFullscreen;
   final VideoController? playbackController;
   final bool playbackLoading;
   final bool playbackFailed;
@@ -23,6 +27,9 @@ class CameraCard extends StatelessWidget {
     this.selected = false,
     required this.onTap,
     required this.onEdit,
+    this.livePlayer,
+    this.liveController,
+    this.isFullscreen = false,
     this.playbackController,
     this.playbackLoading = false,
     this.playbackFailed = false,
@@ -81,12 +88,22 @@ class CameraCard extends StatelessWidget {
                     IgnorePointer(
                       child: _buildPlaybackVideo(),
                     )
+                  else if (camera.enabled && running && isFullscreen)
+                    Container(
+                      color: const Color(0xFF0A0A0A),
+                      child: const Center(
+                        child: Icon(Icons.fullscreen,
+                            color: Color(0xFF525252), size: 32),
+                      ),
+                    )
                   else if (camera.enabled && running)
                     IgnorePointer(
                       child: LivePlayer(
                         url: streamUrl,
                         rotation: camera.rotation,
                         fit: BoxFit.contain,
+                        player: livePlayer,
+                        controller: liveController,
                       ),
                     )
                   else
