@@ -13,6 +13,7 @@ import '../services/clip_api.dart';
 import '../services/motion_api.dart';
 import '../services/system_api.dart';
 import '../models/playback_session.dart';
+import '../models/playback_ref.dart';
 import '../services/camera_api.dart';
 import '../widgets/camera_grid.dart';
 import '../widgets/quality_selector.dart';
@@ -42,6 +43,10 @@ class HomeScreen extends StatefulWidget {
   final VoidCallback onOpenSettings;
   final VoidCallback onAddCamera;
   final ValueChanged<Camera> onEditCamera;
+  final PlaybackRef playbackRef;
+  final String? resumePlaybackTime;
+  final int resumePlaybackGen;
+  final int resumeLiveGen;
 
   const HomeScreen({
     super.key,
@@ -68,6 +73,10 @@ class HomeScreen extends StatefulWidget {
     required this.onOpenSettings,
     required this.onAddCamera,
     required this.onEditCamera,
+    required this.playbackRef,
+    this.resumePlaybackTime,
+    this.resumePlaybackGen = 0,
+    this.resumeLiveGen = 0,
   });
 
   @override
@@ -87,6 +96,52 @@ class _HomeScreenState extends State<HomeScreen> {
   // Shared playback clock — single source of truth for all cameras
   String? _playbackStartIso;
   int? _playbackWallStartMs;
+
+  // Resume state tracking (from fullscreen transitions)
+  int _lastResumePlaybackGen = 0;
+  int _lastResumeLiveGen = 0;
+  String? _timelineDateOverride;
+
+  @override
+  void initState() {
+    super.initState();
+    _setupRef();
+  }
+
+  void _setupRef() {
+    final ref = widget.playbackRef;
+    ref.getNvrTime = _getNvrTime;
+    ref.getPlayer = (id) => _pbPlayers[id];
+    ref.getController = (id) => _pbControllers[id];
+    ref.detachPlayer = (id) {
+      // Remove from maps without disposing — the receiver takes ownership
+      _completedSubs[id]?.cancel();
+      _completedSubs.remove(id);
+      _pbPlayers.remove(id);
+      _pbControllers.remove(id);
+    };
+  }
+
+  void _syncRefState() {
+    widget.playbackRef.playbackStartIso = _playbackStartIso;
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _setupRef();
+    if (widget.resumePlaybackGen != _lastResumePlaybackGen) {
+      _lastResumePlaybackGen = widget.resumePlaybackGen;
+      if (widget.resumePlaybackTime != null) {
+        _timelineDateOverride = widget.resumePlaybackTime!.substring(0, 10);
+        _startPlayback(widget.resumePlaybackTime!);
+      }
+    }
+    if (widget.resumeLiveGen != _lastResumeLiveGen) {
+      _lastResumeLiveGen = widget.resumeLiveGen;
+      if (!_isLive) _goLive();
+    }
+  }
 
   @override
   void dispose() {
@@ -135,6 +190,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isLive = false;
       _paused = false;
+      widget.playbackRef.isLive = false;
       widget.onLiveStateChanged(false);
       _pbLoading.clear();
       _pbFailed.clear();
@@ -163,6 +219,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // Set shared clock ONCE, then open all players simultaneously
     _playbackStartIso = start;
     _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
+    _syncRefState();
 
     for (final entry in sessions.entries) {
       _pbLoading.remove(entry.key);
@@ -186,6 +243,12 @@ class _HomeScreenState extends State<HomeScreen> {
           sub.cancel();
         }
       });
+    }
+
+    // Keep ref session state up-to-date for the selected camera
+    if (cameraId == widget.selectedCameraId) {
+      widget.playbackRef.segmentEnd = session.segmentEnd;
+      widget.playbackRef.hasMore = session.hasMore;
     }
 
     _completedSubs[cameraId]?.cancel();
@@ -258,6 +321,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isLive = true;
       _paused = false;
+      widget.playbackRef.isLive = true;
       widget.onLiveStateChanged(true);
       _pbLoading.clear();
       _pbFailed.clear();
@@ -474,6 +538,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPlayback: _startPlayback,
                 onLive: _goLive,
                 getNvrTime: _getNvrTime,
+                initialDate: _timelineDateOverride,
               ),
             ),
         ],
