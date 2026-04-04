@@ -275,7 +275,12 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                         final ai = e.detectionLabel != null
                             ? '${e.detectionLabel}${e.detectionConfidence != null ? ' ${(e.detectionConfidence! * 100).round()}%' : ''} | '
                             : '';
-                        return '${ai}min sens $minSens';
+                        // Parse startTime to show HH:MM:SS
+                        final dt = DateTime.tryParse(e.startTime);
+                        final ts = dt != null
+                            ? '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}'
+                            : '';
+                        return '${ts.isNotEmpty ? '$ts | ' : ''}${ai}min sens $minSens';
                       }(),
                       style: TextStyle(
                         color: motionColor,
