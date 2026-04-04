@@ -9,10 +9,10 @@ A self-hosted NVR (Network Video Recorder) built with FastAPI and Flutter. Desig
 - **24/7 continuous recording** — HEVC passthrough (no transcode, no GPU usage) into 15-minute `.ts` segments
 - **Live view** — HTTP fMP4 via go2rtc + media_kit (libmpv) with low-latency profile
 - **Multi-quality streams** — Main/Sub stream selection x Direct/High/Low/Ultra Low quality, lazy transcoding (zero resources until a client connects)
-- **Timeline playback** — zoomable 24h timeline, instant fragmented MP4 streaming (< 200ms start), speed controls (-32x to 32x), date picker
+- **Timeline playback** — zoomable 24h timeline, instant fragmented MP4 streaming (< 200ms start), speed controls (1x to 32x), date picker
 - **Trickplay thumbnails** — real-time thumbnail capture via go2rtc frame API, hover/scrub preview on timeline
 - **Motion detection** — snapshot-based frame differencing with per-camera sensitivity, timeline overlay, multiple configurable script pairs with per-category triggers (e.g., run one script for persons, a different script for vehicles)
-- **AI object detection** — YOLO11x on CUDA, gated by motion pre-filter. Per-camera category toggles for persons, vehicles (bicycle/car/motorcycle/bus/truck), and animals (bird/cat/dog/horse/sheep/cow/elephant/bear/zebra/giraffe). Color-coded timeline bars: amber for persons, indigo for vehicles, emerald for animals, gray for motion-only. Falls back to CPU if no GPU available
+- **AI object detection** — YOLO11x on CUDA, gated by motion pre-filter. Per-camera category toggles for persons, vehicles, and animals. Color-coded timeline bars: amber for persons, indigo for vehicles, emerald for animals, gray for motion-only. Falls back to CPU if no GPU available
 - **Clip export** — select a time range on the timeline and export an MP4 clip
 - **Retention management** — configurable max age (days) and max storage (GB), oldest recordings purged first
 - **Multi-camera grid** — click to select, click again for fullscreen with timeline
