@@ -3,26 +3,40 @@ update claude md as needed for code changes
 ## Quick Reference
 - **Backend**: Runs as Windows service `RichIris` via NSSM (FastAPI on port 8700)
 - **Restart**: `nssm restart RichIris`
-- **go2rtc**: Runs as Windows service `go2rtc` via NSSM (port 1984, MSE/WebSocket live view)
-- **Restart go2rtc**: `nssm restart go2rtc`
-- **Config**: `config.yaml` (cameras, storage paths, ffmpeg settings, go2rtc)
-- **Recordings**: `G:\RichIris` (segment files per camera per day, named `Camera 1 2026-03-08 13.30 - 13.45.ts`)
-- **Database**: `data/richiris.db` (SQLite, auto-created on first run)
+- **go2rtc**: Managed as child process of backend (auto-starts/stops with RichIris). Falls back to external service if already running.
+- **Config**: `bootstrap.yaml` (data_dir + port only). All other settings in SQLite `settings` table, editable via GUI (System Settings screen) or `GET/PUT /api/settings`.
+- **Legacy**: `config.yaml` still supported — migrated to DB on first startup (one-time, idempotent).
+- **Data directory**: `data_dir` (bootstrap.yaml) holds all data in structured subdirectories. Changeable from System Settings screen (with optional move/copy migration). Requires service restart.
+  ```
+  {data_dir}/
+  ├── database/richiris.db    # SQLite database
+  ├── logs/                   # Application logs
+  ├��─ recordings/{camera}/    # Recording .ts files per camera per day
+  ├── thumbnails/{camera}/    # Trickplay + detection thumbnails per camera per day
+  └── playback/               # Transient transcoded MP4s (auto-cleaned after 30s idle)
+  ```
+- **Recordings**: Configurable via settings (default `{data_dir}/recordings`), stored per camera per day as `Camera 1 2026-03-08 13.30 - 13.45.ts`. Location changeable at runtime via storage migration dialog.
+- **Thumbnails**: Stored in `{data_dir}/thumbnails/{camera}/{date}/thumbs/` (separate from recordings). Detection thumbnails in `detection_thumbs/` subdir.
+- **Database**: `{data_dir}/database/richiris.db` (SQLite, auto-created on first run). Auto-migrates from old `{data_dir}/richiris.db` location on startup.
+- **Playback cache**: `{data_dir}/playback/` (transient transcoded MP4s, auto-cleaned after 30s idle).
 - **App**: Flutter app in `app/` (Windows + Android)
 - **App build (Windows)**: `cd app && flutter build windows --release` → `app/build/windows/x64/runner/Release/`
 - **App build (Android)**: `cd app && flutter build apk --release` → `app/build/app/outputs/flutter-apk/`
+- **Release build**: `build_release.bat` (PyInstaller backend + Flutter app + bundled deps)
+- **Installer**: `installer/richiris.iss` (Inno Setup — produces setup.exe)
 - **API docs**: http://localhost:8700/docs
+- **Binary resolution**: ffmpeg/ffprobe resolved in order: bundled `dependencies/` → system PATH → DB setting
 
 ## Architecture
 ```
 Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTSP sub-stream
                           → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
                                     |                    |
-                                SQLite DB         G:\RichIris (recordings)
-                                                  data\playback\ (remux cache)
+                          {data_dir}\database\       {data_dir}\recordings\
+                          {data_dir}\thumbnails\     {data_dir}\playback\
 ```
 
-- One ffmpeg process per camera for recording (always on). Live view handled by go2rtc (separate service).
+- One ffmpeg process per camera for recording (always on). Live view handled by go2rtc (child process of backend, or separate service in dev mode).
 - Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments are renamed by the scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts` after completion. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
 - **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
 - **Live view (HTTP fMP4)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
@@ -69,7 +83,7 @@ RichIris/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI app + lifespan
-│   │   ├── config.py            # Settings from config.yaml
+│   │   ├── config.py            # Bootstrap config + DB settings loader
 │   │   ├── logging_config.py    # structlog setup
 │   │   ├── database.py          # SQLAlchemy async engine
 │   │   ├── models.py            # Camera, Recording, ClipExport
@@ -78,6 +92,8 @@ RichIris/
 │   │   │   ├── cameras.py       # CRUD /api/cameras
 │   │   │   ├── clips.py         # Clip export /api/clips (no duration limit)
 │   │   │   ├── recordings.py    # Playback /api/recordings + transcode sessions
+│   │   │   ├── settings.py      # GET/PUT /api/settings (system config)
+│   │   │   ├── storage.py       # Storage migration /api/storage (validate, migrate, finalize)
 │   │   │   ├── streams.py       # go2rtc stream info /api/streams/{id}/live
 │   │   │   ├── system.py        # /api/system/status + storage + retention
 │   │   │   └── motion.py        # /api/motion events
@@ -85,11 +101,14 @@ RichIris/
 │   │       ├── ffmpeg.py              # Command builder (recording only)
 │   │       ├── stream_manager.py      # FFmpeg recording process lifecycle + go2rtc registration
 │   │       ├── go2rtc_client.py       # REST client for go2rtc stream management
+│   │       ├── go2rtc_manager.py      # go2rtc lifecycle (start/stop as child process)
 │   │       ├── recorder.py            # Segment scanner + DB registration
 │   │       ├── clip_exporter.py       # Clip export (concat segments → MP4)
 │   │       ├── playback.py            # On-demand HEVC NVENC transcode for playback
+│   │       ├── settings.py            # DB-backed settings CRUD + defaults + seeding
 │   │       ├── thumbnail_capture.py   # Real-time RTSP thumbnail capture
 │   │       ├── retention.py           # Age + storage-based retention cleanup
+│   │       ├── storage_migration.py  # Recordings dir migration (validate, copy/move, progress)
 │   │       ├── motion_detector.py    # OpenCV frame-diff motion detection
 │   │       └── object_detector.py    # YOLO AI person detection (GPU)
 │   ├── requirements.txt
@@ -104,19 +123,23 @@ RichIris/
 │   │   ├── theme.dart           # Dark theme
 │   │   ├── config/              # API config, quality tiers, constants
 │   │   ├── models/              # Data classes (Camera, RecordingSegment, etc.)
-│   │   ├── services/            # API layer (Dio HTTP client)
-│   │   ├── screens/             # Home, Fullscreen, System, Settings, CameraForm
-│   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector
+│   │   ├── services/            # API layer (Dio HTTP client) + settings_api.dart
+│   │   ├── screens/             # Home, Fullscreen, System, Settings, SystemSettings, CameraForm
+│   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector, StorageMigrationDialog
 │   │   │   └── timeline/        # CustomPainter timeline (controller, painter, minimap)
 │   │   └── utils/               # Time/format utilities
 │   └── pubspec.yaml             # Dependencies: media_kit, dio, shared_preferences
-├── config.yaml                  # Main configuration (cameras, paths)
-├── rebuild.bat                  # Full rebuild (Windows + Android)
-├── start.bat                    # Quick launcher
+├── bootstrap.yaml               # Minimal config (data_dir + port)
+├── config.yaml                  # Legacy config (migrated to DB on first run)
+├── build_release.bat            # Full release build (PyInstaller + Flutter + deps)
+├── rebuild.bat                  # Quick rebuild (Windows + Android dev)
+├── start.bat                    # Quick launcher (dev)
 ├── service-install.bat          # Install Windows service
 ├── service-uninstall.bat
 ├── service-restart.bat
-└── data/                        # gitignored: DB + playback cache
+├── installer/
+│   └── richiris.iss             # Inno Setup installer script
+└── data/                        # gitignored: DB + playback cache + logs
 ```
 
 ## Code Style
@@ -124,7 +147,7 @@ RichIris/
 - Verbose structured logging via `structlog` (JSON in prod, console in dev)
 - Each module gets `logger = logging.getLogger(__name__)`
 - Pass structured fields via `extra={}` dicts — `ExtraAdder` promotes them to `key=value` output
-- Root logger at INFO (third-party noise suppressed); `app.*` loggers at config.yaml level (DEBUG by default)
+- Root logger at INFO (third-party noise suppressed); `app.*` loggers at configured level (DEBUG by default)
 - httpx/httpcore silenced to WARNING (prevents binary fMP4 trace spam)
 - ffmpeg stderr: banner logged once at INFO on startup, then only warning/error lines
 - Log entry/exit, parameters, and outcomes for significant operations
@@ -142,6 +165,11 @@ RichIris/
 - `GET /api/system/storage` - Disk usage, per-camera recording stats
 - `GET /api/system/logs?minutes=10` - Recent log lines (plain text, last N minutes)
 - `POST /api/system/retention/run` - Manually trigger retention cleanup
+- `GET /api/system/data-dir` - Current data directory path, size, free space, subdirectory info
+- `POST /api/system/data-dir/validate` - Validate target path for data directory migration
+- `POST /api/system/data-dir` - Change data directory `{path, mode: "move"|"copy"|"path_only"}`, returns restart_required
+- `GET /api/settings` - All system settings grouped by category (with requires_restart flags)
+- `PUT /api/settings` - Update settings `{settings: {key: value}}`, returns restart_required flag
 - `GET /api/health` - Health check
 - `POST /api/clips` - Create clip export (camera_id, start_time, end_time, no duration limit)
 - `GET /api/clips` - List clips (optional ?camera_id=)
@@ -151,6 +179,12 @@ RichIris/
 - `GET /api/recordings/{id}/thumbnails?date=YYYY-MM-DD` - Thumbnail metadata for a date (individual JPEGs)
 - `GET /api/recordings/{id}/thumb/{date}/{filename}` - Serve individual thumbnail JPEG (cached 24h)
 - `GET /api/motion/{id}/events?date=YYYY-MM-DD` - Motion events for a camera on a date
+- `POST /api/storage/validate` - Validate target path for recordings migration (writable, free space, source size)
+- `POST /api/storage/migrate` - Start recordings migration (stops streams, copies/moves files). Body: `{target_path, mode: "move"|"copy"}`
+- `GET /api/storage/migrate/{id}/progress` - Poll migration progress (files/bytes done, status, current_file)
+- `POST /api/storage/migrate/{id}/cancel` - Cancel in-progress migration
+- `POST /api/storage/migrate/{id}/finalize` - Finalize migration (update settings, restart streams)
+- `POST /api/storage/update-path` - Change recordings path without migrating files
 
 ## App UI Flow
 - **Grid page**: Click camera → selects it (blue ring), shows timeline at bottom. Click same camera again → fullscreen.
@@ -163,10 +197,11 @@ RichIris/
 ## Key Dependencies
 - **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy, ultralytics (YOLOv8)
 - **Service**: NSSM (installed via `winget install NSSM.NSSM`)
-- **Live view**: go2rtc (Go binary, RTSP → HTTP fMP4, installed as Windows service)
+- **Live view**: go2rtc (Go binary, RTSP → HTTP fMP4, managed as child process of backend)
+- **Packaging**: PyInstaller (backend → standalone exe), Inno Setup (installer)
 
 ## Cameras
-6 cameras configured in config.yaml on 192.168.8.41-46. Streams are RTSP, codec is HEVC (H.265) at 4K (3840x2160). Sub-streams are H.264 (used by go2rtc for zero-transcode live view).
+6 cameras configured in config.yaml on 192.168.8.42-47. Streams are RTSP, codec is HEVC (H.265) at 4K (3840x2160). Sub-streams are HEVC (H.265) for HTMS cameras (42,44,45,46,47) and H.264 for Reolink (43).
 
 ## Implementation Phases
 1. Foundation + Recording (DONE)
@@ -181,3 +216,6 @@ RichIris/
 10. Flutter native app - Windows + Android app with media_kit, quality selection, timeline interactions (DONE)
 11. Motion detection - OpenCV frame differencing on sub-streams, per-camera sensitivity, timeline overlay, script execution (DONE)
 12. AI object detection - YOLO11x GPU inference gated by motion pre-filter, per-camera category toggles (person/vehicle/animal) + confidence threshold, color-coded timeline (DONE)
+13. Distribution readiness - DB-backed settings (replaced config.yaml), bootstrap.yaml, GUI system settings, dependency bundling, go2rtc child process management, PyInstaller packaging, Inno Setup installer (DONE)
+14. Configurable storage location - Installer data dir picker, runtime recordings dir migration (move/copy/path-only) via Settings screen, playback cache path fix (DONE)
+15. Data directory restructure - Structured `{data_dir}/` with database/, logs/, recordings/, thumbnails/, playback/ subdirs. Thumbnails separated from recordings. DB in own subdir with auto-migration. Data dir changeable from System Settings with move/copy/path-only migration. Installer always writes bootstrap.yaml with user's chosen data dir. (DONE)

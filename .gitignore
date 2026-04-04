@@ -27,11 +27,25 @@ Desktop.ini
 .env
 *.env
 config.yaml
+bootstrap.yaml
 go2rtc/go2rtc.yaml
 go2rtc/go2rtc.exe
 
+# Build cache (auto-downloaded dependencies)
+.build-cache/
+
+# Bundled dependencies (binaries downloaded at build time)
+dependencies/
+
 # Logs
 *.log
+
+# Debug output
+backend/run_err*.txt
+backend/run_out*.txt
+
+# Separate projects
+Camera Light Control/
 
 # ML models
 *.pt

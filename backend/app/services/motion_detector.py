@@ -84,6 +84,8 @@ class MotionDetector:
         self._running = True
         self._client = httpx.AsyncClient(timeout=FRAME_TIMEOUT)
         cfg = get_config().go2rtc
+        # Stagger camera starts to avoid concurrent go2rtc stream creation
+        stagger_delay = 0
         for cam in cameras:
             if cam.motion_sensitivity > 0 and (cam.sub_stream_url or cam.rtsp_url):
                 url = _snapshot_url(cam.name, cfg.host, cfg.port)
@@ -97,9 +99,11 @@ class MotionDetector:
                         ai_detect_vehicles=cam.ai_detect_vehicles,
                         ai_detect_animals=cam.ai_detect_animals,
                         ai_threshold=cam.ai_confidence_threshold / 100.0,
+                        startup_delay=stagger_delay,
                     )
                 )
                 self._tasks[cam.id] = task
+                stagger_delay += 2
         if self._tasks:
             logger.info("Motion detector started", extra={"cameras": len(self._tasks)})
 
@@ -154,8 +158,11 @@ class MotionDetector:
 
     async def _fetch_frame(self, url: str) -> np.ndarray | None:
         """Fetch a JPEG snapshot from go2rtc and decode it."""
+        from app.services.go2rtc_client import get_snapshot_semaphore, wait_for_go2rtc_ready
         try:
-            resp = await self._client.get(url)
+            await wait_for_go2rtc_ready()
+            async with get_snapshot_semaphore():
+                resp = await self._client.get(url)
             if resp.status_code != 200:
                 return None
             return cv2.imdecode(np.frombuffer(resp.content, np.uint8), cv2.IMREAD_COLOR)
@@ -169,8 +176,11 @@ class MotionDetector:
         ai_detect_persons: bool = True, ai_detect_vehicles: bool = False,
         ai_detect_animals: bool = False,
         ai_threshold: float = 0.5,
+        startup_delay: float = 0,
     ) -> None:
         """Per-camera detection loop: snapshot → motion check → YOLO → event."""
+        if startup_delay > 0:
+            await asyncio.sleep(startup_delay)
         threshold_pct = (101 - sensitivity) * 0.05
         consecutive_failures = 0
         last_heartbeat = datetime.now()
@@ -194,7 +204,9 @@ class MotionDetector:
                             "Failed to fetch snapshot",
                             extra={"camera": cam_name, "consecutive_failures": consecutive_failures},
                         )
-                    await asyncio.sleep(POLL_INTERVAL)
+                    # Exponential backoff: 1s, 2s, 4s, 8s, max 15s
+                    backoff = min(POLL_INTERVAL * (2 ** min(consecutive_failures - 1, 4)), 15)
+                    await asyncio.sleep(backoff)
                     continue
 
                 consecutive_failures = 0
@@ -287,7 +299,7 @@ class MotionDetector:
             tp = config.trickplay
             safe_name = sanitize_camera_name(cam_name)
             date_str = now.strftime("%Y-%m-%d")
-            thumb_dir = Path(config.storage.recordings_dir) / safe_name / date_str / "detection_thumbs"
+            thumb_dir = Path(config.storage.thumbnails_dir) / safe_name / date_str / "detection_thumbs"
             thumb_dir.mkdir(parents=True, exist_ok=True)
             filename = f"detect_{now.strftime('%H%M%S_%f')}.jpg"
             path = thumb_dir / filename

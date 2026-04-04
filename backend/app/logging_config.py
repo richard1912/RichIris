@@ -80,7 +80,9 @@ def _configure_root_logger(formatter: logging.Formatter, level: int) -> None:
     root.addHandler(stdout_handler)
 
     # File output (for service running in background)
-    log_dir = Path(__file__).parent.parent.parent / "data" / "logs"
+    from app.config import get_bootstrap
+    bootstrap = get_bootstrap()
+    log_dir = Path(bootstrap.data_dir) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "richiris.log"
 

@@ -29,7 +29,7 @@ RichIris is a custom-built NVR (Network Video Recorder). It runs natively on Win
                      │       │                                     │
                      │  ┌─────────────────────┐                    │
                      │  │  IP Cameras (6x)    │                    │
-                     │  │  192.168.8.41-46    │                    │
+                     │  │  192.168.8.42-47    │                    │
                      │  │  RTSP streams       │                    │
                      │  └─────────────────────┘                    │
                      └─────────────────────────────────────────────┘
@@ -123,4 +123,4 @@ Flutter (Windows + Android) with media_kit (libmpv) for video playback.
 
 ## Network
 
-6 IP cameras on local network (192.168.8.41-46), RTSP streams. HEVC (H.265) at 4K (3840x2160) main stream, H.264 sub-stream.
+6 IP cameras on local network (192.168.8.42-47), RTSP streams. HEVC (H.265) at 4K (3840x2160) main stream, HEVC sub-stream (HTMS cameras) / H.264 sub-stream (Reolink).

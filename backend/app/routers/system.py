@@ -2,15 +2,19 @@
 
 import logging
 import re
+import shutil
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+import yaml
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_tz
+from app.config import get_bootstrap, get_config, get_tz, get_app_dir
 from app.database import get_db
 from app.models import Camera
 from app.schemas import RetentionResult, StorageStats, StreamStatus, SystemStatus
@@ -84,7 +88,8 @@ async def run_retention(db: AsyncSession = Depends(get_db)):
 @router.get("/logs", response_class=PlainTextResponse)
 async def get_recent_logs(minutes: int = Query(default=10, ge=1, le=60)):
     """Return log lines from the last N minutes."""
-    log_file = Path(__file__).resolve().parent.parent.parent.parent / "data" / "logs" / "richiris.log"
+    from app.config import get_bootstrap
+    log_file = Path(get_bootstrap().data_dir) / "logs" / "richiris.log"
     if not log_file.exists():
         return PlainTextResponse("No log file found.", status_code=404)
 
@@ -116,3 +121,200 @@ async def get_recent_logs(minutes: int = Query(default=10, ge=1, le=60)):
     cleaned = [ansi_escape.sub("", line) for line in reversed(lines)]
 
     return PlainTextResponse("".join(cleaned) if cleaned else f"No logs in the last {minutes} minutes.")
+
+
+# ---------------------------------------------------------------------------
+# Data directory management
+# ---------------------------------------------------------------------------
+
+class DataDirUpdateRequest(BaseModel):
+    path: str
+    mode: str = "path_only"  # "move", "copy", or "path_only"
+
+
+@router.get("/data-dir")
+async def get_data_dir():
+    """Return the current data directory path and subdirectory info."""
+    bootstrap = get_bootstrap()
+    data_dir = Path(bootstrap.data_dir)
+
+    subdirs = {}
+    for name in ("database", "logs", "recordings", "thumbnails", "playback"):
+        sub = data_dir / name
+        subdirs[name] = {
+            "path": str(sub),
+            "exists": sub.exists(),
+        }
+
+    # Disk usage
+    free_gb = 0.0
+    try:
+        usage = shutil.disk_usage(str(data_dir))
+        free_gb = round(usage.free / (1024 ** 3), 2)
+    except Exception:
+        pass
+
+    # Total data size
+    total_bytes = 0
+    if data_dir.exists():
+        try:
+            for entry in data_dir.rglob("*"):
+                if entry.is_file():
+                    total_bytes += entry.stat().st_size
+        except Exception:
+            pass
+
+    return {
+        "data_dir": str(data_dir),
+        "free_space_gb": free_gb,
+        "total_size_gb": round(total_bytes / (1024 ** 3), 2),
+        "subdirs": subdirs,
+    }
+
+
+@router.post("/data-dir/validate")
+async def validate_data_dir(body: DataDirUpdateRequest):
+    """Validate a target path for data directory migration."""
+    bootstrap = get_bootstrap()
+    source = Path(bootstrap.data_dir)
+    target = Path(body.path)
+
+    result = {
+        "valid": False,
+        "error": "",
+        "free_space_gb": 0.0,
+        "source_size_gb": 0.0,
+    }
+
+    # Reject same path
+    try:
+        if source.resolve() == target.resolve():
+            result["error"] = "Target is the same as the current data directory."
+            return result
+    except Exception:
+        pass
+
+    # Check parent exists
+    if not target.parent.exists():
+        result["error"] = f"Parent directory does not exist: {target.parent}"
+        return result
+
+    # Create target dir if needed
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        result["error"] = f"Cannot create directory: {e}"
+        return result
+
+    # Write test
+    try:
+        test_file = target / f".richiris_write_test_{uuid.uuid4().hex[:8]}"
+        test_file.write_bytes(b"write_test")
+        test_file.unlink()
+    except Exception as e:
+        result["error"] = f"Directory is not writable: {e}"
+        return result
+
+    # Free space
+    try:
+        usage = shutil.disk_usage(str(target))
+        result["free_space_gb"] = round(usage.free / (1024 ** 3), 2)
+    except Exception:
+        pass
+
+    # Source size
+    total_bytes = 0
+    if source.exists():
+        try:
+            for entry in source.rglob("*"):
+                if entry.is_file():
+                    total_bytes += entry.stat().st_size
+        except Exception:
+            pass
+    result["source_size_gb"] = round(total_bytes / (1024 ** 3), 2)
+
+    result["valid"] = True
+    return result
+
+
+@router.post("/data-dir")
+async def update_data_dir(body: DataDirUpdateRequest):
+    """Change the data directory.
+
+    Modes:
+    - path_only: Just update bootstrap.yaml (user moved files manually or starting fresh)
+    - move: Copy all data to new location, then delete old
+    - copy: Copy all data to new location, keep old
+
+    Returns restart_required=True — the service MUST be restarted for the change to take effect.
+    """
+    if body.mode not in ("move", "copy", "path_only"):
+        raise HTTPException(400, "mode must be 'move', 'copy', or 'path_only'")
+
+    bootstrap = get_bootstrap()
+    source = Path(bootstrap.data_dir)
+    target = Path(body.path)
+
+    # Validate
+    try:
+        if source.resolve() == target.resolve():
+            raise HTTPException(400, "Target is the same as the current data directory.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    # Create target subdirectories
+    for subdir in ("database", "logs", "recordings", "thumbnails", "playback"):
+        (target / subdir).mkdir(parents=True, exist_ok=True)
+
+    # Migrate files if requested
+    if body.mode in ("move", "copy"):
+        logger.info("Starting data directory migration",
+                     extra={"source": str(source), "target": str(target), "mode": body.mode})
+        try:
+            for subdir in ("database", "logs", "recordings", "thumbnails", "playback"):
+                src_sub = source / subdir
+                dst_sub = target / subdir
+                if not src_sub.exists():
+                    continue
+                for item in src_sub.rglob("*"):
+                    if item.is_file():
+                        rel = item.relative_to(src_sub)
+                        dest = dst_sub / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(item), str(dest))
+
+            if body.mode == "move":
+                for subdir in ("database", "logs", "recordings", "thumbnails", "playback"):
+                    src_sub = source / subdir
+                    if src_sub.exists():
+                        try:
+                            shutil.rmtree(str(src_sub))
+                        except Exception:
+                            logger.warning("Failed to remove source subdirectory",
+                                         extra={"path": str(src_sub)})
+
+            logger.info("Data directory migration completed",
+                         extra={"target": str(target), "mode": body.mode})
+        except Exception as e:
+            logger.exception("Data directory migration failed")
+            raise HTTPException(500, f"Migration failed: {e}")
+
+    # Update bootstrap.yaml
+    app_dir = get_app_dir()
+    bootstrap_path = app_dir / "bootstrap.yaml"
+    new_data_dir = str(target).replace("\\", "/")
+    try:
+        bootstrap_data = {"data_dir": new_data_dir, "port": bootstrap.port}
+        with open(bootstrap_path, "w") as f:
+            yaml.dump(bootstrap_data, f, default_flow_style=False)
+        logger.info("Updated bootstrap.yaml", extra={"data_dir": new_data_dir})
+    except Exception as e:
+        raise HTTPException(500, f"Failed to update bootstrap.yaml: {e}")
+
+    return {
+        "updated": True,
+        "data_dir": new_data_dir,
+        "restart_required": True,
+    }

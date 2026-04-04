@@ -74,9 +74,8 @@ class StreamManager:
             self._watchdog(camera_id)
         )
 
-        # Register with go2rtc for live view
-        client = get_go2rtc_client()
-        await client.register_stream(camera_name, rtsp_url, sub_stream_url)
+        # go2rtc streams are baked into go2rtc.yaml at startup — no need to
+        # register via API here. API-registered streams get wiped on config reload.
 
         logger.info("Recording stream started", extra={"camera_id": camera_id, "camera": camera_name})
 
@@ -136,7 +135,8 @@ class StreamManager:
                 },
             )
 
-            await asyncio.sleep(min(5 * info.restart_count, 30))
+            # Exponential backoff: 5s, 10s, 20s, 40s, max 60s
+            await asyncio.sleep(min(5 * (2 ** min(info.restart_count - 1, 4)), 60))
             if not self._running:
                 break
 
