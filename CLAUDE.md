@@ -22,8 +22,9 @@ update claude md as needed for code changes
 - **App**: Flutter app in `app/` (Windows + Android)
 - **App build (Windows)**: `cd app && flutter build windows --release` → `app/build/windows/x64/runner/Release/`
 - **App build (Android)**: `cd app && flutter build apk --release` → `app/build/app/outputs/flutter-apk/`
-- **Release build**: `build_release.bat` (PyInstaller backend + Flutter app + bundled deps)
-- **Installer**: `installer/richiris.iss` (Inno Setup — produces setup.exe)
+- **Release build**: `build_release.bat` (full, bundles all deps) or `build_release.bat --slim` (deps downloaded at install time)
+- **Dev setup**: `setup_dev.bat` (downloads all external dependencies into `dependencies/`)
+- **Installer**: `installer/richiris.iss` (Inno Setup — `ISCC richiris.iss` for full offline, `ISCC /DSLIM richiris.iss` for slim online)
 - **API docs**: http://localhost:8700/docs
 - **Binary resolution**: ffmpeg/ffprobe resolved in order: bundled `dependencies/` → system PATH → DB setting
 
@@ -114,7 +115,6 @@ RichIris/
 │   ├── requirements.txt
 │   └── run.py                   # Uvicorn entry point (dev)
 ├── go2rtc/
-│   ├── go2rtc.exe               # go2rtc binary (RTSP → MSE/WebSocket)
 │   └── go2rtc.yaml              # go2rtc config (generated at startup, all streams baked in)
 ├── app/                         # Flutter app (Windows + Android)
 │   ├── lib/
@@ -137,6 +137,12 @@ RichIris/
 ├── service-install.bat          # Install Windows service
 ├── service-uninstall.bat
 ├── service-restart.bat
+├── dependencies/                # gitignored: all external binaries
+│   ├── ffmpeg.exe               # FFmpeg (recording, transcode)
+│   ├── ffprobe.exe              # FFprobe (codec/bitrate probing)
+│   ├── nssm.exe                 # Windows service manager
+│   ├── go2rtc/go2rtc.exe        # RTSP → HTTP fMP4
+│   └── models/yolo11x.onnx      # YOLO11x ONNX model (218 MB)
 ├── installer/
 │   └── richiris.iss             # Inno Setup installer script
 └── data/                        # gitignored: DB + playback cache + logs
@@ -199,6 +205,7 @@ RichIris/
 - **Service**: NSSM (installed via `winget install NSSM.NSSM`)
 - **Live view**: go2rtc (Go binary, RTSP → HTTP fMP4, managed as child process of backend)
 - **Packaging**: PyInstaller (backend → standalone exe), Inno Setup (installer)
+- **All external binaries in `dependencies/`**: ffmpeg.exe, ffprobe.exe, nssm.exe, go2rtc/go2rtc.exe, models/yolo11x.onnx (gitignored, ~388 MB total). `build_release.bat` copies from here — no downloads during build.
 
 ## Cameras
 6 cameras configured in config.yaml on 192.168.8.42-47. Streams are RTSP, codec is HEVC (H.265) at 4K (3840x2160). Sub-streams are HEVC (H.265) for HTMS cameras (42,44,45,46,47) and H.264 for Reolink (43).

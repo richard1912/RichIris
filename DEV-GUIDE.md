@@ -7,11 +7,9 @@
 | Python | 3.12+ | [python.org](https://www.python.org/downloads/) |
 | Flutter | 3.41+ (stable) | [flutter.dev](https://docs.flutter.dev/get-started/install/windows/desktop) |
 | Visual Studio Build Tools | 2022+ | Required by Flutter for Windows desktop builds |
-| ffmpeg + ffprobe | 7.x | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) — add to PATH |
-| go2rtc | 1.9+ | [github.com/AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc/releases) — add to PATH |
 | Git | any | [git-scm.com](https://git-scm.com/) |
 
-**Optional (for AI detection):** NVIDIA GPU with CUDA support. Falls back to CPU if unavailable.
+**Optional (for AI detection):** GPU with DirectML support (NVIDIA, AMD, or Intel). Falls back to CPU if unavailable.
 
 ## Getting Started
 
@@ -20,14 +18,30 @@ git clone https://github.com/richard-ferretti/richiris.git
 cd richiris
 ```
 
-### Backend setup
+### One-command setup
 
 ```bash
-cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+setup_dev.bat
 ```
+
+This automatically downloads all external dependencies into `dependencies/` and installs Python packages:
+
+```
+dependencies/
+├── ffmpeg.exe          FFmpeg 7.1.1
+├── ffprobe.exe         FFprobe 7.1.1
+├── nssm.exe            NSSM service manager
+├── go2rtc/
+│   └── go2rtc.exe      go2rtc 1.9.14
+└── models/
+    └── yolo11x.onnx    YOLO11x ONNX model (218 MB)
+```
+
+The YOLO model step requires `pip install ultralytics` (for the one-time `.pt` to `.onnx` export). It is not needed at runtime.
+
+To update a dependency version, edit the version variables at the top of `setup_dev.bat`, delete the old binary from `dependencies/`, and re-run.
+
+### Bootstrap config
 
 Create `bootstrap.yaml` in the project root:
 
@@ -98,9 +112,16 @@ richiris/
 │   │   ├── widgets/         # Reusable components (grid, player, timeline)
 │   │   └── utils/           # Helpers
 │   └── pubspec.yaml
-├── go2rtc/            # go2rtc config (binary is gitignored)
+├── dependencies/      # External binaries (gitignored, populated by setup_dev.bat)
+│   ├── ffmpeg.exe
+│   ├── ffprobe.exe
+│   ├── nssm.exe
+│   ├── go2rtc/go2rtc.exe
+│   └── models/yolo11x.onnx
+├── go2rtc/            # go2rtc config (generated at runtime)
 │   └── go2rtc.yaml
 ├── bootstrap.yaml     # Minimal runtime config (gitignored)
+├── setup_dev.bat      # One-command dev setup (downloads dependencies)
 ├── build_release.bat  # Full release build script
 └── installer/
     └── richiris.iss   # Inno Setup installer script
@@ -152,25 +173,33 @@ Key areas:
 
 ### Full build (backend + frontend + installer)
 
+Requires all dependencies in `dependencies/` (run `setup_dev.bat` first).
+
 ```bash
 build_release.bat
 ```
 
 This will:
-1. Auto-download ffmpeg, go2rtc, and NSSM to `.build-cache/` (first run only)
+1. Verify all dependencies are present in `dependencies/`
 2. Build the backend with PyInstaller
 3. Build the Flutter Windows app
 4. Assemble everything into `dist/richiris/`
 5. Verify all files are present
 
-Then build the installer:
-```bash
-"C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\richiris.iss
-```
+### Creating the installer
 
-Output: `dist/RichIris-Setup-1.0.0.exe`
+Two modes — same ISS file:
 
-To upgrade a dependency version, edit the version variables at the top of `build_release.bat` and delete the old binary from `.build-cache/`.
+| Mode | Command | Size | Internet required at install? |
+|------|---------|------|-------------------------------|
+| Full (offline) | `ISCC.exe installer\richiris.iss` | ~300 MB | No |
+| Slim (online) | `ISCC.exe /DSLIM installer\richiris.iss` | ~150 MB | Yes |
+
+For slim mode, build with `build_release.bat --slim` first (skips bundling large deps).
+
+The slim installer downloads ffmpeg, go2rtc, and the YOLO model at install time. If a download fails, the installer warns but continues — the NVR works without the YOLO model (no AI detection), but requires ffmpeg and go2rtc.
+
+Output: `dist/RichIris-Setup-1.0.0.exe` (full) or `dist/RichIris-Setup-1.0.0-online.exe` (slim)
 
 ### Android APK (client only)
 
@@ -185,7 +214,7 @@ The APK is a standalone client — it connects to a RichIris server over the net
 
 ## Debugging Tips
 
-- **Backend logs**: Check the terminal output, or `data/richiris.log` when running as a service
+- **Backend logs**: Check the terminal output, or `{data_dir}/logs/` when running as a service
 - **Service logs**: `C:\ProgramData\RichIris\logs\service-stdout.log` / `service-stderr.log`
 - **API explorer**: http://localhost:8700/docs
 - **go2rtc UI**: http://localhost:1984 (when running)

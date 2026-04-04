@@ -8,77 +8,44 @@ echo.
 
 set "ROOT=%~dp0"
 set "DIST=%ROOT%dist\richiris"
-set "DL_CACHE=%ROOT%.build-cache"
 
-:: Dependency versions (update these when upgrading)
-set "FFMPEG_VERSION=7.1.1"
-set "GO2RTC_VERSION=1.9.14"
+:: Local dependencies directory (all binaries managed here)
+set "DEPS=%ROOT%dependencies"
 
-:: Download URLs
-set "FFMPEG_URL=https://github.com/GyanD/codexffmpeg/releases/download/%FFMPEG_VERSION%/ffmpeg-%FFMPEG_VERSION%-essentials_build.zip"
-set "GO2RTC_URL=https://github.com/AlexxIT/go2rtc/releases/download/v%GO2RTC_VERSION%/go2rtc_win64.zip"
-set "NSSM_URL=https://nssm.cc/release/nssm-2.24.zip"
+:: Check for --slim flag (online installer: deps downloaded at install time)
+set "SLIM="
+if "%1"=="--slim" set "SLIM=1"
 
 :: Clean previous build
 if exist "%ROOT%dist" rmdir /s /q "%ROOT%dist"
 if exist "%ROOT%build" rmdir /s /q "%ROOT%build"
 
-:: Create download cache (persists between builds, gitignored)
-mkdir "%DL_CACHE%" 2>nul
-
 :: -----------------------------------------------
-:: 0. Download dependencies if not cached
+:: 0. Verify local dependencies
 :: -----------------------------------------------
-echo [0/5] Checking dependencies...
+echo [0/5] Verifying dependencies in dependencies\ ...
 
-:: --- ffmpeg + ffprobe ---
-if not exist "%DL_CACHE%\ffmpeg.exe" (
-    echo      Downloading ffmpeg %FFMPEG_VERSION%...
-    curl -L -o "%DL_CACHE%\ffmpeg.zip" "%FFMPEG_URL%"
-    if errorlevel 1 (
-        echo ERROR: Failed to download ffmpeg
-        exit /b 1
-    )
-    :: Extract ffmpeg.exe and ffprobe.exe from the bin/ folder inside the zip
-    powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::OpenRead('%DL_CACHE%\ffmpeg.zip'); foreach ($e in $zip.Entries) { if ($e.Name -eq 'ffmpeg.exe' -or $e.Name -eq 'ffprobe.exe') { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, '%DL_CACHE%\' + $e.Name, $true) } }; $zip.Dispose()"
-    del "%DL_CACHE%\ffmpeg.zip" 2>nul
-    echo      Downloaded ffmpeg + ffprobe
-) else (
-    echo      ffmpeg cached
+:: nssm is always needed (bundled even in slim mode)
+if not exist "%DEPS%\nssm.exe" (
+    echo ERROR: Missing nssm.exe in dependencies\
+    echo Run setup_dev.bat to download all dependencies automatically.
+    exit /b 1
 )
 
-:: --- go2rtc ---
-if not exist "%DL_CACHE%\go2rtc.exe" (
-    echo      Downloading go2rtc %GO2RTC_VERSION%...
-    curl -L -o "%DL_CACHE%\go2rtc.zip" "%GO2RTC_URL%"
-    if errorlevel 1 (
-        echo ERROR: Failed to download go2rtc
+if not defined SLIM (
+    set "DEP_MISSING="
+    if not exist "%DEPS%\ffmpeg.exe" set "DEP_MISSING=!DEP_MISSING! ffmpeg.exe"
+    if not exist "%DEPS%\ffprobe.exe" set "DEP_MISSING=!DEP_MISSING! ffprobe.exe"
+    if not exist "%DEPS%\go2rtc\go2rtc.exe" set "DEP_MISSING=!DEP_MISSING! go2rtc\go2rtc.exe"
+    if not exist "%DEPS%\models\yolo11x.onnx" set "DEP_MISSING=!DEP_MISSING! models\yolo11x.onnx"
+    if defined DEP_MISSING (
+        echo ERROR: Missing dependencies:!DEP_MISSING!
+        echo Run setup_dev.bat to download all dependencies automatically.
         exit /b 1
     )
-    powershell -NoProfile -Command "Expand-Archive -Path '%DL_CACHE%\go2rtc.zip' -DestinationPath '%DL_CACHE%\go2rtc_tmp' -Force"
-    move "%DL_CACHE%\go2rtc_tmp\go2rtc.exe" "%DL_CACHE%\go2rtc.exe" >nul
-    rmdir /s /q "%DL_CACHE%\go2rtc_tmp" 2>nul
-    del "%DL_CACHE%\go2rtc.zip" 2>nul
-    echo      Downloaded go2rtc
+    echo      All dependencies found.
 ) else (
-    echo      go2rtc cached
-)
-
-:: --- nssm ---
-if not exist "%DL_CACHE%\nssm.exe" (
-    echo      Downloading NSSM...
-    curl -L -o "%DL_CACHE%\nssm.zip" "%NSSM_URL%"
-    if errorlevel 1 (
-        echo ERROR: Failed to download NSSM
-        exit /b 1
-    )
-    powershell -NoProfile -Command "Expand-Archive -Path '%DL_CACHE%\nssm.zip' -DestinationPath '%DL_CACHE%\nssm_tmp' -Force"
-    copy "%DL_CACHE%\nssm_tmp\nssm-2.24\win64\nssm.exe" "%DL_CACHE%\nssm.exe" >nul
-    rmdir /s /q "%DL_CACHE%\nssm_tmp" 2>nul
-    del "%DL_CACHE%\nssm.zip" 2>nul
-    echo      Downloaded NSSM
-) else (
-    echo      nssm cached
+    echo      Slim mode: dependencies will be downloaded at install time.
 )
 echo.
 
@@ -114,26 +81,27 @@ echo.
 echo [3/5] Assembling distribution...
 
 :: Move PyInstaller output to dist root
+mkdir "%ROOT%dist" 2>nul
 move "%ROOT%backend\dist\richiris" "%DIST%" >nul
 
 :: Copy Flutter app
 xcopy "%ROOT%app\build\windows\x64\runner\Release\*" "%DIST%\app\" /s /e /q /y >nul
 
-:: Copy dependencies from cache
-mkdir "%DIST%\dependencies" 2>nul
-mkdir "%DIST%\dependencies\go2rtc" 2>nul
-copy "%DL_CACHE%\ffmpeg.exe" "%DIST%\dependencies\" >nul
-copy "%DL_CACHE%\ffprobe.exe" "%DIST%\dependencies\" >nul
-copy "%DL_CACHE%\go2rtc.exe" "%DIST%\dependencies\go2rtc\" >nul
-copy "%DL_CACHE%\nssm.exe" "%DIST%\" >nul
+:: NSSM always bundled (tiny, needed during service install)
+copy "%DEPS%\nssm.exe" "%DIST%\" >nul
 
-:: Copy YOLO ONNX model (for AI object detection)
-if exist "%ROOT%data\yolo11x.onnx" (
-    mkdir "%DIST%\models" 2>nul
-    copy "%ROOT%data\yolo11x.onnx" "%DIST%\models\" >nul
-    echo      Bundled YOLO ONNX model
+if not defined SLIM (
+    :: Full mode: bundle all dependencies
+    mkdir "%DIST%\dependencies" 2>nul
+    mkdir "%DIST%\dependencies\go2rtc" 2>nul
+    mkdir "%DIST%\dependencies\models" 2>nul
+    copy "%DEPS%\ffmpeg.exe" "%DIST%\dependencies\" >nul
+    copy "%DEPS%\ffprobe.exe" "%DIST%\dependencies\" >nul
+    copy "%DEPS%\go2rtc\go2rtc.exe" "%DIST%\dependencies\go2rtc\" >nul
+    copy "%DEPS%\models\yolo11x.onnx" "%DIST%\dependencies\models\" >nul
+    echo      Bundled all dependencies ^(full offline installer^)
 ) else (
-    echo      WARNING: yolo11x.onnx not found in data\ - AI detection will not work
+    echo      Slim mode: dependencies not bundled ^(downloaded at install time^)
 )
 
 :: Generate default bootstrap.yaml
@@ -152,10 +120,13 @@ echo [4/5] Verifying...
 set "MISSING="
 if not exist "%DIST%\richiris.exe" set "MISSING=!MISSING! richiris.exe"
 if not exist "%DIST%\app\richiris.exe" set "MISSING=!MISSING! app\richiris.exe"
-if not exist "%DIST%\dependencies\ffmpeg.exe" set "MISSING=!MISSING! ffmpeg.exe"
-if not exist "%DIST%\dependencies\ffprobe.exe" set "MISSING=!MISSING! ffprobe.exe"
-if not exist "%DIST%\dependencies\go2rtc\go2rtc.exe" set "MISSING=!MISSING! go2rtc.exe"
 if not exist "%DIST%\nssm.exe" set "MISSING=!MISSING! nssm.exe"
+if not defined SLIM (
+    if not exist "%DIST%\dependencies\ffmpeg.exe" set "MISSING=!MISSING! ffmpeg.exe"
+    if not exist "%DIST%\dependencies\ffprobe.exe" set "MISSING=!MISSING! ffprobe.exe"
+    if not exist "%DIST%\dependencies\go2rtc\go2rtc.exe" set "MISSING=!MISSING! go2rtc.exe"
+    if not exist "%DIST%\dependencies\models\yolo11x.onnx" set "MISSING=!MISSING! yolo11x.onnx"
+)
 if defined MISSING (
     echo ERROR: Missing files:%MISSING%
     exit /b 1
@@ -174,7 +145,20 @@ echo     richiris.exe          (NVR backend)
 echo     nssm.exe              (service manager)
 echo     bootstrap.yaml        (minimal config)
 echo     app\                  (Flutter desktop app)
-echo     dependencies\         (ffmpeg, ffprobe, go2rtc)
+if not defined SLIM (
+echo     dependencies\         (ffmpeg, ffprobe, go2rtc, YOLO model)
+) else (
+echo     (dependencies downloaded at install time)
+)
 echo.
-echo To create an installer, run Inno Setup with installer\richiris.iss
+if not defined SLIM (
+echo To create a FULL installer (offline, ~300 MB):
+echo   ISCC.exe installer\richiris.iss
+) else (
+echo To create a SLIM installer (online, ~150 MB):
+echo   ISCC.exe /DSLIM installer\richiris.iss
+)
+echo.
+echo Both modes:  ISCC.exe installer\richiris.iss           (full)
+echo              ISCC.exe /DSLIM installer\richiris.iss    (slim)
 pause
