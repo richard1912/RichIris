@@ -1,11 +1,12 @@
 """Recording playback API endpoints."""
 
+import hashlib
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +14,7 @@ from app.config import get_config
 from app.database import get_db
 from app.models import Camera, Recording
 from app.schemas import RecordingResponse, ThumbnailInfo
+from app.services.playback import get_playback_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
 
 logger = logging.getLogger(__name__)
@@ -72,14 +74,17 @@ async def list_segments(
 async def start_playback_session(
     camera_id: int,
     start: datetime = Query(..., description="Start time ISO format"),
-    quality: str = Query("high", description="Quality tier: high, medium, low"),
+    quality: str = Query("direct", description="Quality tier: direct, high, low, ultralow"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Find the recording segment containing the requested time.
+    """Start a playback session for the recording segment at the requested time.
 
-    Returns the segment file URL and seek offset — no ffmpeg, no remux.
-    media_kit (libmpv) plays .ts files natively.
+    Direct = raw .ts file (instant). High/Low/Ultra-low = HEVC NVENC transcode
+    via fragmented MP4 streaming.
     """
+    if quality not in ("direct", "high", "low", "ultralow"):
+        quality = "direct"
+
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -130,19 +135,46 @@ async def start_playback_session(
     )
     has_more = has_more_result.first() is not None
 
-    logger.info(
-        "Playback segment found",
-        extra={
-            "camera_id": camera_id,
-            "recording_id": seg.id,
+    # Direct = raw .ts file
+    if quality == "direct":
+        logger.info(
+            "Playback segment found (direct)",
+            extra={"camera_id": camera_id, "recording_id": seg.id, "seek_seconds": seek_seconds},
+        )
+        return {
+            "segment_url": f"/api/recordings/segment/{seg.id}",
             "seek_seconds": seek_seconds,
+            "segment_start": seg.start_time.isoformat(),
+            "segment_end": seg_end.isoformat(),
             "has_more": has_more,
-        },
+        }
+
+    # Transcoded: start a PlaybackManager session
+    session_key = f"{seg.id}-{quality}-{seek_seconds:.0f}"
+    session_id = hashlib.md5(session_key.encode()).hexdigest()[:12]
+
+    mgr = get_playback_manager()
+    session = await mgr.start_session(
+        session_id=session_id,
+        segment_paths=[seg.file_path],
+        seek_seconds=seek_seconds,
+        quality=quality,
+        camera_id=camera_id,
+    )
+
+    # Wait for transcode to be ready
+    await session._ready_event.wait()
+    if not session.ready:
+        raise HTTPException(status_code=500, detail="Playback transcode failed")
+
+    logger.info(
+        "Playback session ready (transcoded)",
+        extra={"camera_id": camera_id, "recording_id": seg.id, "quality": quality, "session_id": session_id},
     )
 
     return {
-        "segment_url": f"/api/recordings/segment/{seg.id}",
-        "seek_seconds": seek_seconds,
+        "segment_url": f"/api/recordings/playback/{session_id}/playback.mp4",
+        "seek_seconds": 0.0,  # seek already applied by ffmpeg
         "segment_start": seg.start_time.isoformat(),
         "segment_end": seg_end.isoformat(),
         "has_more": has_more,
@@ -161,6 +193,47 @@ async def get_segment_file(recording_id: int, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=404, detail="Segment file missing")
 
     return FileResponse(path, media_type="video/mp2t")
+
+
+@router.get("/playback/{session_id}/playback.mp4")
+async def get_playback_file(session_id: str):
+    """Stream a transcoded playback MP4 (fragmented MP4 from PlaybackManager)."""
+    mgr = get_playback_manager()
+    session = mgr.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Playback session not found")
+
+    output_path = session.output_dir / "playback.mp4"
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Playback file not ready")
+
+    if session.streaming and session.process and session.process.returncode is None:
+        # Stream the file as it's being written (fragmented MP4)
+        import asyncio
+
+        async def stream_fmp4():
+            with open(output_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if chunk:
+                        yield chunk
+                    else:
+                        # Check if ffmpeg is still writing
+                        if session.process and session.process.returncode is None:
+                            await asyncio.sleep(0.1)
+                        else:
+                            # Read any remaining data
+                            remaining = f.read()
+                            if remaining:
+                                yield remaining
+                            break
+
+        mgr.touch(session_id)
+        return StreamingResponse(stream_fmp4(), media_type="video/mp4")
+
+    # Non-streaming or completed: serve the full file
+    mgr.touch(session_id)
+    return FileResponse(output_path, media_type="video/mp4")
 
 
 @router.get("/{camera_id}/thumbnails", response_model=list[ThumbnailInfo])

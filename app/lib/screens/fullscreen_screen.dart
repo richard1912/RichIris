@@ -59,7 +59,7 @@ class FullscreenScreen extends StatefulWidget {
 class _FullscreenScreenState extends State<FullscreenScreen> {
   bool _isLive = true;
   bool _paused = false;
-  bool _showStats = false;
+  bool _showStats = true;
   Player? _livePlayer;
   Timer? _statsTimer;
   int _speed = 1;
@@ -84,6 +84,21 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   void initState() {
     super.initState();
     _tzOffsetMs = widget.tzOffsetMs;
+    // Stats shown by default — start refresh timer
+    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant FullscreenScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.quality != widget.quality && !_isLive && _playbackStartTime != null) {
+      // Quality changed during playback — restart at current position
+      final currentTimeMs = _getNvrTime() - _tzOffsetMs;
+      final startStr = formatLocalISOFromMs(currentTimeMs);
+      _startPlayback(startStr);
+    }
   }
 
   @override
@@ -564,7 +579,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       final h = await mpv.getProperty('video-params/h');
       // Try multiple mpv FPS properties in order of reliability
       var fps = '';
-      for (final prop in ['container-fps', 'estimated-vf-fps']) {
+      for (final prop in ['container-fps', 'estimated-vf-fps', 'video-params/fps']) {
         final val = await mpv.getProperty(prop);
         final parsed = double.tryParse(val);
         if (parsed != null && parsed > 0 && parsed <= 120) {

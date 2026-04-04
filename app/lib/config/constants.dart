@@ -7,7 +7,7 @@ extension StreamSourceExt on StreamSource {
   String get param => name;
 }
 
-enum Quality { direct, high, low }
+enum Quality { direct, high, low, ultraLow }
 
 extension QualityExt on Quality {
   String get label {
@@ -18,6 +18,8 @@ extension QualityExt on Quality {
         return 'High';
       case Quality.low:
         return 'Low';
+      case Quality.ultraLow:
+        return 'Ultra Low';
     }
   }
 
@@ -26,13 +28,18 @@ extension QualityExt on Quality {
       case Quality.direct:
         return 'Native passthrough, no re-encode';
       case Quality.high:
-        return 'H.264, source-matched quality';
+        return 'HEVC, source-matched quality';
       case Quality.low:
-        return 'H.264, reduced quality';
+        return 'HEVC, reduced quality';
+      case Quality.ultraLow:
+        return 'HEVC, minimal bandwidth';
     }
   }
 
-  String get param => name;
+  String get param {
+    if (this == Quality.ultraLow) return 'ultralow';
+    return name;
+  }
 }
 
 const List<int> kSpeeds = [-32, -16, -4, -2, -1, 1, 2, 4, 16, 32];
