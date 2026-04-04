@@ -203,12 +203,10 @@ class ObjectDetector:
         data_dir = Path(get_bootstrap().data_dir)
         app_dir = get_app_dir()
 
-        # Search order: data_dir → bundled models/ → dev data/ → legacy data/
+        # Search order: data_dir → bundled dependencies/models/
         candidates = [
             data_dir / "yolo11x.onnx",
-            app_dir / "models" / "yolo11x.onnx",
-            app_dir / "data" / "yolo11x.onnx",
-            Path(__file__).resolve().parent.parent.parent.parent / "data" / "yolo11x.onnx",
+            app_dir / "dependencies" / "models" / "yolo11x.onnx",
         ]
         model_path = None
         for p in candidates:

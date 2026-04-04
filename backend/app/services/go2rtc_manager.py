@@ -22,15 +22,10 @@ def _resolve_go2rtc_binary() -> str | None:
     """Find the go2rtc binary."""
     app_dir = get_app_dir()
 
-    # Check bundled location
+    # Check bundled location (same path in both dev and installed layout)
     bundled = app_dir / "dependencies" / "go2rtc" / "go2rtc.exe"
     if bundled.exists():
         return str(bundled)
-
-    # Check alongside app (dev layout)
-    dev_path = app_dir / "go2rtc" / "go2rtc.exe"
-    if dev_path.exists():
-        return str(dev_path)
 
     # Check PATH
     import shutil

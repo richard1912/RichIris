@@ -88,6 +88,9 @@ a = Analysis(
         'botocore', 'boto3', 's3transfer',
         'tensorboard', 'tensorboardX',
         'IPython', 'jupyter', 'notebook',
+        # ORT CUDA/TensorRT providers — we use DirectML only
+        'onnxruntime.capi.onnxruntime_providers_cuda',
+        'onnxruntime.capi.onnxruntime_providers_tensorrt',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -111,9 +114,14 @@ exe = EXE(
     icon=None,
 )
 
+# Strip CUDA/TensorRT provider DLLs — we use DirectML only (saves ~300 MB)
+filtered_binaries = [b for b in a.binaries if not any(
+    x in b[0].lower() for x in ('onnxruntime_providers_cuda', 'onnxruntime_providers_tensorrt')
+)]
+
 coll = COLLECT(
     exe,
-    a.binaries,
+    filtered_binaries,
     a.zipfiles,
     a.datas,
     strip=False,
