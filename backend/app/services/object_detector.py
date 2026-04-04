@@ -1,4 +1,8 @@
-"""YOLO-based object detector for AI detection on motion frames."""
+"""ONNX Runtime-based object detector for AI detection on motion frames.
+
+Uses YOLO11x exported to ONNX format. Runs on GPU via DirectML (any GPU,
+no CUDA required) with CPU fallback. ~16ms inference on RTX 4080 SUPER.
+"""
 
 import asyncio
 import logging
@@ -6,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -13,6 +18,12 @@ logger = logging.getLogger(__name__)
 # Minimum bounding box area as fraction of frame area.
 # Filters out tiny false-positive detections (shadows, artifacts).
 MIN_BOX_AREA_FRACTION = 0.002  # 0.2% of frame
+
+# YOLO input size (must match export: imgsz=640)
+INPUT_SIZE = 640
+
+# NMS parameters
+NMS_IOU_THRESHOLD = 0.45
 
 # COCO class IDs grouped by detection category
 CATEGORY_CLASSES = {
@@ -29,6 +40,11 @@ COCO_CLASS_NAMES = {
     18: "sheep", 19: "cow", 20: "elephant", 21: "bear",
     22: "zebra", 23: "giraffe",
 }
+
+# All class IDs we care about (for filtering YOLO's 80-class output)
+ALL_DETECTION_CLASSES = set()
+for ids in CATEGORY_CLASSES.values():
+    ALL_DETECTION_CLASSES.update(ids)
 
 
 def build_class_list(detect_persons: bool, detect_vehicles: bool, detect_animals: bool) -> list[int]:
@@ -53,22 +69,125 @@ class Detection:
     y2: int
 
 
-class ObjectDetector:
-    """Singleton YOLO-based object detector shared across all cameras.
+def _preprocess(frame: np.ndarray) -> tuple[np.ndarray, float, int, int]:
+    """Resize frame to 640x640 with letterboxing, normalize to [0,1] NCHW."""
+    h, w = frame.shape[:2]
+    scale = min(INPUT_SIZE / w, INPUT_SIZE / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    pad_x, pad_y = (INPUT_SIZE - new_w) // 2, (INPUT_SIZE - new_h) // 2
 
-    Uses an asyncio.Queue so multiple camera loops can submit frames
-    for inference without contending on the GPU. A single consumer
-    coroutine pulls frames and runs blocking inference in a thread.
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((INPUT_SIZE, INPUT_SIZE, 3), 114, dtype=np.uint8)
+    canvas[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized
+
+    # HWC BGR → CHW RGB, float32 [0,1]
+    blob = canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
+    return np.expand_dims(blob, 0), scale, pad_x, pad_y
+
+
+def _postprocess(
+    output: np.ndarray,
+    scale: float, pad_x: int, pad_y: int,
+    frame_h: int, frame_w: int,
+    confidence_threshold: float,
+    classes: set[int] | None,
+) -> list[Detection]:
+    """Parse YOLO output [1, 84, 8400] → list of Detection.
+
+    YOLO output format: each of 8400 proposals has [cx, cy, w, h, class_scores×80].
+    """
+    # output shape: (1, 84, 8400) → transpose to (8400, 84)
+    preds = output[0].T  # (8400, 84)
+
+    # Extract boxes (cx, cy, w, h) and class scores
+    boxes_cxcywh = preds[:, :4]
+    scores_all = preds[:, 4:]  # (8400, 80)
+
+    # Get best class per proposal
+    class_ids = np.argmax(scores_all, axis=1)
+    confidences = scores_all[np.arange(len(class_ids)), class_ids]
+
+    # Filter by confidence
+    mask = confidences >= confidence_threshold
+    if classes:
+        class_mask = np.isin(class_ids, list(classes))
+        mask &= class_mask
+
+    indices = np.where(mask)[0]
+    if len(indices) == 0:
+        return []
+
+    boxes_cxcywh = boxes_cxcywh[indices]
+    class_ids = class_ids[indices]
+    confidences = confidences[indices]
+
+    # Convert cx,cy,w,h → x1,y1,x2,y2 in input (640×640) coords
+    x1 = boxes_cxcywh[:, 0] - boxes_cxcywh[:, 2] / 2
+    y1 = boxes_cxcywh[:, 1] - boxes_cxcywh[:, 3] / 2
+    x2 = boxes_cxcywh[:, 0] + boxes_cxcywh[:, 2] / 2
+    y2 = boxes_cxcywh[:, 1] + boxes_cxcywh[:, 3] / 2
+
+    # Undo letterbox: remove padding, rescale to original image
+    x1 = (x1 - pad_x) / scale
+    y1 = (y1 - pad_y) / scale
+    x2 = (x2 - pad_x) / scale
+    y2 = (y2 - pad_y) / scale
+
+    # Clip to frame bounds
+    x1 = np.clip(x1, 0, frame_w).astype(np.int32)
+    y1 = np.clip(y1, 0, frame_h).astype(np.int32)
+    x2 = np.clip(x2, 0, frame_w).astype(np.int32)
+    y2 = np.clip(y2, 0, frame_h).astype(np.int32)
+
+    # NMS per class
+    boxes_for_nms = np.stack([x1, y1, x2, y2], axis=1).tolist()
+    nms_indices = cv2.dnn.NMSBoxes(
+        boxes_for_nms,
+        confidences.tolist(),
+        confidence_threshold,
+        NMS_IOU_THRESHOLD,
+    )
+    if len(nms_indices) == 0:
+        return []
+
+    nms_indices = nms_indices.flatten()
+
+    # Filter by minimum box area
+    frame_area = frame_h * frame_w
+    min_box_area = frame_area * MIN_BOX_AREA_FRACTION
+
+    detections = []
+    for i in nms_indices:
+        bx1, by1, bx2, by2 = int(x1[i]), int(y1[i]), int(x2[i]), int(y2[i])
+        if (bx2 - bx1) * (by2 - by1) < min_box_area:
+            continue
+        cls_id = int(class_ids[i])
+        label = COCO_CLASS_NAMES.get(cls_id, f"class_{cls_id}")
+        detections.append(Detection(
+            label=label,
+            confidence=float(confidences[i]),
+            x1=bx1, y1=by1, x2=bx2, y2=by2,
+        ))
+
+    return detections
+
+
+class ObjectDetector:
+    """Singleton ONNX Runtime-based object detector shared across all cameras.
+
+    Uses DirectML (GPU) with CPU fallback. A ThreadPoolExecutor serializes
+    inference so multiple camera loops don't contend on the GPU.
     """
 
     def __init__(self):
-        self._model = None
+        self._session = None
+        self._input_name = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self._started = False
-        self._device = "cpu"
+        self._provider = "cpu"
 
     async def start(self) -> None:
-        """Load the YOLO model onto GPU (or CPU fallback)."""
+        """Load the ONNX model."""
         if self._started:
             return
 
@@ -78,50 +197,54 @@ class ObjectDetector:
 
     def _load_model(self) -> None:
         """Blocking model load (runs in executor)."""
-        from ultralytics import YOLO
+        import onnxruntime as ort
 
-        # Store model in data/ directory alongside DB
-        # Use YOLO11x (extra-large) for highest accuracy (~54.7 mAP50-95 on COCO)
-        # Still fast on RTX 4080 SUPER with CUDA
-        model_dir = Path(__file__).resolve().parent.parent.parent.parent / "data"
-        model_dir.mkdir(exist_ok=True)
-        model_path = model_dir / "yolo11x.pt"
-        self._model = YOLO(str(model_path))
+        from app.config import get_bootstrap
+        data_dir = Path(get_bootstrap().data_dir)
+        model_path = data_dir / "yolo11x.onnx"
 
-        # Try CUDA, fall back to CPU
-        try:
-            import torch
-            if torch.cuda.is_available():
-                self._model.to("cuda")
-                self._device = "cuda"
-                gpu_name = torch.cuda.get_device_name(0)
-                logger.info("YOLO model loaded on CUDA", extra={"model": model_path.name, "gpu": gpu_name})
+        if not model_path.exists():
+            # Check legacy location
+            legacy_path = Path(__file__).resolve().parent.parent.parent.parent / "data" / "yolo11x.onnx"
+            if legacy_path.exists():
+                model_path = legacy_path
             else:
-                logger.warning("CUDA not available, YOLO running on CPU", extra={"model": model_path.name})
-        except Exception:
-            logger.warning("Failed to use CUDA, YOLO running on CPU", extra={"model": model_path.name})
+                logger.error("YOLO ONNX model not found", extra={"path": str(model_path)})
+                return
 
-    def _fallback_to_cpu(self) -> None:
-        """Reload model on CPU after a CUDA error.
+        # Try DirectML (GPU) first, then CPU
+        providers_to_try = [
+            (["DmlExecutionProvider", "CPUExecutionProvider"], "DirectML"),
+            (["CUDAExecutionProvider", "CPUExecutionProvider"], "CUDA"),
+            (["CPUExecutionProvider"], "CPU"),
+        ]
 
-        After a CUDA error the entire CUDA context is unrecoverable in-process,
-        so calling .to("cpu") on the existing model may also fail (it tries to
-        free CUDA memory). Reloading from disk avoids touching the broken context.
-        """
-        try:
-            from ultralytics import YOLO
-            model_dir = Path(__file__).resolve().parent.parent.parent.parent / "data"
-            model_path = model_dir / "yolo11x.pt"
-            self._model = YOLO(str(model_path))
-            # Do NOT call .to("cuda") — stay on CPU
-            self._device = "cpu"
-            logger.warning("YOLO model reloaded on CPU after CUDA error — restart service to re-enable GPU")
-        except Exception as e:
-            logger.error("Failed to reload YOLO model on CPU: %s", e)
+        for providers, label in providers_to_try:
+            try:
+                self._session = ort.InferenceSession(str(model_path), providers=providers)
+                active = self._session.get_providers()
+                self._provider = active[0] if active else "unknown"
+                self._input_name = self._session.get_inputs()[0].name
+
+                # Warmup inference
+                dummy = np.random.rand(1, 3, INPUT_SIZE, INPUT_SIZE).astype(np.float32)
+                self._session.run(None, {self._input_name: dummy})
+
+                logger.info("YOLO ONNX model loaded", extra={
+                    "model": model_path.name,
+                    "provider": self._provider,
+                    "attempted": label,
+                })
+                return
+            except Exception:
+                logger.debug("Provider %s not available, trying next", label)
+                continue
+
+        logger.error("Failed to load YOLO model with any provider")
 
     async def stop(self) -> None:
         """Release model and executor."""
-        self._model = None
+        self._session = None
         self._started = False
         self._executor.shutdown(wait=False)
         logger.info("Object detector stopped")
@@ -130,12 +253,8 @@ class ObjectDetector:
         self, frame: np.ndarray, confidence_threshold: float = 0.5,
         classes: list[int] | None = None,
     ) -> list[Detection]:
-        """Run object detection on a frame. Returns detections above threshold.
-
-        Args:
-            classes: COCO class IDs to detect. None means all classes.
-        """
-        if not self._started or self._model is None:
+        """Run object detection on a frame. Returns detections above threshold."""
+        if not self._started or self._session is None:
             return []
 
         loop = asyncio.get_event_loop()
@@ -147,46 +266,21 @@ class ObjectDetector:
     def _run_inference(
         self, frame: np.ndarray, threshold: float, classes: list[int] | None,
     ) -> list[Detection]:
-        """Blocking YOLO inference (runs in executor).
+        """Blocking ONNX inference (runs in executor)."""
+        h, w = frame.shape[:2]
+        blob, scale, pad_x, pad_y = _preprocess(frame)
 
-        Also filters out detections whose bounding box is too small (likely artifacts).
-        Falls back to CPU if CUDA errors occur (CUDA context can become permanently broken
-        after certain errors; reloading on CPU recovers without a service restart).
-        """
         try:
-            results = self._model(frame, conf=threshold, classes=classes or None, verbose=False)
-        except Exception as e:
-            err_str = str(e)
-            if "CUDA" in err_str or "cuda" in err_str or "AcceleratorError" in type(e).__name__:
-                logger.warning("CUDA inference error — falling back to CPU: %s", type(e).__name__)
-                self._fallback_to_cpu()
-                results = self._model(frame, conf=threshold, classes=classes or None, verbose=False)
-            else:
-                raise
+            outputs = self._session.run(None, {self._input_name: blob})
+        except Exception:
+            logger.exception("ONNX inference failed")
+            return []
 
-        frame_area = frame.shape[0] * frame.shape[1]
-        min_box_area = frame_area * MIN_BOX_AREA_FRACTION
-
-        detections = []
-        for result in results:
-            boxes = result.boxes
-            if boxes is None or len(boxes) == 0:
-                continue
-            for i in range(len(boxes)):
-                conf = float(boxes.conf[i])
-                x1, y1, x2, y2 = boxes.xyxy[i].int().tolist()
-                box_area = (x2 - x1) * (y2 - y1)
-                if box_area < min_box_area:
-                    continue
-                cls_id = int(boxes.cls[i])
-                label = COCO_CLASS_NAMES.get(cls_id, f"class_{cls_id}")
-                detections.append(Detection(
-                    label=label,
-                    confidence=conf,
-                    x1=x1, y1=y1, x2=x2, y2=y2,
-                ))
-
-        return detections
+        class_set = set(classes) if classes else ALL_DETECTION_CLASSES
+        return _postprocess(
+            outputs[0], scale, pad_x, pad_y,
+            h, w, threshold, class_set,
+        )
 
 
 _detector: ObjectDetector | None = None
