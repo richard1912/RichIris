@@ -282,7 +282,7 @@ async def get_thumbnail(
     from app.services.ffmpeg import sanitize_camera_name
     config = get_config()
     safe_name = sanitize_camera_name(camera.name)
-    path = Path(config.storage.recordings_dir) / safe_name / date / "thumbs" / filename
+    path = Path(config.storage.thumbnails_dir) / safe_name / date / "thumbs" / filename
 
     if not path.exists():
         raise HTTPException(status_code=404, detail="Thumbnail not found")

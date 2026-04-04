@@ -2,15 +2,15 @@
 
 import uvicorn
 
-from app.config import get_config
+from app.config import get_bootstrap
 
 
 def main() -> None:
-    config = get_config()
+    bootstrap = get_bootstrap()
     uvicorn.run(
         "app.main:app",
-        host=config.server.host,
-        port=config.server.port,
+        host="0.0.0.0",
+        port=bootstrap.port,
         reload=False,
         log_level="info",
     )

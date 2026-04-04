@@ -7,12 +7,15 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.config import get_config
+from app.config import get_bootstrap, get_config
 from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
 
-PLAYBACK_DIR = Path("data/playback")
+
+def _get_playback_dir() -> Path:
+    """Return the playback cache directory under data_dir."""
+    return Path(get_bootstrap().data_dir) / "playback"
 IDLE_TIMEOUT = 30  # seconds before cleanup
 
 # Default recording bitrate (kbps) if probing fails.
@@ -131,7 +134,7 @@ class PlaybackManager:
 
         self._ensure_cleanup()
 
-        output_dir = PLAYBACK_DIR / session_id
+        output_dir = _get_playback_dir() / session_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         session = PlaybackSession(session_id=session_id, output_dir=output_dir, camera_id=camera_id)

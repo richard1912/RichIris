@@ -47,7 +47,10 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db() -> None:
-    """Create all tables."""
+    """Create all tables and run migrations."""
+    # Import models to register them with Base.metadata before create_all
+    import app.models  # noqa: F401
+
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -205,6 +208,14 @@ async def init_db() -> None:
                 logger.info("Migration: converted %d cameras from legacy motion_script to motion_scripts", len(rows))
         except Exception:
             logger.exception("Migration: failed to convert legacy motion scripts")
+
+    # Seed default settings into the settings table
+    from app.config import get_bootstrap
+    from app.services.settings import seed_defaults
+    factory = get_session_factory()
+    async with factory() as session:
+        await seed_defaults(session, data_dir=get_bootstrap().data_dir)
+
     logger.info("Database tables created")
 
 

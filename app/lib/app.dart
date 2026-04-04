@@ -13,11 +13,13 @@ import 'screens/fullscreen_screen.dart';
 import 'screens/system_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/camera_form_screen.dart';
+import 'screens/system_settings_screen.dart';
 import 'services/api_client.dart';
 import 'services/camera_api.dart';
 import 'services/recording_api.dart';
 import 'services/clip_api.dart';
 import 'services/motion_api.dart';
+import 'services/settings_api.dart';
 import 'services/system_api.dart';
 import 'services/stream_api.dart';
 import 'theme.dart';
@@ -37,6 +39,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   MotionApi? _motionApi;
   SystemApi? _systemApi;
   StreamApi? _streamApi;
+  SettingsApi? _settingsApi;
 
   String? _serverUrl;
   bool _loading = true;
@@ -101,6 +104,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     _motionApi = MotionApi(_apiClient!);
     _systemApi = SystemApi(_apiClient!);
     _streamApi = StreamApi(_apiClient!);
+    _settingsApi = SettingsApi(_apiClient!);
     _fetchInitialData();
   }
 
@@ -180,6 +184,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   motionApi: _motionApi!,
                   systemApi: _systemApi!,
                   streamApi: _streamApi!,
+                  settingsApi: _settingsApi!,
                   apiClient: _apiClient!,
                   cameras: _cameras,
                   systemStatus: _systemStatus,
@@ -205,6 +210,7 @@ class _MainNav extends StatefulWidget {
   final MotionApi motionApi;
   final SystemApi systemApi;
   final StreamApi streamApi;
+  final SettingsApi settingsApi;
   final ApiClient apiClient;
   final List<Camera> cameras;
   final SystemStatus? systemStatus;
@@ -226,6 +232,7 @@ class _MainNav extends StatefulWidget {
     required this.motionApi,
     required this.systemApi,
     required this.streamApi,
+    required this.settingsApi,
     required this.apiClient,
     required this.cameras,
     required this.systemStatus,
@@ -453,6 +460,13 @@ class _MainNavState extends State<_MainNav> {
                 builder: (_) => SettingsScreen(
                   onSaved: widget.onServerUrlChanged,
                   initialUrl: widget.serverUrl,
+                ),
+              ));
+            },
+            onOpenSystemSettings: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => SystemSettingsScreen(
+                  settingsApi: widget.settingsApi,
                 ),
               ));
             },

@@ -2,7 +2,7 @@
 
 Captures JPEG snapshots from go2rtc's frame API at configurable intervals.
 Thumbnails are stored as individual files in
-{recordings_dir}/{camera_name}/{YYYY-MM-DD}/thumbs/thumb_HHMMSS.jpg
+{thumbnails_dir}/{camera_name}/{YYYY-MM-DD}/thumbs/thumb_HHMMSS.jpg
 """
 
 import asyncio
@@ -34,8 +34,9 @@ class ThumbnailCapture:
             return
         self._running = True
         self._client = httpx.AsyncClient(timeout=15)
-        for cam in cameras:
-            task = asyncio.create_task(self._capture_loop(cam))
+        # Stagger camera starts to avoid concurrent go2rtc stream creation
+        for i, cam in enumerate(cameras):
+            task = asyncio.create_task(self._capture_loop(cam, startup_delay=i * 2))
             self._tasks.append(task)
         logger.info("Thumbnail capture started", extra={"cameras": len(cameras)})
 
@@ -51,7 +52,9 @@ class ThumbnailCapture:
             self._client = None
         logger.info("Thumbnail capture stopped")
 
-    async def _capture_loop(self, camera) -> None:
+    async def _capture_loop(self, camera, startup_delay: float = 0) -> None:
+        if startup_delay > 0:
+            await asyncio.sleep(startup_delay)
         config = get_config()
         tp = config.trickplay
         safe_name = sanitize_camera_name(camera.name)
@@ -74,12 +77,15 @@ class ThumbnailCapture:
             date_str = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H%M%S")
 
-            thumbs_dir = Path(config.storage.recordings_dir) / safe_name / date_str / "thumbs"
+            thumbs_dir = Path(config.storage.thumbnails_dir) / safe_name / date_str / "thumbs"
             thumbs_dir.mkdir(parents=True, exist_ok=True)
             out_path = thumbs_dir / f"thumb_{time_str}.jpg"
 
             try:
-                resp = await self._client.get(snapshot_url)
+                from app.services.go2rtc_client import get_snapshot_semaphore, wait_for_go2rtc_ready
+                await wait_for_go2rtc_ready()
+                async with get_snapshot_semaphore():
+                    resp = await self._client.get(snapshot_url)
                 if resp.status_code != 200:
                     logger.debug("Snapshot request failed", extra={
                         "camera": camera.name, "status": resp.status_code,
@@ -109,7 +115,7 @@ class ThumbnailCapture:
         """Scan filesystem and return sorted list of thumbnails for a camera/date."""
         config = get_config()
         safe_name = sanitize_camera_name(camera_name)
-        thumbs_dir = Path(config.storage.recordings_dir) / safe_name / date_str / "thumbs"
+        thumbs_dir = Path(config.storage.thumbnails_dir) / safe_name / date_str / "thumbs"
 
         if not thumbs_dir.exists():
             return []

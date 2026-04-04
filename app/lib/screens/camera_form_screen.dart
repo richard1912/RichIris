@@ -401,7 +401,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 controller: _rtspCtrl,
                 decoration: const InputDecoration(
                   labelText: 'Main-Stream RTSP URL',
-                  hintText: 'rtsp://192.168.8.41/stream1',
+                  hintText: 'rtsp://192.168.1.100/stream1',
                 ),
                 validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
               ),
@@ -410,7 +410,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 controller: _subStreamCtrl,
                 decoration: const InputDecoration(
                   labelText: 'Sub-Stream RTSP URL (optional)',
-                  hintText: 'rtsp://192.168.8.41/stream2',
+                  hintText: 'rtsp://192.168.1.100/stream2',
                 ),
               ),
               const SizedBox(height: 14),

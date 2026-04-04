@@ -1,3 +1,4 @@
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../config/api_config.dart';
@@ -23,6 +24,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _controller = TextEditingController(text: widget.initialUrl ?? '');
+    if (widget.initialUrl == null) {
+      _tryLocalBackend();
+    }
+  }
+
+  Future<void> _tryLocalBackend() async {
+    if (!Platform.isWindows) return;
+    const localUrl = 'http://localhost:8700';
+    final client = ApiClient(localUrl);
+    final ok = await client.testConnection();
+    if (!mounted) return;
+    if (ok) {
+      await saveServerUrl(localUrl);
+      widget.onSaved(localUrl);
+    } else {
+      setState(() => _controller.text = localUrl);
+    }
   }
 
   @override
@@ -99,8 +117,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 20),
             TextField(
               controller: _controller,
-              decoration: const InputDecoration(
-                hintText: 'http://192.168.8.10:8700',
+              decoration: InputDecoration(
+                hintText: Platform.isWindows ? 'http://localhost:8700' : 'http://192.168.1.100:8700',
                 labelText: 'Server URL',
               ),
               keyboardType: TextInputType.url,
