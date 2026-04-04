@@ -34,6 +34,7 @@ def _label_category(label: str | None) -> str:
 logger = logging.getLogger(__name__)
 
 COOLDOWN_SECONDS = 10
+MAX_EVENT_DURATION = 120  # Force-close events after 2 minutes to prevent false-positive stretching
 POLL_INTERVAL = 1.0       # Seconds between snapshot fetches
 BLUR_SIZE = (21, 21)
 DIFF_THRESHOLD = 25
@@ -60,6 +61,7 @@ class MotionDetector:
         self._running = False
         # Keyed by (cam_id, category) — one active event per category per camera
         self._active_events: dict[tuple[int, str], int] = {}
+        self._event_start: dict[tuple[int, str], datetime] = {}
         self._last_motion: dict[tuple[int, str], datetime] = {}
         self._script_off: dict[tuple[int, str], list[str]] = {}
         self._avg_baseline: dict[int, np.ndarray | None] = {}
@@ -332,6 +334,12 @@ class MotionDetector:
         key = (cam_id, category)
         self._last_motion[key] = now
 
+        # Force-close events that exceed max duration to prevent false-positive stretching
+        if key in self._active_events:
+            start = self._event_start.get(key)
+            if start and (now - start).total_seconds() >= MAX_EVENT_DURATION:
+                await self._finalize_event(key)
+
         if key not in self._active_events:
             # Save detection thumbnail from the frame that triggered this event
             thumb_path = None
@@ -349,6 +357,7 @@ class MotionDetector:
                 await session.commit()
                 await session.refresh(event)
                 self._active_events[key] = event.id
+                self._event_start[key] = now
                 # Store off-scripts for this category so _finalize_event can run them
                 matching = self._scripts_for_category(scripts, category)
                 self._script_off[key] = [s.get("off") for s in matching if s.get("off")]
@@ -395,6 +404,7 @@ class MotionDetector:
 
     async def _finalize_event(self, key: tuple[int, str]) -> None:
         event_id = self._active_events.pop(key, None)
+        self._event_start.pop(key, None)
         self._last_motion.pop(key, None)
         off_scripts = self._script_off.pop(key, None) or []
         if event_id is None:
