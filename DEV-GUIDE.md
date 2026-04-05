@@ -173,14 +173,14 @@ Key areas:
 
 ### Full build (backend + frontend + installer)
 
-Requires all dependencies in `dependencies/` (run `setup_dev.bat` first).
+Requires nssm.exe in `dependencies/` (run `setup_dev.bat` first).
 
 ```bash
 build_release.bat
 ```
 
 This will:
-1. Verify all dependencies are present in `dependencies/`
+1. Verify nssm.exe is present in `dependencies/`
 2. Build the backend with PyInstaller
 3. Build the Flutter Windows app
 4. Assemble everything into `dist/richiris/`
@@ -188,18 +188,23 @@ This will:
 
 ### Creating the installer
 
-Two modes — same ISS file:
+```bash
+ISCC.exe installer\richiris.iss
+```
 
-| Mode | Command | Size | Internet required at install? |
-|------|---------|------|-------------------------------|
-| Full (offline) | `ISCC.exe installer\richiris.iss` | ~300 MB | No |
-| Slim (online) | `ISCC.exe /DSLIM installer\richiris.iss` | ~150 MB | Yes |
+Output: `dist/RichIris-Setup-1.0.0.exe`
 
-For slim mode, build with `build_release.bat --slim` first (skips bundling large deps).
+The installer is lightweight (~150 MB) and downloads dependencies (ffmpeg, go2rtc, YOLO model) at install time via `installer/download_deps.ps1`. This keeps the installer small and ensures users always get the latest dependency versions.
 
-The slim installer downloads ffmpeg, go2rtc, and the YOLO model at install time. If a download fails, the installer warns but continues — the NVR works without the YOLO model (no AI detection), but requires ffmpeg and go2rtc.
+The installer wizard includes a **Data Directory** page where the user picks where recordings, database, logs, and thumbnails are stored (default: `C:\ProgramData\RichIris`). This writes `bootstrap.yaml` with the chosen path. On upgrades, it pre-populates from the existing `bootstrap.yaml`.
 
-Output: `dist/RichIris-Setup-1.0.0.exe` (full) or `dist/RichIris-Setup-1.0.0-online.exe` (slim)
+Post-install, the installer:
+1. Creates data subdirectories (`database/`, `logs/`, `recordings/`, `thumbnails/`, `playback/`)
+2. Writes `bootstrap.yaml` with chosen data_dir
+3. Downloads dependencies (ffmpeg, go2rtc, YOLO model) — skips already-present files on upgrade
+4. Installs + starts the `RichIris` Windows service via NSSM
+
+If a download fails, the installer warns but continues — the NVR works without the YOLO model (no AI detection), but requires ffmpeg and go2rtc. The download script is deleted after install.
 
 ### Android APK (client only)
 

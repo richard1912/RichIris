@@ -1,9 +1,6 @@
 ; RichIris NVR - Inno Setup Script
 ; Build the distribution first: build_release.bat
-;
-; Two build modes:
-;   Full (offline):  ISCC.exe richiris.iss                → bundles all dependencies (~786 MB)
-;   Slim (online):   ISCC.exe /DSLIM richiris.iss         → downloads dependencies at install (~370 MB)
+; Then compile: ISCC.exe installer\richiris.iss
 
 #define MyAppName "RichIris NVR"
 #define MyAppVersion "1.0.0"
@@ -22,11 +19,7 @@ DefaultDirName={autopf}\RichIris
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-#ifdef SLIM
-OutputBaseFilename=RichIris-Setup-{#MyAppVersion}-online
-#else
 OutputBaseFilename=RichIris-Setup-{#MyAppVersion}
-#endif
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -46,15 +39,10 @@ Source: "..\dist\richiris\_internal\*"; DestDir: "{app}\_internal"; Flags: ignor
 ; Flutter app
 Source: "..\dist\richiris\app\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-#ifdef SLIM
-; Slim mode: bundle only the download script + nssm (needed during install)
+; Dependency downloader (deleted after install)
 Source: "download_deps.ps1"; DestDir: "{app}"; Flags: ignoreversion deleteafterinstall
-#else
-; Full mode: bundle all dependencies
-Source: "..\dist\richiris\dependencies\*"; DestDir: "{app}\dependencies"; Flags: ignoreversion recursesubdirs createallsubdirs
-#endif
 
-; NSSM for service management (always bundled — tiny, needed during install)
+; NSSM for service management (tiny, needed during install)
 Source: "..\dist\richiris\nssm.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -194,11 +182,10 @@ begin
       'set RichIris AppStderr "' + DataDir + '\logs\service-stderr.log"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Slim mode: download dependencies if not already present
+    // Download dependencies if not already present
     PSScript := AppDir + '\download_deps.ps1';
     if FileExists(PSScript) then
     begin
-      // Check if dependencies already exist (upgrade scenario)
       if not FileExists(AppDir + '\dependencies\ffmpeg.exe') or
          not FileExists(AppDir + '\dependencies\go2rtc\go2rtc.exe') then
       begin
@@ -217,8 +204,8 @@ begin
         if DownloadFailed then
         begin
           MsgBox('Some dependencies failed to download. The NVR may not work correctly until they are installed.' + #13#10 + #13#10 +
-            'You can re-run the download script from:' + #13#10 +
-            AppDir + '\download_deps.ps1', mbError, MB_OK);
+            'You can re-run the installer to retry, or download them manually into:' + #13#10 +
+            AppDir + '\dependencies\', mbError, MB_OK);
         end;
       end;
     end;
