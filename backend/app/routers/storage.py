@@ -193,4 +193,4 @@ async def _restart_camera_services() -> None:
 
     # Restart motion detector
     motion = get_motion_detector()
-    motion.start(cameras_list)
+    await motion.start(cameras_list)
