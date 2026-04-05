@@ -2,12 +2,15 @@ import 'dart:io' show Platform, Process;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../services/backup_api.dart';
 import '../services/settings_api.dart';
+import '../widgets/backup_restore_dialog.dart';
 
 class SystemSettingsScreen extends StatefulWidget {
   final SettingsApi settingsApi;
+  final BackupApi? backupApi;
 
-  const SystemSettingsScreen({super.key, required this.settingsApi});
+  const SystemSettingsScreen({super.key, required this.settingsApi, this.backupApi});
 
   @override
   State<SystemSettingsScreen> createState() => _SystemSettingsScreenState();
@@ -32,26 +35,42 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
   }
 
   Future<void> _load() async {
-    try {
-      final settings = await widget.settingsApi.fetchSettings();
-      Map<String, dynamic>? dataDirInfo;
+    // Retry on connection errors (service may still be starting)
+    for (var attempt = 0; attempt < 10; attempt++) {
       try {
-        dataDirInfo = await widget.settingsApi.fetchDataDir();
-      } catch (_) {}
-      if (mounted) {
-        setState(() {
-          _settings = settings;
-          _dataDirInfo = dataDirInfo;
-          _loading = false;
-          _error = null;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _loading = false;
-          _error = 'Failed to load settings: $e';
-        });
+        final settings = await widget.settingsApi.fetchSettings();
+        Map<String, dynamic>? dataDirInfo;
+        try {
+          dataDirInfo = await widget.settingsApi.fetchDataDir();
+        } catch (_) {}
+        if (mounted) {
+          setState(() {
+            _settings = settings;
+            _dataDirInfo = dataDirInfo;
+            _loading = false;
+            _error = null;
+          });
+        }
+        return;
+      } catch (e) {
+        final isConnectionError = e.toString().contains('connection error') ||
+            e.toString().contains('Connection refused') ||
+            e.toString().contains('SocketException');
+        if (!isConnectionError || attempt >= 9) {
+          if (mounted) {
+            setState(() {
+              _loading = false;
+              _error = 'Failed to load settings: $e';
+            });
+          }
+          return;
+        }
+        // Show waiting message and retry
+        if (mounted && attempt == 0) {
+          setState(() => _error = 'Waiting for server to start...');
+        }
+        await Future.delayed(const Duration(seconds: 1));
+        if (!mounted) return;
       }
     }
   }
@@ -133,7 +152,25 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null && _settings == null
-              ? Center(child: Text(_error!, style: const TextStyle(color: Colors.red)))
+              ? Center(
+                  child: _error!.startsWith('Waiting')
+                      ? Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const CircularProgressIndicator(),
+                            const SizedBox(height: 16),
+                            Text(_error!, style: const TextStyle(color: Colors.white70)),
+                          ],
+                        )
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(_error!, style: const TextStyle(color: Colors.red)),
+                            const SizedBox(height: 16),
+                            ElevatedButton(onPressed: () { setState(() { _loading = true; _error = null; }); _load(); }, child: const Text('Retry')),
+                          ],
+                        ),
+                )
               : _buildContent(),
     );
   }
@@ -238,6 +275,10 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             'ERROR',
           ]),
         ]),
+        if (Platform.isWindows && widget.backupApi != null)
+          _buildSection('Backup & Restore', Icons.backup, [
+            _backupRestoreField(),
+          ]),
         const SizedBox(height: 80),
       ],
     );
@@ -346,6 +387,57 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
       setState(() {
         _restartRequired = true;
       });
+    }
+  }
+
+  Widget _backupRestoreField() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Create a backup of your settings, cameras, database, recordings, and thumbnails, or restore from a previous backup.',
+            style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              ElevatedButton.icon(
+                onPressed: () => _openBackupDialog(),
+                icon: const Icon(Icons.backup, size: 16),
+                label: const Text('Create Backup'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: () => _openRestoreDialog(),
+                icon: const Icon(Icons.restore, size: 16),
+                label: const Text('Restore from Backup'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openBackupDialog() async {
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => CreateBackupDialog(backupApi: widget.backupApi!),
+    );
+  }
+
+  Future<void> _openRestoreDialog() async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => RestoreBackupDialog(backupApi: widget.backupApi!),
+    );
+    if (result == true && mounted) {
+      // Reload settings after restore
+      await _load();
     }
   }
 
