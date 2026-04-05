@@ -1,9 +1,8 @@
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, Process;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/settings_api.dart';
-import '../widgets/storage_migration_dialog.dart';
 
 class SystemSettingsScreen extends StatefulWidget {
   final SettingsApi settingsApi;
@@ -36,11 +35,9 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
     try {
       final settings = await widget.settingsApi.fetchSettings();
       Map<String, dynamic>? dataDirInfo;
-      if (Platform.isWindows) {
-        try {
-          dataDirInfo = await widget.settingsApi.fetchDataDir();
-        } catch (_) {}
-      }
+      try {
+        dataDirInfo = await widget.settingsApi.fetchDataDir();
+      } catch (_) {}
       if (mounted) {
         setState(() {
           _settings = settings;
@@ -193,39 +190,45 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             ),
             child: Text(_error!, style: const TextStyle(color: Colors.red)),
           ),
-        if (Platform.isWindows && _dataDirInfo != null)
-          _buildSection('Data Directory', Icons.folder_special, [
+        _buildSection('General', Icons.settings, [
+          _dropdownField('logging', 'timezone', 'Timezone', [
+            'UTC',
+            'US/Eastern',
+            'US/Central',
+            'US/Mountain',
+            'US/Pacific',
+            'Canada/Eastern',
+            'Canada/Central',
+            'Canada/Pacific',
+            'Europe/London',
+            'Europe/Paris',
+            'Europe/Berlin',
+            'Europe/Amsterdam',
+            'Europe/Stockholm',
+            'Europe/Moscow',
+            'Asia/Dubai',
+            'Asia/Kolkata',
+            'Asia/Singapore',
+            'Asia/Shanghai',
+            'Asia/Tokyo',
+            'Asia/Seoul',
+            'Australia/Perth',
+            'Australia/Adelaide',
+            'Australia/Sydney',
+            'Australia/Brisbane',
+            'Pacific/Auckland',
+          ]),
+        ]),
+        if (_dataDirInfo != null)
+          _buildSection('Storage', Icons.storage, [
             _dataDirField(),
           ]),
-        _buildSection('Storage', Icons.folder, [
-          _storageField(),
-        ]),
-        _buildSection('FFmpeg', Icons.movie, [
-          _textField('ffmpeg', 'path', 'FFmpeg Path',
-              hint: 'Path to ffmpeg binary'),
-          _textField('ffmpeg', 'ffprobe_path', 'FFprobe Path',
-              hint: 'Path to ffprobe binary'),
-          _dropdownField('ffmpeg', 'hwaccel', 'Hardware Acceleration', [
-            'cuda',
-            'none',
-            'qsv',
-            'vaapi',
-          ]),
-          _numberField('ffmpeg', 'segment_duration', 'Segment Duration (seconds)'),
-          _dropdownField('ffmpeg', 'rtsp_transport', 'RTSP Transport', [
-            'tcp',
-            'udp',
-          ]),
-        ]),
         _buildSection('Retention', Icons.auto_delete, [
           _numberField('retention', 'max_age_days', 'Max Age (days)'),
           _numberField('retention', 'max_storage_gb', 'Max Storage (GB)'),
         ]),
         _buildSection('Trickplay Thumbnails', Icons.grid_view, [
           _toggleField('trickplay', 'enabled', 'Enable Trickplay'),
-          _numberField('trickplay', 'interval', 'Capture Interval (seconds)'),
-          _numberField('trickplay', 'thumb_width', 'Thumbnail Width'),
-          _numberField('trickplay', 'thumb_height', 'Thumbnail Height'),
         ]),
         _buildSection('Logging', Icons.article, [
           _dropdownField('logging', 'level', 'Log Level', [
@@ -234,13 +237,6 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             'WARNING',
             'ERROR',
           ]),
-          _toggleField('logging', 'json_output', 'JSON Log Output'),
-          _textField('logging', 'timezone', 'Timezone',
-              hint: 'e.g. Australia/Sydney'),
-        ]),
-        _buildSection('go2rtc', Icons.videocam, [
-          _textField('go2rtc', 'host', 'Host', hint: 'localhost'),
-          _numberField('go2rtc', 'port', 'API Port'),
         ]),
         const SizedBox(height: 80),
       ],
@@ -314,10 +310,22 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             style: TextStyle(fontSize: 11, color: Colors.grey[600]),
           ),
           const SizedBox(height: 8),
-          ElevatedButton.icon(
-            onPressed: _openDataDirDialog,
-            icon: const Icon(Icons.drive_file_move, size: 16),
-            label: const Text('Change Data Directory...'),
+          Row(
+            children: [
+              ElevatedButton.icon(
+                onPressed: _openDataDirDialog,
+                icon: const Icon(Icons.drive_file_move, size: 16),
+                label: const Text('Change Data Directory...'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: dataDir.isNotEmpty
+                    ? () => Process.run('explorer.exe', [dataDir])
+                    : null,
+                icon: const Icon(Icons.folder_open, size: 16),
+                label: const Text('Open Folder'),
+              ),
+            ],
           ),
         ],
       ),
@@ -337,60 +345,6 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
       await _load();
       setState(() {
         _restartRequired = true;
-      });
-    }
-  }
-
-  Widget _storageField() {
-    final currentPath = _getValue('storage', 'recordings_dir');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Recordings Directory',
-              style: TextStyle(fontSize: 12, color: Colors.grey)),
-          const SizedBox(height: 6),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF262626),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: const Color(0xFF404040)),
-            ),
-            child: Text(
-              currentPath.isEmpty ? '(default)' : currentPath,
-              style: TextStyle(color: Colors.grey[300]),
-            ),
-          ),
-          const SizedBox(height: 8),
-          ElevatedButton.icon(
-            onPressed: _openMigrationDialog,
-            icon: const Icon(Icons.drive_file_move, size: 16),
-            label: const Text('Change Location...'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _openMigrationDialog() async {
-    final currentPath = _getValue('storage', 'recordings_dir');
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StorageMigrationDialog(
-        settingsApi: widget.settingsApi,
-        currentPath: currentPath,
-      ),
-    );
-    if (result == true && mounted) {
-      // Reload settings to reflect the new path
-      await _load();
-      setState(() {
-        _saved = true;
-        _edits.clear();
       });
     }
   }

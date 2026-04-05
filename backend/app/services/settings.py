@@ -10,32 +10,18 @@ from app.models import Setting
 logger = logging.getLogger(__name__)
 
 # Keys that require a service restart to take effect
-REQUIRES_RESTART = {
-    "go2rtc.host",
-    "go2rtc.port",
-}
+REQUIRES_RESTART: set[str] = set()
 
 # Keys that require stopping/restarting recording streams (not the whole service)
-REQUIRES_STREAM_RESTART = {
-    "storage.recordings_dir",
-}
+REQUIRES_STREAM_RESTART: set[str] = set()
 
 # Default values for all settings, grouped by category.
 # These are seeded into the DB on first run.
 DEFAULTS: dict[str, dict[str, str]] = {
-    "storage": {
-        "recordings_dir": "",  # Filled at runtime from bootstrap data_dir
-    },
     "ffmpeg": {
-        "path": "ffmpeg",
-        "ffprobe_path": "ffprobe",
         "hwaccel": "cuda",
         "segment_duration": "900",
         "rtsp_transport": "tcp",
-    },
-    "go2rtc": {
-        "host": "localhost",
-        "port": "1984",
     },
     "retention": {
         "max_age_days": "30",
@@ -50,7 +36,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
     "logging": {
         "level": "DEBUG",
         "json_output": "false",
-        "timezone": "Australia/Sydney",
+        "timezone": "UTC",
     },
 }
 
@@ -64,18 +50,35 @@ def _flat_defaults() -> dict[str, tuple[str, str]]:
     return result
 
 
+# Settings that were removed (auto-resolved, not user-configurable).
+# Cleaned up from existing databases on startup.
+_DEPRECATED_KEYS = {
+    "ffmpeg.path", "ffmpeg.ffprobe_path",
+    "go2rtc.host", "go2rtc.port",
+    "storage.recordings_dir",
+}
+
+
 async def seed_defaults(session: AsyncSession, data_dir: str = "") -> None:
     """Insert default settings for any missing keys. Called from init_db."""
     existing = await session.execute(select(Setting.key))
     existing_keys = {row[0] for row in existing}
 
+    # Remove deprecated settings from existing databases
+    removed = 0
+    for dep_key in _DEPRECATED_KEYS & existing_keys:
+        dep = await session.get(Setting, dep_key)
+        if dep:
+            await session.delete(dep)
+            removed += 1
+    if removed:
+        await session.commit()
+        logger.info("Removed deprecated settings", extra={"count": removed})
+
     defaults = _flat_defaults()
     inserted = 0
     for full_key, (value, category) in defaults.items():
         if full_key not in existing_keys:
-            # Use data_dir-relative default for recordings_dir
-            if full_key == "storage.recordings_dir" and data_dir:
-                value = f"{data_dir}/recordings"
             session.add(Setting(key=full_key, value=value, category=category))
             inserted += 1
 

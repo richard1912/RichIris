@@ -176,7 +176,7 @@ class TrickplayConfig:
 class LoggingConfig:
     level: str = "DEBUG"
     json_output: bool = False
-    timezone: str = "Australia/Sydney"
+    timezone: str = "UTC"
 
 
 @dataclass
@@ -225,9 +225,8 @@ def _populate_from_bootstrap(config: AppConfig, bootstrap: BootstrapConfig) -> N
 
     config.storage.database_url = f"sqlite+aiosqlite:///{new_db}"
 
-    # Default recordings_dir (may be overridden by DB setting)
-    if not config.storage.recordings_dir:
-        config.storage.recordings_dir = str(data_dir / "recordings")
+    # Recordings always live under {data_dir}/recordings/
+    config.storage.recordings_dir = str(data_dir / "recordings")
 
     # Thumbnails are always under {data_dir}/thumbnails/
     config.storage.thumbnails_dir = str(data_dir / "thumbnails")
@@ -258,25 +257,12 @@ def _apply_db_settings(config: AppConfig, settings: dict[str, str]) -> None:
             return False
         return default
 
-    # Storage
-    if _get("storage.recordings_dir"):
-        config.storage.recordings_dir = _get("storage.recordings_dir")
-
-    # FFmpeg — only override if DB has a non-default explicit path
-    ffmpeg_path = _get("ffmpeg.path")
-    if ffmpeg_path and ffmpeg_path not in ("ffmpeg", "ffmpeg.exe", ""):
-        config.ffmpeg.path = ffmpeg_path
-    ffprobe_path = _get("ffmpeg.ffprobe_path")
-    if ffprobe_path and ffprobe_path not in ("ffprobe", "ffprobe.exe", ""):
-        config.ffmpeg.ffprobe_path = ffprobe_path
-
+    # FFmpeg (path/ffprobe_path auto-resolved from dependencies/ — not user-configurable)
     config.ffmpeg.hwaccel = _get("ffmpeg.hwaccel") or config.ffmpeg.hwaccel
     config.ffmpeg.segment_duration = _get_int("ffmpeg.segment_duration", config.ffmpeg.segment_duration)
     config.ffmpeg.rtsp_transport = _get("ffmpeg.rtsp_transport") or config.ffmpeg.rtsp_transport
 
-    # go2rtc
-    config.go2rtc.host = _get("go2rtc.host") or config.go2rtc.host
-    config.go2rtc.port = _get_int("go2rtc.port", config.go2rtc.port)
+    # go2rtc (host/port hardcoded — managed child process, not user-configurable)
 
     # Retention
     config.retention.max_age_days = _get_int("retention.max_age_days", config.retention.max_age_days)
@@ -333,8 +319,7 @@ async def migrate_legacy_config(session) -> None:
 
     # Map yaml sections to settings keys
     mappings = {
-        "ffmpeg": ["path", "ffprobe_path", "hwaccel", "segment_duration", "rtsp_transport"],
-        "go2rtc": ["host", "port"],
+        "ffmpeg": ["hwaccel", "segment_duration", "rtsp_transport"],
         "retention": ["max_age_days", "max_storage_gb"],
         "trickplay": ["enabled", "interval", "thumb_width", "thumb_height"],
         "logging": ["level", "json_output", "timezone"],
@@ -348,12 +333,6 @@ async def migrate_legacy_config(session) -> None:
                 full_key = f"{section}.{key}"
                 await set_setting(session, full_key, str(section_data[key]))
                 count += 1
-
-    # Storage recordings_dir
-    storage = data.get("storage", {})
-    if "recordings_dir" in storage:
-        await set_setting(session, "storage.recordings_dir", str(storage["recordings_dir"]))
-        count += 1
 
     # Mark as migrated
     await set_setting(session, "_migrated_from_yaml", "true")

@@ -17,7 +17,7 @@ def _make_timestamper(tz: ZoneInfo):
     return timestamper
 
 
-def setup_logging(level: str = "DEBUG", json_output: bool = False, timezone: str = "Australia/Sydney") -> None:
+def setup_logging(level: str = "DEBUG", json_output: bool = False, timezone: str = "UTC") -> None:
     """Configure structured logging for the application."""
     log_level = getattr(logging, level.upper(), logging.DEBUG)
     tz = ZoneInfo(timezone)
