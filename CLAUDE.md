@@ -25,7 +25,7 @@ update claude md as needed for code changes
 - **Release build**: `build_release.bat` (PyInstaller backend + Flutter app + nssm; deps downloaded by installer at install time)
 - **Dev setup**: `setup_dev.bat` (downloads all external dependencies into `dependencies/`)
 - **Installer**: `ISCC.exe installer\richiris.iss` → `dist/RichIris-Setup-1.0.0.exe` (downloads deps at install time)
-- **Release scripts**: `push_release_win.bat` / `push_release_apk.bat` (build + GitHub release with Claude-generated changelog, gitignored)
+- **Release script**: `push_release.bat` (builds Windows installer + Android APK, creates GitHub release with Claude-generated changelog, gitignored)
 - **API docs**: http://localhost:8700/docs
 - **Binary resolution**: ffmpeg/ffprobe resolved in order: bundled `dependencies/` → system PATH → bare name fallback (no DB setting)
 
@@ -91,6 +91,7 @@ RichIris/
 │   │   ├── models.py            # Camera, Recording, ClipExport
 │   │   ├── schemas.py           # Pydantic schemas
 │   │   ├── routers/
+│   │   │   ├── backup.py        # Backup/restore /api/backup (create, inspect, restore, progress)
 │   │   │   ├── cameras.py       # CRUD /api/cameras
 │   │   │   ├── clips.py         # Clip export /api/clips (no duration limit)
 │   │   │   ├── recordings.py    # Playback /api/recordings + transcode sessions
@@ -100,6 +101,7 @@ RichIris/
 │   │   │   ├── system.py        # /api/system/status + storage + retention
 │   │   │   └── motion.py        # /api/motion events
 │   │   └── services/
+│   │       ├── backup.py              # Backup/restore archive creation + extraction
 │   │       ├── ffmpeg.py              # Command builder (recording only)
 │   │       ├── stream_manager.py      # FFmpeg recording process lifecycle + go2rtc registration
 │   │       ├── go2rtc_client.py       # REST client for go2rtc stream management
@@ -124,9 +126,9 @@ RichIris/
 │   │   ├── theme.dart           # Dark theme
 │   │   ├── config/              # API config, quality tiers, constants
 │   │   ├── models/              # Data classes (Camera, RecordingSegment, etc.)
-│   │   ├── services/            # API layer (Dio HTTP client) + settings_api.dart
+│   │   ├── services/            # API layer (Dio HTTP client) + settings_api.dart + backup_api.dart
 │   │   ├── screens/             # Home, Fullscreen, System, Settings, SystemSettings, CameraForm
-│   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector, StorageMigrationDialog
+│   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector, StorageMigrationDialog, BackupRestoreDialog
 │   │   │   └── timeline/        # CustomPainter timeline (controller, painter, minimap)
 │   │   └── utils/               # Time/format utilities
 │   └── pubspec.yaml             # Dependencies: media_kit, dio, shared_preferences
@@ -162,6 +164,14 @@ RichIris/
 - Log entry/exit, parameters, and outcomes for significant operations
 
 ## API Endpoints
+- `GET /api/backup/preview` - Size estimates per backup component
+- `POST /api/backup/create` - Start backup `{components: [...], target_path}`, returns backup_id
+- `GET /api/backup/{id}/progress` - Poll backup progress (files/bytes done, status, current_file)
+- `POST /api/backup/{id}/cancel` - Cancel in-progress backup
+- `POST /api/backup/inspect` - Inspect .richiris file `{file_path}`, returns manifest with available components
+- `POST /api/backup/restore` - Start restore `{file_path, components: [...]}`, stops services if needed
+- `GET /api/backup/restore/{id}/progress` - Poll restore progress (auto-restarts services on completion)
+- `POST /api/backup/restore/{id}/cancel` - Cancel in-progress restore
 - `GET/POST/PUT/DELETE /api/cameras` - Camera CRUD
 - `GET /api/streams/{id}/live` - go2rtc stream info (stream_name, port) for WebSocket MSE URL construction
 - `GET /api/streams/{id}/live.mp4?stream=&quality=` - HTTP fMP4 proxy for native app live view (proxies go2rtc stream.mp4)
@@ -239,9 +249,8 @@ PowerShell script run by the installer to download:
 
 Files go to `{install_dir}/dependencies/`. Script is deleted after install. On upgrade, existing deps are kept (skip logic).
 
-### Release scripts (gitignored)
-- `push_release_win.bat` — builds Windows installer, generates changelog via Claude CLI, creates GitHub release with auto-incrementing version tag (v0.0.1, v0.0.2, ...)
-- `push_release_apk.bat` — builds Android APK, uploads to existing release or creates new one with Claude-generated changelog
+### Release script (gitignored)
+`push_release.bat` — builds Windows installer + Android APK, generates changelog via Claude CLI, creates a single GitHub release with both assets. Auto-incrementing version tags (v0.0.1, v0.0.2, ...).
 
 ### Dev setup (`setup_dev.bat`)
 One-command dev environment: downloads all external dependencies into `dependencies/`, installs Python packages. See DEV-GUIDE.md for details.
@@ -266,3 +275,4 @@ One-command dev environment: downloads all external dependencies into `dependenc
 14. Configurable storage location - Installer data dir picker, runtime recordings dir migration (move/copy/path-only) via Settings screen, playback cache path fix (DONE)
 15. Data directory restructure - Structured `{data_dir}/` with database/, logs/, recordings/, thumbnails/, playback/ subdirs. Thumbnails separated from recordings. DB in own subdir with auto-migration. Data dir changeable from System Settings with move/copy/path-only migration. Installer always writes bootstrap.yaml with user's chosen data dir. (DONE)
 16. Settings simplification + installer - Removed auto-resolved settings from UI (ffmpeg paths, go2rtc host/port, recordings dir). Single data_dir controls all storage. Timezone moved to General section as dropdown (default UTC). Removed JSON log output toggle. Trickplay pane simplified to enable toggle only. Deprecated DB keys auto-cleaned on startup. Single installer that downloads deps at install time. `setup_dev.bat` for one-command dev setup. Release scripts with Claude-generated changelogs. (DONE)
+17. Backup & Restore - Full data backup/restore via System Settings (Windows only). Users select components (settings, cameras, database, recordings, thumbnails) with size previews. Creates `.richiris` ZIP archive (ZIP64, no compression for video). Restore merges recordings/thumbnails (existing files kept), upserts cameras by name, overwrites settings/DB. Progress tracking with cancel support. Services auto-stop/restart during restore. (DONE)
