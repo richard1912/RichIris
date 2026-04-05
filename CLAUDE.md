@@ -15,18 +15,19 @@ update claude md as needed for code changes
   ├── thumbnails/{camera}/    # Trickplay + detection thumbnails per camera per day
   └── playback/               # Transient transcoded MP4s (auto-cleaned after 30s idle)
   ```
-- **Recordings**: Configurable via settings (default `{data_dir}/recordings`), stored per camera per day as `Camera 1 2026-03-08 13.30 - 13.45.ts`. Location changeable at runtime via storage migration dialog.
+- **Recordings**: Always at `{data_dir}/recordings/`, stored per camera per day as `Camera 1 2026-03-08 13.30 - 13.45.ts`. Change data_dir to move everything.
 - **Thumbnails**: Stored in `{data_dir}/thumbnails/{camera}/{date}/thumbs/` (separate from recordings). Detection thumbnails in `detection_thumbs/` subdir.
 - **Database**: `{data_dir}/database/richiris.db` (SQLite, auto-created on first run). Auto-migrates from old `{data_dir}/richiris.db` location on startup.
 - **Playback cache**: `{data_dir}/playback/` (transient transcoded MP4s, auto-cleaned after 30s idle).
 - **App**: Flutter app in `app/` (Windows + Android)
 - **App build (Windows)**: `cd app && flutter build windows --release` → `app/build/windows/x64/runner/Release/`
 - **App build (Android)**: `cd app && flutter build apk --release` → `app/build/app/outputs/flutter-apk/`
-- **Release build**: `build_release.bat` (full, bundles all deps) or `build_release.bat --slim` (deps downloaded at install time)
+- **Release build**: `build_release.bat` (PyInstaller backend + Flutter app + nssm; deps downloaded by installer at install time)
 - **Dev setup**: `setup_dev.bat` (downloads all external dependencies into `dependencies/`)
-- **Installer**: `installer/richiris.iss` (Inno Setup — `ISCC richiris.iss` for full offline, `ISCC /DSLIM richiris.iss` for slim online)
+- **Installer**: `ISCC.exe installer\richiris.iss` → `dist/RichIris-Setup-1.0.0.exe` (downloads deps at install time)
+- **Release scripts**: `push_release_win.bat` / `push_release_apk.bat` (build + GitHub release with Claude-generated changelog, gitignored)
 - **API docs**: http://localhost:8700/docs
-- **Binary resolution**: ffmpeg/ffprobe resolved in order: bundled `dependencies/` → system PATH → DB setting
+- **Binary resolution**: ffmpeg/ffprobe resolved in order: bundled `dependencies/` → system PATH → bare name fallback (no DB setting)
 
 ## Architecture
 ```
@@ -74,7 +75,7 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTS
 
 ### Important: Timezone handling
 - Recordings are stored in the DB as **local time without timezone** (e.g. `2026-03-08T10:36:02`)
-- Server is **UTC+11** (Australia)
+- Timezone is configurable via Settings → General (dropdown, defaults to UTC)
 - Frontend must NOT use `.toISOString()` for playback times (converts to UTC, breaks queries)
 - Always format times as local ISO strings to match DB format
 
@@ -143,8 +144,10 @@ RichIris/
 │   ├── nssm.exe                 # Windows service manager
 │   ├── go2rtc/go2rtc.exe        # RTSP → HTTP fMP4
 │   └── models/yolo11x.onnx      # YOLO11x ONNX model (218 MB)
+├── setup_dev.bat                # One-command dev setup (downloads deps + installs packages)
 ├── installer/
-│   └── richiris.iss             # Inno Setup installer script
+│   ├── richiris.iss             # Inno Setup installer script (full + slim modes)
+│   └── download_deps.ps1       # Slim installer dependency downloader (PowerShell)
 └── data/                        # gitignored: DB + playback cache + logs
 ```
 
@@ -207,6 +210,42 @@ RichIris/
 - **Packaging**: PyInstaller (backend → standalone exe), Inno Setup (installer)
 - **All external binaries in `dependencies/`**: ffmpeg.exe, ffprobe.exe, nssm.exe, go2rtc/go2rtc.exe, models/yolo11x.onnx (gitignored, ~388 MB total). `build_release.bat` copies from here — no downloads during build.
 
+## Build & Distribution
+
+### Release build (`build_release.bat`)
+Builds the backend (PyInstaller) + Flutter Windows app + assembles into `dist/richiris/`. Only nssm.exe is bundled — all other dependencies (ffmpeg, go2rtc, YOLO model) are downloaded by the installer at install time.
+
+Steps: verify nssm → PyInstaller backend → Flutter Windows build → assemble `dist/richiris/` → verify.
+
+### Installer (`installer/richiris.iss`)
+Single Inno Setup script: `ISCC.exe installer\richiris.iss` → `dist/RichIris-Setup-1.0.0.exe`
+
+Installer wizard flow:
+1. Install directory picker (default: `C:\Program Files\RichIris`)
+2. **Data directory picker** — custom wizard page for choosing where recordings, database, logs, thumbnails live. Default: `C:\ProgramData\RichIris`. Pre-populated from existing `bootstrap.yaml` on upgrades.
+3. Post-install:
+   - Creates data subdirectories (`database/`, `logs/`, `recordings/`, `thumbnails/`, `playback/`)
+   - Writes `bootstrap.yaml` with chosen data_dir and port 8700
+   - Sets NSSM stdout/stderr log paths to `{data_dir}/logs/`
+   - Runs `download_deps.ps1` via PowerShell to download ffmpeg, go2rtc, and YOLO model. Skips already-present files (upgrade scenario). Shows error dialog if downloads fail but continues.
+   - Installs + starts Windows service `RichIris` via NSSM
+   - Optionally launches the Flutter app
+
+### Dependency downloader (`installer/download_deps.ps1`)
+PowerShell script run by the installer to download:
+- ffmpeg + ffprobe from gyan.dev GitHub release
+- go2rtc from AlexxIT GitHub release
+- YOLO11x ONNX model from RichIris GitHub release
+
+Files go to `{install_dir}/dependencies/`. Script is deleted after install. On upgrade, existing deps are kept (skip logic).
+
+### Release scripts (gitignored)
+- `push_release_win.bat` — builds Windows installer, generates changelog via Claude CLI, creates GitHub release with auto-incrementing version tag (v0.0.1, v0.0.2, ...)
+- `push_release_apk.bat` — builds Android APK, uploads to existing release or creates new one with Claude-generated changelog
+
+### Dev setup (`setup_dev.bat`)
+One-command dev environment: downloads all external dependencies into `dependencies/`, installs Python packages. See DEV-GUIDE.md for details.
+
 ## Cameras
 6 cameras configured in config.yaml on 192.168.8.42-47. Streams are RTSP, codec is HEVC (H.265) at 4K (3840x2160). Sub-streams are HEVC (H.265) for HTMS cameras (42,44,45,46,47) and H.264 for Reolink (43).
 
@@ -226,3 +265,4 @@ RichIris/
 13. Distribution readiness - DB-backed settings (replaced config.yaml), bootstrap.yaml, GUI system settings, dependency bundling, go2rtc child process management, PyInstaller packaging, Inno Setup installer (DONE)
 14. Configurable storage location - Installer data dir picker, runtime recordings dir migration (move/copy/path-only) via Settings screen, playback cache path fix (DONE)
 15. Data directory restructure - Structured `{data_dir}/` with database/, logs/, recordings/, thumbnails/, playback/ subdirs. Thumbnails separated from recordings. DB in own subdir with auto-migration. Data dir changeable from System Settings with move/copy/path-only migration. Installer always writes bootstrap.yaml with user's chosen data dir. (DONE)
+16. Settings simplification + installer - Removed auto-resolved settings from UI (ffmpeg paths, go2rtc host/port, recordings dir). Single data_dir controls all storage. Timezone moved to General section as dropdown (default UTC). Removed JSON log output toggle. Trickplay pane simplified to enable toggle only. Deprecated DB keys auto-cleaned on startup. Single installer that downloads deps at install time. `setup_dev.bat` for one-command dev setup. Release scripts with Claude-generated changelogs. (DONE)
