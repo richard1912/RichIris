@@ -1,9 +1,11 @@
 ; RichIris NVR - Inno Setup Script
 ; Build the distribution first: build_release.bat
-; Then compile: ISCC.exe installer\richiris.iss
+; Then compile: ISCC.exe /DMyAppVersion=0.0.1 installer\richiris.iss
 
 #define MyAppName "RichIris NVR"
-#define MyAppVersion "1.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.1"
+#endif
 #define MyAppPublisher "RichIris"
 #define MyAppURL "https://github.com/richard1912/RichIris"
 #define MyAppExeName "richiris.exe"
