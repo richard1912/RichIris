@@ -1,9 +1,0 @@
-api:
-  listen: ":1984"
-rtsp:
-  listen: "127.0.0.1:8554"
-webrtc:
-  listen: ""
-ffmpeg:
-  bin: "C:/path/to/ffmpeg.exe"  # Required for HEVC→H.264 transcode
-streams: {}  # Streams are registered dynamically by RichIris on startup
