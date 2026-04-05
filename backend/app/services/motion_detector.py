@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -82,9 +82,11 @@ class MotionDetector:
                      "persons": True, "vehicles": True, "animals": True, "motion_only": True}]
         return []
 
-    def start(self, cameras: list) -> None:
+    async def start(self, cameras: list) -> None:
         self._running = True
         self._client = httpx.AsyncClient(timeout=FRAME_TIMEOUT)
+        # Close any orphaned events from previous runs (service restart / crash)
+        await self._close_orphaned_events()
         cfg = get_config().go2rtc
         # Stagger camera starts to avoid concurrent go2rtc stream creation
         stagger_delay = 0
@@ -109,6 +111,23 @@ class MotionDetector:
         if self._tasks:
             logger.info("Motion detector started", extra={"cameras": len(self._tasks)})
 
+    async def _close_orphaned_events(self) -> None:
+        """Close any events with no end_time (orphaned by previous restart/crash)."""
+        factory = get_session_factory()
+        async with factory() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(MotionEvent).where(MotionEvent.end_time.is_(None))
+            )
+            orphaned = result.scalars().all()
+            if orphaned:
+                for event in orphaned:
+                    # Set end_time to start_time + MAX_EVENT_DURATION or now, whichever is earlier
+                    max_end = event.start_time + timedelta(seconds=MAX_EVENT_DURATION)
+                    event.end_time = min(max_end, datetime.now())
+                await session.commit()
+                logger.info("Closed orphaned motion events", extra={"count": len(orphaned)})
+
     async def stop(self) -> None:
         self._running = False
         for task in self._tasks.values():
@@ -116,6 +135,9 @@ class MotionDetector:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
+        # Finalize all active events before shutdown
+        for key in list(self._active_events):
+            await self._finalize_event(key)
         if self._client:
             await self._client.aclose()
             self._client = None

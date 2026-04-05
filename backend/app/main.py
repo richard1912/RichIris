@@ -3,16 +3,17 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 import httpx
 from sqlalchemy import select
 
-from app.config import get_config
+from app.config import get_app_dir, get_config
 from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
-from app.routers import cameras, clips, motion, recordings, settings, storage, streams, system
+from app.routers import backup, cameras, clips, motion, recordings, settings, storage, streams, system
 from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
@@ -89,7 +90,12 @@ async def lifespan(app: FastAPI):
         await obj_detector.start()
 
     motion_detector = get_motion_detector()
-    motion_detector.start(cameras_list)
+    await motion_detector.start(cameras_list)
+
+    from app.services.update_checker import get_update_checker
+    update_checker = get_update_checker()
+    app_exe = Path(get_app_dir()) / "app" / "richiris.exe"
+    await update_checker.start(current_version=app.version, app_exe=app_exe)
 
     scan_task = asyncio.create_task(_periodic_scan())
     retention_task = asyncio.create_task(_periodic_retention())
@@ -98,6 +104,7 @@ async def lifespan(app: FastAPI):
     retention_task.cancel()
 
     logger.info("RichIris NVR shutting down")
+    await update_checker.stop()
     await motion_detector.stop()
     await obj_detector.stop()
     mgr = get_stream_manager()
@@ -246,6 +253,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    app.include_router(backup.router)
     app.include_router(cameras.router)
     app.include_router(clips.router)
     app.include_router(motion.router)
