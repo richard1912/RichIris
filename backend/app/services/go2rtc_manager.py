@@ -1,8 +1,10 @@
 """go2rtc lifecycle manager — starts/stops go2rtc as a child process."""
 
 import asyncio
+import ctypes
 import logging
 import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -36,6 +38,15 @@ def _resolve_go2rtc_binary() -> str | None:
     return None
 
 
+def _get_short_path(path: str) -> str:
+    """Get Windows 8.3 short path to avoid spaces (go2rtc can't handle them)."""
+    if sys.platform == "win32" and " " in path:
+        buf = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.kernel32.GetShortPathNameW(path, buf, 260) > 0:
+            return buf.value
+    return path
+
+
 def _generate_go2rtc_config(binary_dir: Path, streams: dict | None = None) -> Path:
     """Generate go2rtc.yaml with ffmpeg config and camera streams.
 
@@ -43,11 +54,15 @@ def _generate_go2rtc_config(binary_dir: Path, streams: dict | None = None) -> Pa
     go2rtc watches its config file; API-registered streams get wiped on reload.
     """
     config = get_config()
+
+    # Use Windows 8.3 short path for ffmpeg — go2rtc can't handle spaces in bin path
+    ffmpeg_bin = _get_short_path(config.ffmpeg.path)
+
     go2rtc_config = {
         "api": {"listen": f":{config.go2rtc.port}"},
         "ffmpeg": {
-            "bin": config.ffmpeg.path,
-            # Use NVENC GPU encoders. H.264 output avoids go2rtc's h265 fMP4 crash bug.
+            "bin": ffmpeg_bin,
+            # Use NVENC GPU encoders
             "h264": "-c:v h264_nvenc -g:v 30 -bf 0 -profile:v high -level:v auto",
             "h265": "-c:v hevc_nvenc -g:v 30 -bf 0 -profile:v main -level:v auto",
         },
