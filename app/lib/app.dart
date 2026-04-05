@@ -19,6 +19,7 @@ import 'services/camera_api.dart';
 import 'services/recording_api.dart';
 import 'services/clip_api.dart';
 import 'services/motion_api.dart';
+import 'services/backup_api.dart';
 import 'services/settings_api.dart';
 import 'services/system_api.dart';
 import 'services/stream_api.dart';
@@ -40,6 +41,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   SystemApi? _systemApi;
   StreamApi? _streamApi;
   SettingsApi? _settingsApi;
+  BackupApi? _backupApi;
 
   String? _serverUrl;
   bool _loading = true;
@@ -105,24 +107,34 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     _systemApi = SystemApi(_apiClient!);
     _streamApi = StreamApi(_apiClient!);
     _settingsApi = SettingsApi(_apiClient!);
+    _backupApi = BackupApi(_apiClient!);
     _fetchInitialData();
   }
 
   Future<void> _fetchInitialData() async {
-    try {
-      final results = await Future.wait([
-        _systemApi!.fetchTzOffsetMs(),
-        _cameraApi!.fetchAll(),
-        _systemApi!.fetchStatus(),
-      ]);
-      if (mounted) {
-        setState(() {
-          _tzOffsetMs = results[0] as int;
-          _cameras = results[1] as List<Camera>;
-          _systemStatus = results[2] as SystemStatus;
-        });
+    // Retry on connection errors (service may still be starting after install)
+    for (var attempt = 0; attempt < 15; attempt++) {
+      try {
+        final results = await Future.wait([
+          _systemApi!.fetchTzOffsetMs(),
+          _cameraApi!.fetchAll(),
+          _systemApi!.fetchStatus(),
+        ]);
+        if (mounted) {
+          setState(() {
+            _tzOffsetMs = results[0] as int;
+            _cameras = results[1] as List<Camera>;
+            _systemStatus = results[2] as SystemStatus;
+          });
+        }
+        return;
+      } catch (_) {
+        if (attempt < 14) {
+          await Future.delayed(const Duration(seconds: 2));
+          if (!mounted) return;
+        }
       }
-    } catch (_) {}
+    }
   }
 
   Future<void> _refreshCameras() async {
@@ -185,6 +197,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   systemApi: _systemApi!,
                   streamApi: _streamApi!,
                   settingsApi: _settingsApi!,
+                  backupApi: _backupApi!,
                   apiClient: _apiClient!,
                   cameras: _cameras,
                   systemStatus: _systemStatus,
@@ -211,6 +224,7 @@ class _MainNav extends StatefulWidget {
   final SystemApi systemApi;
   final StreamApi streamApi;
   final SettingsApi settingsApi;
+  final BackupApi backupApi;
   final ApiClient apiClient;
   final List<Camera> cameras;
   final SystemStatus? systemStatus;
@@ -233,6 +247,7 @@ class _MainNav extends StatefulWidget {
     required this.systemApi,
     required this.streamApi,
     required this.settingsApi,
+    required this.backupApi,
     required this.apiClient,
     required this.cameras,
     required this.systemStatus,
@@ -467,6 +482,7 @@ class _MainNavState extends State<_MainNav> {
               Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => SystemSettingsScreen(
                   settingsApi: widget.settingsApi,
+                  backupApi: widget.backupApi,
                 ),
               ));
             },
