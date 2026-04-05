@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'config/api_config.dart';
 import 'config/constants.dart';
@@ -23,10 +26,13 @@ import 'services/backup_api.dart';
 import 'services/settings_api.dart';
 import 'services/system_api.dart';
 import 'services/stream_api.dart';
+import 'services/update_service.dart';
+import 'widgets/update_dialog.dart';
 import 'theme.dart';
 
 class RichIrisApp extends StatefulWidget {
-  const RichIrisApp({super.key});
+  final bool updateOnly;
+  const RichIrisApp({super.key, this.updateOnly = false});
 
   @override
   State<RichIrisApp> createState() => RichIrisAppState();
@@ -42,8 +48,10 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   StreamApi? _streamApi;
   SettingsApi? _settingsApi;
   BackupApi? _backupApi;
+  UpdateService? _updateService;
 
   String? _serverUrl;
+  String _appVersion = '';
   bool _loading = true;
   Quality _liveQuality = Quality.high;
   Quality _playbackQuality = Quality.direct;
@@ -69,6 +77,10 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   }
 
   Future<void> _loadSettings() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      _appVersion = info.version;
+    } catch (_) {}
     final url = await getSavedServerUrl();
     final prefs = await SharedPreferences.getInstance();
     final lqName = prefs.getString(kQualityKey);
@@ -100,6 +112,14 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
 
   void _initApi(String url) {
     _apiClient = ApiClient(url);
+    _updateService = UpdateService(_apiClient!);
+
+    if (widget.updateOnly) {
+      // Minimal mode: only need the update service, skip everything else
+      _checkUpdateOnly();
+      return;
+    }
+
     _cameraApi = CameraApi(_apiClient!);
     _recordingApi = RecordingApi(_apiClient!);
     _clipApi = ClipApi(_apiClient!);
@@ -109,6 +129,36 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     _settingsApi = SettingsApi(_apiClient!);
     _backupApi = BackupApi(_apiClient!);
     _fetchInitialData();
+  }
+
+  Future<void> _checkUpdateOnly() async {
+    // In update-only mode, wait for backend to be reachable, then show dialog
+    for (var attempt = 0; attempt < 10; attempt++) {
+      try {
+        final update = await _updateService!.getUpdate();
+        if (update != null && mounted) {
+          // ignore: use_build_context_synchronously
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => UpdateDialog(
+              update: update,
+              updateService: _updateService!,
+              updateOnly: true,
+            ),
+          );
+          return;
+        }
+        // No update available (edge case: update was installed between check and launch)
+        if (mounted) exit(0);
+        return;
+      } catch (_) {
+        await Future.delayed(const Duration(seconds: 2));
+        if (!mounted) return;
+      }
+    }
+    // Couldn't reach backend after retries — exit
+    exit(0);
   }
 
   Future<void> _fetchInitialData() async {
@@ -187,7 +237,9 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
       debugShowCheckedModeBanner: false,
       home: _loading
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
-          : _serverUrl == null
+          : widget.updateOnly
+              ? const Scaffold(body: SizedBox.shrink())
+              : _serverUrl == null
               ? SettingsScreen(onSaved: _onServerUrlSet)
               : _MainNav(
                   cameraApi: _cameraApi!,
@@ -199,6 +251,8 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   settingsApi: _settingsApi!,
                   backupApi: _backupApi!,
                   apiClient: _apiClient!,
+                  updateService: _updateService!,
+                  appVersion: _appVersion,
                   cameras: _cameras,
                   systemStatus: _systemStatus,
                   quality: _quality,
@@ -226,6 +280,8 @@ class _MainNav extends StatefulWidget {
   final SettingsApi settingsApi;
   final BackupApi backupApi;
   final ApiClient apiClient;
+  final UpdateService updateService;
+  final String appVersion;
   final List<Camera> cameras;
   final SystemStatus? systemStatus;
   final Quality quality;
@@ -249,6 +305,8 @@ class _MainNav extends StatefulWidget {
     required this.settingsApi,
     required this.backupApi,
     required this.apiClient,
+    required this.updateService,
+    required this.appVersion,
     required this.cameras,
     required this.systemStatus,
     required this.quality,
@@ -290,6 +348,27 @@ class _MainNavState extends State<_MainNav> {
   void initState() {
     super.initState();
     _startPolling();
+    _scheduleUpdateCheck();
+  }
+
+  void _scheduleUpdateCheck() {
+    Future.delayed(const Duration(seconds: 10), () async {
+      if (!mounted) return;
+      try {
+        final update = await widget.updateService.getUpdate();
+        if (update == null || !mounted) return;
+        if (await widget.updateService.isVersionSkipped(update.version)) return;
+        showDialog(
+          // ignore: use_build_context_synchronously
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => UpdateDialog(
+            update: update,
+            updateService: widget.updateService,
+          ),
+        );
+      } catch (_) {}
+    });
   }
 
   void _startPolling() {
@@ -435,6 +514,8 @@ class _MainNavState extends State<_MainNav> {
             motionApi: widget.motionApi,
             cameraApi: widget.cameraApi,
             systemApi: widget.systemApi,
+            updateService: widget.updateService,
+            appVersion: widget.appVersion,
             tzOffsetMs: widget.tzOffsetMs,
             livePlayers: _livePlayers,
             liveControllers: _liveControllers,

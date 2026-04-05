@@ -318,3 +318,42 @@ async def update_data_dir(body: DataDirUpdateRequest):
         "data_dir": new_data_dir,
         "restart_required": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# Update checking
+# ---------------------------------------------------------------------------
+
+@router.get("/version")
+async def get_version():
+    """Return the installed backend version."""
+    from app.services.update_checker import get_update_checker
+    checker = get_update_checker()
+    return {"version": checker.current_version}
+
+
+@router.get("/update")
+async def get_update_info():
+    """Return cached latest release info (from periodic GitHub check)."""
+    from app.services.update_checker import get_update_checker
+    checker = get_update_checker()
+    return {
+        "update_available": checker.latest_release is not None,
+        "current_version": checker.current_version,
+        "latest": checker.latest_release,
+        "last_checked": checker.last_check.isoformat() if checker.last_check else None,
+    }
+
+
+@router.post("/update/check")
+async def check_for_update():
+    """Force an immediate update check (manual trigger from app)."""
+    from app.services.update_checker import get_update_checker
+    checker = get_update_checker()
+    await checker.check_now()
+    return {
+        "update_available": checker.latest_release is not None,
+        "current_version": checker.current_version,
+        "latest": checker.latest_release,
+        "last_checked": checker.last_check.isoformat() if checker.last_check else None,
+    }

@@ -98,7 +98,7 @@ RichIris/
 │   │   │   ├── settings.py      # GET/PUT /api/settings (system config)
 │   │   │   ├── storage.py       # Storage migration /api/storage (validate, migrate, finalize)
 │   │   │   ├── streams.py       # go2rtc stream info /api/streams/{id}/live
-│   │   │   ├── system.py        # /api/system/status + storage + retention
+│   │   │   ├── system.py        # /api/system/status + storage + retention + update check
 │   │   │   └── motion.py        # /api/motion events
 │   │   └── services/
 │   │       ├── backup.py              # Backup/restore archive creation + extraction
@@ -114,7 +114,8 @@ RichIris/
 │   │       ├── retention.py           # Age + storage-based retention cleanup
 │   │       ├── storage_migration.py  # Recordings dir migration (validate, copy/move, progress)
 │   │       ├── motion_detector.py    # OpenCV frame-diff motion detection
-│   │       └── object_detector.py    # YOLO AI person detection (GPU)
+│   │       ├── object_detector.py    # YOLO AI person detection (GPU)
+│   │       └── update_checker.py    # Periodic GitHub release checker + app launcher
 │   ├── requirements.txt
 │   └── run.py                   # Uvicorn entry point (dev)
 ├── go2rtc/
@@ -126,9 +127,9 @@ RichIris/
 │   │   ├── theme.dart           # Dark theme
 │   │   ├── config/              # API config, quality tiers, constants
 │   │   ├── models/              # Data classes (Camera, RecordingSegment, etc.)
-│   │   ├── services/            # API layer (Dio HTTP client) + settings_api.dart + backup_api.dart
+│   │   ├── services/            # API layer (Dio HTTP client) + settings_api.dart + backup_api.dart + update_service.dart
 │   │   ├── screens/             # Home, Fullscreen, System, Settings, SystemSettings, CameraForm
-│   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector, StorageMigrationDialog, BackupRestoreDialog
+│   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector, StorageMigrationDialog, BackupRestoreDialog, UpdateDialog, VersionInfoDialog
 │   │   │   └── timeline/        # CustomPainter timeline (controller, painter, minimap)
 │   │   └── utils/               # Time/format utilities
 │   └── pubspec.yaml             # Dependencies: media_kit, dio, shared_preferences
@@ -190,6 +191,9 @@ RichIris/
 - `GET /api/settings` - All system settings grouped by category (with requires_restart flags)
 - `PUT /api/settings` - Update settings `{settings: {key: value}}`, returns restart_required flag
 - `GET /api/health` - Health check
+- `GET /api/system/version` - Current backend version
+- `GET /api/system/update` - Cached latest release info (from periodic GitHub check)
+- `POST /api/system/update/check` - Force immediate GitHub release check
 - `POST /api/clips` - Create clip export (camera_id, start_time, end_time, no duration limit)
 - `GET /api/clips` - List clips (optional ?camera_id=)
 - `GET /api/clips/{id}` - Get clip status
@@ -276,3 +280,4 @@ One-command dev environment: downloads all external dependencies into `dependenc
 15. Data directory restructure - Structured `{data_dir}/` with database/, logs/, recordings/, thumbnails/, playback/ subdirs. Thumbnails separated from recordings. DB in own subdir with auto-migration. Data dir changeable from System Settings with move/copy/path-only migration. Installer always writes bootstrap.yaml with user's chosen data dir. (DONE)
 16. Settings simplification + installer - Removed auto-resolved settings from UI (ffmpeg paths, go2rtc host/port, recordings dir). Single data_dir controls all storage. Timezone moved to General section as dropdown (default UTC). Removed JSON log output toggle. Trickplay pane simplified to enable toggle only. Deprecated DB keys auto-cleaned on startup. Single installer that downloads deps at install time. `setup_dev.bat` for one-command dev setup. Release scripts with Claude-generated changelogs. (DONE)
 17. Backup & Restore - Full data backup/restore via System Settings (Windows only). Users select components (settings, cameras, database, recordings, thumbnails) with size previews. Creates `.richiris` ZIP archive (ZIP64, no compression for video). Restore merges recordings/thumbnails (existing files kept), upserts cameras by name, overwrites settings/DB. Progress tracking with cancel support. Services auto-stop/restart during restore. (DONE)
+18. Auto-Update - Backend periodically checks GitHub releases API (every 6h), caches latest release info. Flutter app reads cached info on startup, shows changelog + update dialog with Skip/Remind/Update options. Version shown in app bar (tappable for manual check). Backend launches Flutter app with `--update-only` flag if update found and app not running (minimal mode, no streams). Windows: downloads installer, runs `/VERYSILENT`. Android: downloads APK, opens system installer. `push_release.bat` syncs version to pubspec.yaml + main.py. (DONE)
