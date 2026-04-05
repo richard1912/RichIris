@@ -14,8 +14,8 @@
 ## Getting Started
 
 ```bash
-git clone https://github.com/richard-ferretti/richiris.git
-cd richiris
+git clone https://github.com/richard1912/RichIris.git
+cd RichIris
 ```
 
 ### One-command setup
@@ -122,9 +122,10 @@ richiris/
 │   └── go2rtc.yaml
 ├── bootstrap.yaml     # Minimal runtime config (gitignored)
 ├── setup_dev.bat      # One-command dev setup (downloads dependencies)
-├── build_release.bat  # Full release build script
+├── build_release.bat  # Release build script (PyInstaller + Flutter + assembly)
 └── installer/
-    └── richiris.iss   # Inno Setup installer script
+    ├── richiris.iss       # Inno Setup installer script
+    └── download_deps.ps1  # Dependency downloader (run by installer at install time)
 ```
 
 ## Architecture Overview
@@ -189,10 +190,12 @@ This will:
 ### Creating the installer
 
 ```bash
-ISCC.exe installer\richiris.iss
+ISCC.exe /DMyAppVersion=0.0.1 installer\richiris.iss
 ```
 
-Output: `dist/RichIris-Setup-1.0.0.exe`
+Output: `dist/RichIris-Setup-0.0.1.exe`
+
+The version is passed via `/D` flag — omit it to use the default (`0.0.1`).
 
 The installer is lightweight (~150 MB) and downloads dependencies (ffmpeg, go2rtc, YOLO model) at install time via `installer/download_deps.ps1`. This keeps the installer small and ensures users always get the latest dependency versions.
 
@@ -205,6 +208,15 @@ Post-install, the installer:
 4. Installs + starts the `RichIris` Windows service via NSSM
 
 If a download fails, the installer warns but continues — the NVR works without the YOLO model (no AI detection), but requires ffmpeg and go2rtc. The download script is deleted after install.
+
+### Publishing a release
+
+`push_release.bat` (gitignored, local-only) automates the full release cycle:
+
+1. Auto-increments the version tag (v0.0.1 → v0.0.2 → ...)
+2. Builds the Windows installer and Android APK
+3. Generates a changelog from git commits via Claude CLI
+4. Creates a GitHub release with both assets
 
 ### Android APK (client only)
 

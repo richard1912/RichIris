@@ -37,6 +37,9 @@ dependencies:
   # Directory picker for storage migration
   file_picker: ^8.0.0
 
+  # App version info at runtime
+  package_info_plus: ^8.2.1
+
   cupertino_icons: ^1.0.8
 
 dev_dependencies:

@@ -15,7 +15,9 @@ import '../services/system_api.dart';
 import '../models/playback_session.dart';
 import '../models/playback_ref.dart';
 import '../services/camera_api.dart';
+import '../services/update_service.dart';
 import '../widgets/camera_grid.dart';
+import '../widgets/version_info_dialog.dart';
 import '../widgets/quality_selector.dart';
 import '../widgets/timeline/timeline_widget.dart';
 
@@ -30,6 +32,8 @@ class HomeScreen extends StatefulWidget {
   final MotionApi motionApi;
   final CameraApi cameraApi;
   final SystemApi systemApi;
+  final UpdateService updateService;
+  final String appVersion;
   final int tzOffsetMs;
   final Map<int, Player> livePlayers;
   final Map<int, VideoController> liveControllers;
@@ -61,6 +65,8 @@ class HomeScreen extends StatefulWidget {
     required this.motionApi,
     required this.cameraApi,
     required this.systemApi,
+    required this.updateService,
+    required this.appVersion,
     required this.tzOffsetMs,
     required this.livePlayers,
     required this.liveControllers,
@@ -444,6 +450,22 @@ class _HomeScreenState extends State<HomeScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text('RichIris', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            if (widget.appVersion.isNotEmpty) ...[
+              const SizedBox(width: 6),
+              GestureDetector(
+                onTap: () => showDialog(
+                  context: context,
+                  builder: (_) => VersionInfoDialog(
+                    currentVersion: widget.appVersion,
+                    updateService: widget.updateService,
+                  ),
+                ),
+                child: Text(
+                  'v${widget.appVersion}',
+                  style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                ),
+              ),
+            ],
             const SizedBox(width: 12),
             TextButton.icon(
               onPressed: () => launchUrl(

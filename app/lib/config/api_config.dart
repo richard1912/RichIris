@@ -5,6 +5,7 @@ const kServerUrlKey = 'richiris_server_url';
 const kQualityKey = 'richiris-quality';
 const kPlaybackQualityKey = 'richiris-playback-quality';
 const kStreamSourceKey = 'richiris-stream-source';
+const kSkippedVersionKey = 'richiris-skipped-version';
 
 Future<String?> getSavedServerUrl() async {
   final prefs = await SharedPreferences.getInstance();
