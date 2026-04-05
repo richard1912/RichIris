@@ -50,9 +50,8 @@ Camera Light Control/
 # ML models
 *.pt
 
-# Release scripts (local-only automation)
-push_release_win.bat
-push_release_apk.bat
+# Release script (local-only automation)
+push_release.bat
 
 # Claude Code
 .claude/
