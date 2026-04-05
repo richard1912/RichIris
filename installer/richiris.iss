@@ -81,13 +81,21 @@ var
 function ReadExistingDataDir(): String;
 var
   BootstrapPath: String;
+  PrevDir: String;
   Lines: TArrayOfString;
   I: Integer;
   Line: String;
   Value: String;
 begin
   Result := '';
-  BootstrapPath := ExpandConstant('{app}\bootstrap.yaml');
+  // {app} isn't available yet during InitializeWizard — find previous install from registry
+  PrevDir := '';
+  RegQueryStringValue(HKLM,
+    'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{B8E7F3A1-5C2D-4E6F-9A8B-1D3E5F7A9C2B}_is1',
+    'InstallLocation', PrevDir);
+  if PrevDir = '' then
+    PrevDir := ExpandConstant('{autopf}\RichIris');
+  BootstrapPath := PrevDir + '\bootstrap.yaml';
   if FileExists(BootstrapPath) then
   begin
     if LoadStringsFromFile(BootstrapPath, Lines) then
