@@ -29,7 +29,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
     },
     "trickplay": {
         "enabled": "true",
-        "interval": "60",
+        "interval": "1",
         "thumb_width": "384",
         "thumb_height": "216",
     },

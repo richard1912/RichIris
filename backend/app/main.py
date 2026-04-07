@@ -202,7 +202,7 @@ async def _load_enabled_cameras() -> list:
 
 
 async def _start_camera_recordings(cameras_list: list) -> None:
-    """Start recording ffmpeg processes for all cameras."""
+    """Start recording ffmpeg processes for all cameras (parallel)."""
     mgr = get_stream_manager()
     await asyncio.gather(*[
         mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url)

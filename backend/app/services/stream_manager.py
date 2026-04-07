@@ -33,6 +33,8 @@ class StreamInfo:
     last_error: str | None = None
     _rec_monitor_task: asyncio.Task | None = field(default=None, repr=False)
     _watchdog_task: asyncio.Task | None = field(default=None, repr=False)
+    _sub_keepalive_task: asyncio.Task | None = field(default=None, repr=False)
+    _main_keepalive_task: asyncio.Task | None = field(default=None, repr=False)
 
 
 class StreamManager:
@@ -49,10 +51,10 @@ class StreamManager:
     async def start_stream(
         self, camera_id: int, camera_name: str, rtsp_url: str, sub_stream_url: str | None = None
     ) -> None:
-        """Start a recording ffmpeg process reading from go2rtc's local RTSP.
+        """Start a recording ffmpeg process connected directly to the camera.
 
-        Recording always uses the main stream direct passthrough from go2rtc,
-        so only one RTSP connection is made to the camera (shared with live view).
+        Recording uses direct camera RTSP for maximum reliability (independent
+        of go2rtc). Live view goes through go2rtc with keepalive consumers.
         """
         if camera_id in self._streams and self._streams[camera_id].rec_process:
             logger.warning("Stream already running", extra={"camera_id": camera_id})
@@ -61,14 +63,10 @@ class StreamManager:
         config = get_config()
         _ensure_directories(camera_name, config)
 
-        # Record from go2rtc's local RTSP re-publish (main stream, passthrough)
-        stream_name = get_stream_name(camera_name)
-        go2rtc_rtsp_url = f"rtsp://127.0.0.1:{config.go2rtc.rtsp_port}/{stream_name}_s1_direct"
-
         info = StreamInfo(
             camera_id=camera_id,
             camera_name=camera_name,
-            rtsp_url=go2rtc_rtsp_url,
+            rtsp_url=rtsp_url,
             sub_stream_url=sub_stream_url or None,
         )
         self._streams[camera_id] = info
@@ -81,9 +79,14 @@ class StreamManager:
         info._watchdog_task = asyncio.create_task(
             self._watchdog(camera_id)
         )
-
-        # go2rtc streams are baked into go2rtc.yaml at startup — no need to
-        # register via API here. API-registered streams get wiped on config reload.
+        # Keep go2rtc RTSP connections alive for instant live view.
+        # Recording goes direct to camera; these keepalives are separate.
+        info._sub_keepalive_task = asyncio.create_task(
+            self._go2rtc_keepalive(camera_id, "s2_direct", startup_delay=3)
+        )
+        info._main_keepalive_task = asyncio.create_task(
+            self._go2rtc_keepalive(camera_id, "s1_direct", startup_delay=3)
+        )
 
         logger.info("Recording stream started", extra={"camera_id": camera_id, "camera": camera_name})
 
@@ -100,6 +103,12 @@ class StreamManager:
         if info._watchdog_task:
             info._watchdog_task.cancel()
             info._watchdog_task = None
+        if info._sub_keepalive_task:
+            info._sub_keepalive_task.cancel()
+            info._sub_keepalive_task = None
+        if info._main_keepalive_task:
+            info._main_keepalive_task.cancel()
+            info._main_keepalive_task = None
 
         # Remove from go2rtc
         client = get_go2rtc_client()
@@ -218,6 +227,65 @@ class StreamManager:
             tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
             tomorrow_dir = Path(config.storage.recordings_dir) / safe_name / tomorrow
             tomorrow_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _go2rtc_keepalive(self, camera_id: int, stream_suffix: str, startup_delay: float = 0) -> None:
+        """Keep a go2rtc stream alive via a persistent ffmpeg RTSP consumer.
+
+        Connects to go2rtc's local RTSP re-publish and discards output,
+        keeping the camera RTSP connection alive for instant live view.
+        """
+        info = self._streams.get(camera_id)
+        if not info:
+            return
+
+        config = get_config()
+        stream_name = get_stream_name(info.camera_name)
+        full_stream = f"{stream_name}_{stream_suffix}"
+        rtsp_url = f"rtsp://127.0.0.1:{config.go2rtc.rtsp_port}/{full_stream}"
+
+        from app.services.go2rtc_client import wait_for_go2rtc_ready
+        await wait_for_go2rtc_ready()
+        if startup_delay > 0:
+            await asyncio.sleep(startup_delay)
+
+        while self._running:
+            proc = None
+            try:
+                cmd = [
+                    config.ffmpeg.path,
+                    "-rtsp_transport", config.ffmpeg.rtsp_transport,
+                    "-timeout", str(config.ffmpeg.rtsp_timeout_us),
+                    "-i", rtsp_url,
+                    "-c", "copy",
+                    "-f", "mpegts", "NUL",
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                assign_to_job(proc.pid)
+                logger.info("Keepalive started",
+                            extra={"camera_id": camera_id, "stream": full_stream, "pid": proc.pid})
+
+                await proc.wait()
+
+                if not self._running:
+                    return
+                logger.debug("Keepalive exited, restarting",
+                             extra={"camera_id": camera_id, "stream": full_stream, "returncode": proc.returncode})
+            except asyncio.CancelledError:
+                if proc and proc.returncode is None:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                return
+            except Exception:
+                logger.debug("Keepalive error, retrying in 5s",
+                             extra={"camera_id": camera_id, "stream": full_stream})
+            await asyncio.sleep(5)
 
     def get_status(self, camera_id: int) -> dict:
         """Get status info for a stream."""

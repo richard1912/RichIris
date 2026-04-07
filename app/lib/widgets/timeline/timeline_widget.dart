@@ -170,16 +170,18 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     double bestDist = double.infinity;
     for (final t in _thumbnails) {
       final parts = t.timestamp.split(':');
-      final tHour = int.parse(parts[0]) +
-          int.parse(parts[1]) / 60.0 +
-          (parts.length > 2 ? int.parse(parts[2]) / 3600.0 : 0);
-      final dist = (tHour * 3600 - targetSecs).abs();
+      final tSecs = int.parse(parts[0]) * 3600.0 +
+          int.parse(parts[1]) * 60.0 +
+          (parts.length > 2 ? int.parse(parts[2]) : 0);
+      // Only consider thumbnails at or before the hovered time
+      if (tSecs > targetSecs) continue;
+      final dist = targetSecs - tSecs;
       if (dist < bestDist) {
         bestDist = dist;
         best = t;
       }
     }
-    if (best == null || bestDist > best.interval * 2) return null;
+    if (best == null) return null;
     return widget.recordingApi.getThumbnailUrl(best.url);
   }
 
@@ -202,11 +204,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       thumbUrl = _findNearestThumbUrl(scrubHour);
     }
 
-    if (thumbUrl == null) {
-      _thumbOverlay?.remove();
-      _thumbOverlay = null;
-      return;
-    }
+    if (thumbUrl == null) return;
     final box = _barKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.attached) return;
     final barPos = box.localToGlobal(Offset.zero);

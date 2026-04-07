@@ -31,14 +31,14 @@ update claude md as needed for code changes
 
 ## Architecture
 ```
-Camera RTSP (main) ← go2rtc:1984 (1 connection) ──→ ffmpeg recording (-c:v copy → .ts)
-                                                  ──→ live view clients (HTTP fMP4)
-                                                  ──→ transcoded quality variants (lazy)
+Camera RTSP (main) ← ffmpeg recording (direct, -c:v copy → .ts)
+Camera RTSP (main) ← go2rtc:1984 (keepalive) ──→ live view clients (HTTP fMP4)
+                                               ──→ transcoded quality variants (lazy)
 
-Camera RTSP (sub)  ← go2rtc:1984 (1 connection) ──→ motion detection (snapshots)
-                                                  ──→ thumbnail capture (snapshots)
-                                                  ──→ live view clients (HTTP fMP4)
-                                                  ──→ transcoded quality variants (lazy)
+Camera RTSP (sub)  ← go2rtc:1984 (keepalive) ──→ motion detection (snapshots)
+                                               ──→ thumbnail capture (snapshots)
+                                               ──→ live view clients (HTTP fMP4)
+                                               ──→ transcoded quality variants (lazy)
 
 Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
                           → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
@@ -47,10 +47,9 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
                           {data_dir}\thumbnails\     {data_dir}\playback\
 ```
 
-- **Unified streaming via go2rtc**: All camera access goes through go2rtc. Only 2 RTSP connections per camera (main + sub), shared by all consumers. If no sub-stream URL is configured, s2_direct chains off s1_direct within go2rtc (only 1 RTSP connection). go2rtc re-publishes streams via local RTSP (port 8554). Recording ffmpeg reads from `rtsp://127.0.0.1:8554/{stream}_s1_direct` (not from the camera directly). Transcoded quality variants (high/low/ultralow) chain off the direct stream within go2rtc, so no additional camera connections are made regardless of how many quality levels are consumed.
-- One ffmpeg process per camera for recording (always on), reading from go2rtc's local RTSP. Live view handled by go2rtc (child process of backend, or separate service in dev mode).
-- Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments are renamed by the scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts` after completion. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
-- **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if go2rtc stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording. Note: recording now depends on go2rtc — if go2rtc crashes, recording briefly stops until the go2rtc crash monitor restarts it (typically within seconds).
+- **Recording**: ffmpeg connects directly to cameras for maximum reliability (independent of go2rtc). One ffmpeg process per camera (always on). Uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments renamed by scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts`. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
+- **go2rtc keepalives for instant live view**: StreamManager runs a keepalive ffmpeg process per stream (s1_direct + s2_direct) that connects to go2rtc's local RTSP re-publish (port 8554) and discards output (`-f mpegts NUL`). This keeps go2rtc's camera RTSP connections alive so live view loads instantly when a client connects. Transcoded quality variants (high/low/ultralow) chain off the direct stream within go2rtc — no additional camera connections regardless of quality level. If no sub-stream URL is configured, s2_direct chains off s1_direct within go2rtc.
+- **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
 - **Live view (HTTP fMP4)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
 - **Playback**: Recordings are HEVC .ts files. Direct = raw `.ts` served instantly (no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode via `PlaybackManager` into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via `StreamingResponse`. ffmpeg handles seek (`-ss` before `-i`). Sessions auto-cleanup after 30s idle; same-camera eviction prevents ffmpeg accumulation.
 - NVIDIA RTX 4080 SUPER available (used for AI object detection via YOLO + NVENC transcoding)
@@ -65,11 +64,11 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
   - **Android**: Direct quality hidden for live view only (raw passthrough has compatibility issues with HTMS cameras). Direct available for playback. Default quality is High (live) / Direct (playback) on Android, Direct on Windows.
 - **Bitrate probing**: At startup, backend probes each camera's actual bitrate (5s ffmpeg sample) and codec (ffprobe). Playback also probes .ts file bitrate+codec via ffprobe before transcoding.
 - **Live streams**: go2rtc registers 8 streams per camera (Main/Sub × Direct/High/Low/Ultra Low). Direct streams connect to the camera RTSP URL; transcoded variants chain off the direct stream within go2rtc (no additional camera connections). Unused transcoded streams are lazy — zero resources until a client connects.
-  - Main Direct: raw 4K HEVC passthrough (always connected — recording ffmpeg consumes this)
+  - Main Direct: raw 4K HEVC passthrough (always connected — keepalive ffmpeg consumer)
   - Main High: HEVC re-encode from s1_direct, source-matched quality (probed at startup via ffmpeg sampling)
   - Main Low: HEVC re-encode from s1_direct, 1/8 of source bitrate
   - Main Ultra Low: HEVC re-encode from s1_direct, 1/16 of source bitrate, 15fps, no B-frames, short GOP (30 frames)
-  - Sub Direct: raw sub-stream passthrough (always connected — motion detection + thumbnails consume this)
+  - Sub Direct: raw sub-stream passthrough (always connected — keepalive ffmpeg consumer)
   - Sub High: HEVC re-encode from s2_direct, source-matched quality
   - Sub Low: HEVC re-encode from s2_direct, 1/8 of source bitrate
   - Sub Ultra Low: HEVC re-encode from s2_direct, 1/16 of source bitrate, 15fps, no B-frames, short GOP
@@ -79,7 +78,7 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
   - Ultra Low: 1/16 of source bitrate, 15fps, no B-frames (`-bf 0`), short GOP (`-g 30`)
 - Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low/ultralow` params for HTTP fMP4
 - Backend uses module-level connection-pooled httpx client for go2rtc fMP4 proxying
-- No pre-warming needed — recording ffmpeg keeps main stream connected, motion/thumbnails keep sub-stream connected
+- No pre-warming needed — keepalive ffmpeg processes (one per stream, s1_direct + s2_direct) keep go2rtc RTSP connections alive permanently. Snapshot-based consumers (motion/thumbnails) don't count as persistent consumers in go2rtc.
 - **Low-latency LivePlayer**: 512KB buffer, mpv `low-latency` profile, `cache=no`, `untimed=yes`, exponential backoff retry (500ms→10s)
 - **Video stats bar**: Shown by default in fullscreen view (togglable). Displays codec, resolution, FPS, bitrate. FPS reads from mpv properties `container-fps` → `estimated-vf-fps` → `video-params/fps` (first valid 0-120 value wins).
 
