@@ -70,22 +70,61 @@ async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quali
 
     client = _get_pool()
 
+    # Queue decouples upstream go2rtc reads from downstream client writes.
+    # Without this, a slow client blocks the httpx read loop via yield
+    # backpressure, causing go2rtc to accumulate drops → corrupted HEVC
+    # stream → permanent freeze.
+    buf: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=128)
+
+    async def upstream_reader(resp: httpx.Response) -> None:
+        """Read from go2rtc into the buffer. Exits on overflow or disconnect."""
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=65536):
+                try:
+                    buf.put_nowait(chunk)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "fMP4 client too slow, buffer overflow — closing",
+                        extra={"camera_id": camera_id, "stream_name": stream_name},
+                    )
+                    return
+        except httpx.RemoteProtocolError:
+            logger.debug("fMP4 upstream closed by go2rtc", extra={"camera_id": camera_id})
+        except Exception:
+            logger.warning("fMP4 upstream read error", extra={"camera_id": camera_id}, exc_info=True)
+        finally:
+            # Signal generator to stop
+            try:
+                buf.put_nowait(None)
+            except asyncio.QueueFull:
+                # Queue full of data chunks — drain one to make room for sentinel
+                try:
+                    buf.get_nowait()
+                    buf.put_nowait(None)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
     async def stream_generator():
         logger.info("fMP4 client connected", extra={"camera_id": camera_id, "stream_name": stream_name})
         resp = None
+        reader_task = None
         try:
             resp = await client.send(
                 client.build_request("GET", go2rtc_url),
                 stream=True,
             )
             resp.raise_for_status()
-            async for chunk in resp.aiter_bytes(chunk_size=65536):
-                if await request.is_disconnected():
-                    logger.debug("fMP4 client disconnected (detected via request)", extra={"camera_id": camera_id})
+            reader_task = asyncio.create_task(upstream_reader(resp))
+            while True:
+                chunk = await asyncio.wait_for(buf.get(), timeout=30.0)
+                if chunk is None:
                     break
                 yield chunk
-            else:
-                logger.debug("fMP4 stream ended normally", extra={"camera_id": camera_id})
+        except asyncio.TimeoutError:
+            logger.warning(
+                "fMP4 no data for 30s — closing",
+                extra={"camera_id": camera_id, "stream_name": stream_name},
+            )
         except httpx.ConnectError:
             logger.warning("fMP4 proxy: connection refused from go2rtc", extra={"camera_id": camera_id, "go2rtc_url": go2rtc_url})
         except httpx.ConnectTimeout:
@@ -97,9 +136,11 @@ async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quali
         except Exception:
             logger.warning("fMP4 proxy: unexpected error", extra={"camera_id": camera_id}, exc_info=True)
         finally:
+            if reader_task and not reader_task.done():
+                reader_task.cancel()
             if resp:
                 await resp.aclose()
-                logger.debug("fMP4 upstream connection closed", extra={"camera_id": camera_id, "stream_name": stream_name})
+            logger.debug("fMP4 upstream connection closed", extra={"camera_id": camera_id, "stream_name": stream_name})
 
     return StreamingResponse(stream_generator(), media_type="video/mp4")
 
