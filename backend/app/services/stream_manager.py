@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+
 from app.config import AppConfig, get_config
 from app.services.ffmpeg import build_recording_command, sanitize_camera_name
 from app.services.go2rtc_client import get_go2rtc_client, get_stream_name
@@ -43,6 +45,7 @@ class StreamManager:
     def __init__(self) -> None:
         self._streams: dict[int, StreamInfo] = {}
         self._running = False
+        self._keepalive_index = 0  # Stagger keepalive startups
 
     @property
     def streams(self) -> dict[int, StreamInfo]:
@@ -79,13 +82,16 @@ class StreamManager:
         info._watchdog_task = asyncio.create_task(
             self._watchdog(camera_id)
         )
-        # Keep go2rtc RTSP connections alive for instant live view.
-        # Recording goes direct to camera; these keepalives are separate.
-        info._sub_keepalive_task = asyncio.create_task(
-            self._go2rtc_keepalive(camera_id, "s2_direct", startup_delay=3)
-        )
+        # Keep go2rtc connections alive for instant live view via HTTP fMP4.
+        # Stagger startups by 1s each to avoid overwhelming go2rtc.
+        main_delay = 3 + self._keepalive_index
+        sub_delay = main_delay + 0.5
+        self._keepalive_index += 1
         info._main_keepalive_task = asyncio.create_task(
-            self._go2rtc_keepalive(camera_id, "s1_direct", startup_delay=3)
+            self._go2rtc_keepalive(camera_id, "s1_direct", startup_delay=main_delay)
+        )
+        info._sub_keepalive_task = asyncio.create_task(
+            self._go2rtc_keepalive(camera_id, "s2_direct", startup_delay=sub_delay)
         )
 
         logger.info("Recording stream started", extra={"camera_id": camera_id, "camera": camera_name})
@@ -229,10 +235,11 @@ class StreamManager:
             tomorrow_dir.mkdir(parents=True, exist_ok=True)
 
     async def _go2rtc_keepalive(self, camera_id: int, stream_suffix: str, startup_delay: float = 0) -> None:
-        """Keep a go2rtc stream alive via a persistent ffmpeg RTSP consumer.
+        """Keep a go2rtc stream alive via a persistent HTTP fMP4 consumer.
 
-        Connects to go2rtc's local RTSP re-publish and discards output,
-        keeping the camera RTSP connection alive for instant live view.
+        Opens an HTTP streaming connection to go2rtc's fMP4 API and reads/discards
+        data, keeping the camera RTSP connection alive for instant live view.
+        In-process (no ffmpeg subprocess), uses HTTP (avoids RTSP concurrent map bug).
         """
         info = self._streams.get(camera_id)
         if not info:
@@ -241,7 +248,7 @@ class StreamManager:
         config = get_config()
         stream_name = get_stream_name(info.camera_name)
         full_stream = f"{stream_name}_{stream_suffix}"
-        rtsp_url = f"rtsp://127.0.0.1:{config.go2rtc.rtsp_port}/{full_stream}"
+        fmp4_url = f"http://127.0.0.1:{config.go2rtc.port}/api/stream.mp4?src={full_stream}"
 
         from app.services.go2rtc_client import wait_for_go2rtc_ready
         await wait_for_go2rtc_ready()
@@ -249,40 +256,34 @@ class StreamManager:
             await asyncio.sleep(startup_delay)
 
         while self._running:
-            proc = None
             try:
-                cmd = [
-                    config.ffmpeg.path,
-                    "-rtsp_transport", config.ffmpeg.rtsp_transport,
-                    "-timeout", str(config.ffmpeg.rtsp_timeout_us),
-                    "-i", rtsp_url,
-                    "-c", "copy",
-                    "-f", "mpegts", "NUL",
-                ]
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                assign_to_job(proc.pid)
-                logger.info("Keepalive started",
-                            extra={"camera_id": camera_id, "stream": full_stream, "pid": proc.pid})
+                async with httpx.AsyncClient(timeout=httpx.Timeout(
+                    connect=10, read=60, write=10, pool=10
+                )) as client:
+                    async with client.stream("GET", fmp4_url) as resp:
+                        if resp.status_code != 200:
+                            logger.warning("Keepalive HTTP error",
+                                           extra={"camera_id": camera_id, "stream": full_stream,
+                                                  "status": resp.status_code})
+                            await asyncio.sleep(5)
+                            continue
 
-                await proc.wait()
+                        logger.info("Keepalive connected",
+                                    extra={"camera_id": camera_id, "stream": full_stream})
+
+                        async for _chunk in resp.aiter_bytes(chunk_size=65536):
+                            if not self._running:
+                                return
 
                 if not self._running:
                     return
-                logger.debug("Keepalive exited, restarting",
-                             extra={"camera_id": camera_id, "stream": full_stream, "returncode": proc.returncode})
+                logger.debug("Keepalive stream ended, reconnecting",
+                             extra={"camera_id": camera_id, "stream": full_stream})
             except asyncio.CancelledError:
-                if proc and proc.returncode is None:
-                    proc.terminate()
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        proc.kill()
                 return
             except Exception:
+                if not self._running:
+                    return
                 logger.debug("Keepalive error, retrying in 5s",
                              extra={"camera_id": camera_id, "stream": full_stream})
             await asyncio.sleep(5)

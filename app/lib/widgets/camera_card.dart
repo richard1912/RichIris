@@ -231,7 +231,7 @@ class _CameraCardState extends State<CameraCard> {
     if (s == null) return 'Waiting for backend...';
     if (!s.running) return 'Stream not started';
     if (s.error != null) return s.error;
-    if (s.go2rtcConnected == false) return 'Camera not responding';
+    if (s.go2rtcConnected == false) return 'Establishing live view...';
     return null;
   }
 

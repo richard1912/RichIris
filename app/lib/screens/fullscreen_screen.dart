@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -482,86 +483,129 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   }
 
   Widget _buildHeader(bool running) {
+    final isAndroid = Platform.isAndroid;
     return Container(
       color: const Color(0xFF171717).withValues(alpha: 0.8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: SafeArea(
         bottom: false,
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              icon: const Icon(Icons.arrow_back, size: 20),
-              onPressed: () {
-                if (widget.onBack != null) {
-                  widget.onBack!();
-                } else {
-                  Navigator.of(context).pop();
-                }
-              },
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.arrow_back, size: 20),
+                  onPressed: () {
+                    if (widget.onBack != null) {
+                      widget.onBack!();
+                    } else {
+                      Navigator.of(context).pop();
+                    }
+                  },
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
+                const SizedBox(width: 8),
+                Text(widget.camera.name,
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                const SizedBox(width: 8),
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: running ? const Color(0xFF22C55E) : const Color(0xFFEAB308),
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.bar_chart, size: 20),
+                  tooltip: 'Video Stats',
+                  onPressed: _toggleStats,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.bug_report, size: 20),
+                  tooltip: 'Report a Bug',
+                  onPressed: () => _showBugReportDialog(context),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
+                if (widget.onEditCamera != null)
+                  IconButton(
+                    icon: const Icon(Icons.settings, size: 20),
+                    tooltip: 'Camera Settings',
+                    onPressed: () => widget.onEditCamera!(widget.camera),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  ),
+                if (!isAndroid) ...[
+                  if (_isLive && widget.stream?.uptimeSeconds != null)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Text(
+                        'Up ${formatUptime(widget.stream!.uptimeSeconds!)}',
+                        style: const TextStyle(fontSize: 11, color: Color(0xFF525252)),
+                      ),
+                    ),
+                  if (!_isLive)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 8),
+                      child: Text('Playback',
+                          style: TextStyle(fontSize: 11, color: Color(0xFF3B82F6))),
+                    ),
+                  if (_isLive) ...[
+                    StreamSourceSelector(
+                      value: widget.streamSource,
+                      onChanged: widget.onStreamSourceChanged,
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  QualitySelector(
+                    value: widget.quality,
+                    onChanged: widget.onQualityChanged,
+                    isLive: _isLive,
+                  ),
+                ],
+              ],
             ),
-            const SizedBox(width: 8),
-            Text(widget.camera.name,
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-            const SizedBox(width: 8),
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: running ? const Color(0xFF22C55E) : const Color(0xFFEAB308),
-              ),
-            ),
-            const Spacer(),
-            IconButton(
-              icon: const Icon(Icons.bar_chart, size: 20),
-              tooltip: 'Video Stats',
-              onPressed: _toggleStats,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            ),
-            IconButton(
-              icon: const Icon(Icons.bug_report, size: 20),
-              tooltip: 'Report a Bug',
-              onPressed: () => _showBugReportDialog(context),
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            ),
-            if (widget.onEditCamera != null)
-              IconButton(
-                icon: const Icon(Icons.settings, size: 20),
-                tooltip: 'Camera Settings',
-                onPressed: () => widget.onEditCamera!(widget.camera),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-              ),
-            if (_isLive && widget.stream?.uptimeSeconds != null)
+            if (isAndroid)
               Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: Text(
-                  'Up ${formatUptime(widget.stream!.uptimeSeconds!)}',
-                  style: const TextStyle(fontSize: 11, color: Color(0xFF525252)),
+                padding: const EdgeInsets.only(top: 4),
+                child: Row(
+                  children: [
+                    if (_isLive && widget.stream?.uptimeSeconds != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: Text(
+                          'Up ${formatUptime(widget.stream!.uptimeSeconds!)}',
+                          style: const TextStyle(fontSize: 11, color: Color(0xFF525252)),
+                        ),
+                      ),
+                    const Spacer(),
+                    if (!_isLive)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 8),
+                        child: Text('Playback',
+                            style: TextStyle(fontSize: 11, color: Color(0xFF3B82F6))),
+                      ),
+                    if (_isLive) ...[
+                      StreamSourceSelector(
+                        value: widget.streamSource,
+                        onChanged: widget.onStreamSourceChanged,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    QualitySelector(
+                      value: widget.quality,
+                      onChanged: widget.onQualityChanged,
+                      isLive: _isLive,
+                    ),
+                  ],
                 ),
               ),
-            if (!_isLive)
-              const Padding(
-                padding: EdgeInsets.only(right: 8),
-                child: Text('Playback',
-                    style: TextStyle(fontSize: 11, color: Color(0xFF3B82F6))),
-              ),
-            if (_isLive) ...[
-              StreamSourceSelector(
-                value: widget.streamSource,
-                onChanged: widget.onStreamSourceChanged,
-              ),
-              const SizedBox(width: 4),
-            ],
-            QualitySelector(
-              value: widget.quality,
-              onChanged: widget.onQualityChanged,
-              isLive: _isLive,
-            ),
           ],
         ),
       ),

@@ -48,7 +48,7 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
 ```
 
 - **Recording**: ffmpeg connects directly to cameras for maximum reliability (independent of go2rtc). One ffmpeg process per camera (always on). Uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments renamed by scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts`. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
-- **go2rtc keepalives for instant live view**: StreamManager runs a keepalive ffmpeg process per stream (s1_direct + s2_direct) that connects to go2rtc's local RTSP re-publish (port 8554) and discards output (`-f mpegts NUL`). This keeps go2rtc's camera RTSP connections alive so live view loads instantly when a client connects. Transcoded quality variants (high/low/ultralow) chain off the direct stream within go2rtc — no additional camera connections regardless of quality level. If no sub-stream URL is configured, s2_direct chains off s1_direct within go2rtc.
+- **go2rtc keepalives for instant live view**: StreamManager runs an in-process httpx HTTP fMP4 consumer per stream (s1_direct + s2_direct) that reads from go2rtc's HTTP API (`/api/stream.mp4`) and discards data. This keeps go2rtc's camera RTSP connections alive so live view loads instantly when a client connects. Keepalives start staggered (1s apart per camera) to avoid overwhelming go2rtc. Auto-reconnects on failure with 5s retry. Transcoded quality variants (high/low/ultralow) chain off the direct stream within go2rtc — no additional camera connections regardless of quality level. If no sub-stream URL is configured, s2_direct chains off s1_direct within go2rtc.
 - **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
 - **Live view (HTTP fMP4)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
 - **Playback**: Recordings are HEVC .ts files. Direct = raw `.ts` served instantly (no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode via `PlaybackManager` into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via `StreamingResponse`. ffmpeg handles seek (`-ss` before `-i`). Sessions auto-cleanup after 30s idle; same-camera eviction prevents ffmpeg accumulation.
@@ -64,11 +64,11 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
   - **Android**: Direct quality hidden for live view only (raw passthrough has compatibility issues with HTMS cameras). Direct available for playback. Default quality is High (live) / Direct (playback) on Android, Direct on Windows.
 - **Bitrate probing**: At startup, backend probes each camera's actual bitrate (5s ffmpeg sample) and codec (ffprobe). Playback also probes .ts file bitrate+codec via ffprobe before transcoding.
 - **Live streams**: go2rtc registers 8 streams per camera (Main/Sub × Direct/High/Low/Ultra Low). Direct streams connect to the camera RTSP URL; transcoded variants chain off the direct stream within go2rtc (no additional camera connections). Unused transcoded streams are lazy — zero resources until a client connects.
-  - Main Direct: raw 4K HEVC passthrough (always connected — keepalive ffmpeg consumer)
+  - Main Direct: raw 4K HEVC passthrough (always connected — httpx keepalive consumer)
   - Main High: HEVC re-encode from s1_direct, source-matched quality (probed at startup via ffmpeg sampling)
   - Main Low: HEVC re-encode from s1_direct, 1/8 of source bitrate
   - Main Ultra Low: HEVC re-encode from s1_direct, 1/16 of source bitrate, 15fps, no B-frames, short GOP (30 frames)
-  - Sub Direct: raw sub-stream passthrough (always connected — keepalive ffmpeg consumer)
+  - Sub Direct: raw sub-stream passthrough (always connected — httpx keepalive consumer)
   - Sub High: HEVC re-encode from s2_direct, source-matched quality
   - Sub Low: HEVC re-encode from s2_direct, 1/8 of source bitrate
   - Sub Ultra Low: HEVC re-encode from s2_direct, 1/16 of source bitrate, 15fps, no B-frames, short GOP
@@ -78,7 +78,7 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
   - Ultra Low: 1/16 of source bitrate, 15fps, no B-frames (`-bf 0`), short GOP (`-g 30`)
 - Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low/ultralow` params for HTTP fMP4
 - Backend uses module-level connection-pooled httpx client for go2rtc fMP4 proxying
-- No pre-warming needed — keepalive ffmpeg processes (one per stream, s1_direct + s2_direct) keep go2rtc RTSP connections alive permanently. Snapshot-based consumers (motion/thumbnails) don't count as persistent consumers in go2rtc.
+- No pre-warming needed — httpx keepalive consumers (one per stream, s1_direct + s2_direct) keep go2rtc RTSP connections alive permanently via HTTP fMP4 streaming. Snapshot-based consumers (motion/thumbnails) don't count as persistent consumers in go2rtc.
 - **Low-latency LivePlayer**: 512KB buffer, mpv `low-latency` profile, `cache=no`, `untimed=yes`, exponential backoff retry (500ms→10s)
 - **Video stats bar**: Shown by default in fullscreen view (togglable). Displays codec, resolution, FPS, bitrate. FPS reads from mpv properties `container-fps` → `estimated-vf-fps` → `video-params/fps` (first valid 0-120 value wins).
 

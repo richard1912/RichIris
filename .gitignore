@@ -53,5 +53,8 @@ Camera Light Control/
 # Release script (local-only automation)
 push_release.bat
 
+# Utilities
+adb-wifi.bat
+
 # Claude Code
 .claude/

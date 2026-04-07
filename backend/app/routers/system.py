@@ -62,15 +62,19 @@ async def get_system_status(db: AsyncSession = Depends(get_db)):
     stream_statuses = []
     for cam in cameras:
         status = mgr.get_status(cam.id)
-        # Check go2rtc producer status for this camera's default live stream
+        # Check go2rtc producer status for this camera's direct streams
         base_name = get_stream_name(cam.name)
-        s2_key = f"{base_name}_s2_direct"
-        stream_info = go2rtc_health.get(s2_key, {})
-        producers = stream_info.get("producers") or []
-        consumers = stream_info.get("consumers") or []
-        # A producer is "connected" if it has bytes_recv (actively receiving RTSP data)
-        go2rtc_connected = any(p.get("bytes_recv", 0) > 0 for p in producers) if stream_info else None
-        go2rtc_consumer_count = len(consumers) if stream_info else None
+        s1_info = go2rtc_health.get(f"{base_name}_s1_direct", {})
+        s2_info = go2rtc_health.get(f"{base_name}_s2_direct", {})
+        s1_prods = s1_info.get("producers") or []
+        s2_prods = s2_info.get("producers") or []
+        s1_cons = s1_info.get("consumers") or []
+        s2_cons = s2_info.get("consumers") or []
+        # Connected if either main or sub stream has active bytes
+        s1_active = any(p.get("bytes_recv", 0) > 0 for p in s1_prods)
+        s2_active = any(p.get("bytes_recv", 0) > 0 for p in s2_prods)
+        go2rtc_connected = (s1_active or s2_active) if (s1_info or s2_info) else None
+        go2rtc_consumer_count = (len(s1_cons) + len(s2_cons)) if (s1_info or s2_info) else None
 
         stream_statuses.append(
             StreamStatus(
