@@ -50,7 +50,11 @@ def build_recording_output(camera_name: str, config: AppConfig) -> list[str]:
 
 
 def build_recording_command(camera_name: str, rtsp_url: str, config: AppConfig) -> list[str]:
-    """Build ffmpeg command for recording only (passthrough, no transcode)."""
+    """Build ffmpeg command for recording only (passthrough, no transcode).
+
+    rtsp_url can be a camera RTSP URL or a go2rtc local RTSP URL
+    (e.g. rtsp://127.0.0.1:8554/stream_name_s1_direct).
+    """
     cmd = build_input_args(rtsp_url, config, hwaccel=False)
     cmd.extend(build_recording_output(camera_name, config))
     logger.info("Built recording-only ffmpeg command", extra={"camera": camera_name})

@@ -27,6 +27,14 @@ class SettingsApi {
     return resp.data as Map<String, dynamic>;
   }
 
+  // --- Service diagnostics API ---
+
+  /// Fetch backend service diagnostic information.
+  Future<Map<String, dynamic>> fetchServiceInfo() async {
+    final resp = await _client.dio.get('/api/system/service');
+    return resp.data as Map<String, dynamic>;
+  }
+
   // --- Storage migration API ---
 
   /// Validate a target path for recordings storage.

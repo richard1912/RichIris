@@ -1,8 +1,13 @@
 """System status endpoints."""
 
+import ctypes
 import logging
+import os
 import re
 import shutil
+import subprocess
+import sys
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,11 +23,14 @@ from app.config import get_bootstrap, get_config, get_tz, get_app_dir
 from app.database import get_db
 from app.models import Camera
 from app.schemas import RetentionResult, StorageStats, StreamStatus, SystemStatus
+from app.services.go2rtc_client import get_go2rtc_client, get_stream_name
 from app.services.retention import enforce_retention, get_storage_stats
 from app.services.stream_manager import get_stream_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/system", tags=["system"])
+
+_startup_time: float = time.time()
 
 
 @router.get("/time")
@@ -47,9 +55,23 @@ async def get_system_status(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Camera))
     cameras = result.scalars().all()
 
+    # Query go2rtc stream health in parallel with building statuses
+    go2rtc = get_go2rtc_client()
+    go2rtc_health = await go2rtc.get_streams_health()
+
     stream_statuses = []
     for cam in cameras:
         status = mgr.get_status(cam.id)
+        # Check go2rtc producer status for this camera's default live stream
+        base_name = get_stream_name(cam.name)
+        s2_key = f"{base_name}_s2_direct"
+        stream_info = go2rtc_health.get(s2_key, {})
+        producers = stream_info.get("producers") or []
+        consumers = stream_info.get("consumers") or []
+        # A producer is "connected" if it has bytes_recv (actively receiving RTSP data)
+        go2rtc_connected = any(p.get("bytes_recv", 0) > 0 for p in producers) if stream_info else None
+        go2rtc_consumer_count = len(consumers) if stream_info else None
+
         stream_statuses.append(
             StreamStatus(
                 camera_id=cam.id,
@@ -58,6 +80,8 @@ async def get_system_status(db: AsyncSession = Depends(get_db)):
                 pid=status.get("pid"),
                 uptime_seconds=status.get("uptime_seconds"),
                 error=status.get("error"),
+                go2rtc_connected=go2rtc_connected,
+                go2rtc_consumers=go2rtc_consumer_count,
             )
         )
 
@@ -121,6 +145,120 @@ async def get_recent_logs(minutes: int = Query(default=10, ge=1, le=60)):
     cleaned = [ansi_escape.sub("", line) for line in reversed(lines)]
 
     return PlainTextResponse("".join(cleaned) if cleaned else f"No logs in the last {minutes} minutes.")
+
+
+# ---------------------------------------------------------------------------
+# Service diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _get_process_memory_mb() -> float:
+    """Get current process memory usage (RSS) in MB using Windows API."""
+    if sys.platform != "win32":
+        return 0.0
+    try:
+        # PROCESS_MEMORY_COUNTERS_EX
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_ulong),
+                ("PageFaultCount", ctypes.c_ulong),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = ctypes.sizeof(pmc)
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+            return round(pmc.WorkingSetSize / (1024 * 1024), 1)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _count_child_processes(name_filter: str) -> tuple[int, list[int]]:
+    """Count child processes matching a name filter. Returns (count, pids)."""
+    if sys.platform != "win32":
+        return 0, []
+    try:
+        result = subprocess.run(
+            ["tasklist", "/fi", f"imagename eq {name_filter}", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2:
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        return len(pids), pids
+    except Exception:
+        return 0, []
+
+
+@router.get("/service")
+async def get_service_info(db: AsyncSession = Depends(get_db)):
+    """Return backend service diagnostic information."""
+    from app.services.go2rtc_manager import _process as go2rtc_process, is_managed as go2rtc_is_managed
+
+    config = get_config()
+    bootstrap = get_bootstrap()
+
+    # Process info
+    pid = os.getpid()
+    uptime_seconds = round(time.time() - _startup_time)
+    memory_mb = _get_process_memory_mb()
+
+    # go2rtc status
+    go2rtc_running = go2rtc_is_managed()
+    go2rtc_pid = go2rtc_process.pid if go2rtc_process and go2rtc_process.poll() is None else None
+
+    # Camera/stream info
+    mgr = get_stream_manager()
+    result = await db.execute(select(Camera))
+    cameras = result.scalars().all()
+    total_cameras = len(cameras)
+    active_streams = sum(1 for cam in cameras if mgr.get_status(cam.id).get("running"))
+
+    # ffmpeg process count
+    ffmpeg_count, _ = _count_child_processes("ffmpeg.exe")
+
+    # Log file size
+    log_file = Path(bootstrap.data_dir) / "logs" / "richiris.log"
+    log_size_mb = 0.0
+    if log_file.exists():
+        try:
+            log_size_mb = round(log_file.stat().st_size / (1024 * 1024), 2)
+        except Exception:
+            pass
+
+    # Startup time as ISO string
+    startup_iso = datetime.fromtimestamp(_startup_time, tz=get_tz()).isoformat()
+
+    return {
+        "pid": pid,
+        "uptime_seconds": uptime_seconds,
+        "memory_mb": memory_mb,
+        "python_version": sys.version.split()[0],
+        "platform": sys.platform,
+        "go2rtc_running": go2rtc_running,
+        "go2rtc_pid": go2rtc_pid,
+        "total_cameras": total_cameras,
+        "active_streams": active_streams,
+        "ffmpeg_processes": ffmpeg_count,
+        "data_dir": str(bootstrap.data_dir),
+        "log_file_size_mb": log_size_mb,
+        "startup_time": startup_iso,
+        "port": bootstrap.port,
+    }
 
 
 # ---------------------------------------------------------------------------

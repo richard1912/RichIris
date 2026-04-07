@@ -4,9 +4,9 @@ update claude md as needed for code changes
 - **Backend**: Runs as Windows service `RichIris` via NSSM (FastAPI on port 8700)
 - **Restart**: `nssm restart RichIris`
 - **go2rtc**: Managed as child process of backend (auto-starts/stops with RichIris). Falls back to external service if already running.
-- **Config**: `bootstrap.yaml` (data_dir + port only). All other settings in SQLite `settings` table, editable via GUI (System Settings screen) or `GET/PUT /api/settings`.
+- **Config**: `bootstrap.yaml` (data_dir + port only). All other settings in SQLite `settings` table, editable via GUI (Settings screen) or `GET/PUT /api/settings`.
 - **Legacy**: `config.yaml` still supported — migrated to DB on first startup (one-time, idempotent).
-- **Data directory**: `data_dir` (bootstrap.yaml) holds all data in structured subdirectories. Changeable from System Settings screen (with optional move/copy migration). Requires service restart.
+- **Data directory**: `data_dir` (bootstrap.yaml) holds all data in structured subdirectories. Changeable from Settings screen (with optional move/copy migration). Requires service restart.
   ```
   {data_dir}/
   ├── database/richiris.db    # SQLite database
@@ -31,16 +31,26 @@ update claude md as needed for code changes
 
 ## Architecture
 ```
-Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTSP sub-stream
+Camera RTSP (main) ← go2rtc:1984 (1 connection) ──→ ffmpeg recording (-c:v copy → .ts)
+                                                  ──→ live view clients (HTTP fMP4)
+                                                  ──→ transcoded quality variants (lazy)
+
+Camera RTSP (sub)  ← go2rtc:1984 (1 connection) ──→ motion detection (snapshots)
+                                                  ──→ thumbnail capture (snapshots)
+                                                  ──→ live view clients (HTTP fMP4)
+                                                  ──→ transcoded quality variants (lazy)
+
+Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
                           → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
                                     |                    |
                           {data_dir}\database\       {data_dir}\recordings\
                           {data_dir}\thumbnails\     {data_dir}\playback\
 ```
 
-- One ffmpeg process per camera for recording (always on). Live view handled by go2rtc (child process of backend, or separate service in dev mode).
+- **Unified streaming via go2rtc**: All camera access goes through go2rtc. Only 2 RTSP connections per camera (main + sub), shared by all consumers. If no sub-stream URL is configured, s2_direct chains off s1_direct within go2rtc (only 1 RTSP connection). go2rtc re-publishes streams via local RTSP (port 8554). Recording ffmpeg reads from `rtsp://127.0.0.1:8554/{stream}_s1_direct` (not from the camera directly). Transcoded quality variants (high/low/ultralow) chain off the direct stream within go2rtc, so no additional camera connections are made regardless of how many quality levels are consumed.
+- One ffmpeg process per camera for recording (always on), reading from go2rtc's local RTSP. Live view handled by go2rtc (child process of backend, or separate service in dev mode).
 - Recording uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments are renamed by the scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts` after completion. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
-- **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
+- **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if go2rtc stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording. Note: recording now depends on go2rtc — if go2rtc crashes, recording briefly stops until the go2rtc crash monitor restarts it (typically within seconds).
 - **Live view (HTTP fMP4)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors.
 - **Playback**: Recordings are HEVC .ts files. Direct = raw `.ts` served instantly (no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode via `PlaybackManager` into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via `StreamingResponse`. ffmpeg handles seek (`-ss` before `-i`). Sessions auto-cleanup after 30s idle; same-camera eviction prevents ffmpeg accumulation.
 - NVIDIA RTX 4080 SUPER available (used for AI object detection via YOLO + NVENC transcoding)
@@ -54,22 +64,22 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984 ← RTS
   - Changing quality during playback triggers `didUpdateWidget` → restarts playback at current position with new quality
   - **Android**: Direct quality hidden for live view only (raw passthrough has compatibility issues with HTMS cameras). Direct available for playback. Default quality is High (live) / Direct (playback) on Android, Direct on Windows.
 - **Bitrate probing**: At startup, backend probes each camera's actual bitrate (5s ffmpeg sample) and codec (ffprobe). Playback also probes .ts file bitrate+codec via ffprobe before transcoding.
-- **Live streams**: go2rtc registers 8 streams per camera (Main/Sub × Direct/High/Low/Ultra Low). Unused quality streams are lazy — zero resources until a client connects.
-  - Main Direct: raw 4K HEVC passthrough (no ffmpeg, zero CPU)
-  - Main High: HEVC re-encode, source-matched quality (probed at startup via ffmpeg sampling)
-  - Main Low: HEVC re-encode, 1/8 of source bitrate
-  - Main Ultra Low: HEVC re-encode, 1/16 of source bitrate, 15fps, no B-frames, short GOP (30 frames)
-  - Sub Direct: raw sub-stream passthrough (no ffmpeg)
-  - Sub High: HEVC re-encode, source-matched quality
-  - Sub Low: HEVC re-encode, 1/8 of source bitrate
-  - Sub Ultra Low: HEVC re-encode, 1/16 of source bitrate, 15fps, no B-frames, short GOP
+- **Live streams**: go2rtc registers 8 streams per camera (Main/Sub × Direct/High/Low/Ultra Low). Direct streams connect to the camera RTSP URL; transcoded variants chain off the direct stream within go2rtc (no additional camera connections). Unused transcoded streams are lazy — zero resources until a client connects.
+  - Main Direct: raw 4K HEVC passthrough (always connected — recording ffmpeg consumes this)
+  - Main High: HEVC re-encode from s1_direct, source-matched quality (probed at startup via ffmpeg sampling)
+  - Main Low: HEVC re-encode from s1_direct, 1/8 of source bitrate
+  - Main Ultra Low: HEVC re-encode from s1_direct, 1/16 of source bitrate, 15fps, no B-frames, short GOP (30 frames)
+  - Sub Direct: raw sub-stream passthrough (always connected — motion detection + thumbnails consume this)
+  - Sub High: HEVC re-encode from s2_direct, source-matched quality
+  - Sub Low: HEVC re-encode from s2_direct, 1/8 of source bitrate
+  - Sub Ultra Low: HEVC re-encode from s2_direct, 1/16 of source bitrate, 15fps, no B-frames, short GOP
 - **Playback**: Quality tiers work for both live and playback. Direct = raw `.ts` file served instantly (no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode via `PlaybackManager` into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via `StreamingResponse`. ffmpeg applies seek (`-ss` before `-i`), so client gets `seek_seconds: 0`. Sessions auto-cleanup after 30s idle; same-camera eviction prevents ffmpeg accumulation.
   - High: source bitrate (probed from .ts file via ffprobe)
   - Low: 1/8 of source bitrate
   - Ultra Low: 1/16 of source bitrate, 15fps, no B-frames (`-bf 0`), short GOP (`-g 30`)
 - Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low/ultralow` params for HTTP fMP4
 - Backend uses module-level connection-pooled httpx client for go2rtc fMP4 proxying
-- Stream pre-warming at backend startup triggers go2rtc RTSP connections proactively
+- No pre-warming needed — recording ffmpeg keeps main stream connected, motion/thumbnails keep sub-stream connected
 - **Low-latency LivePlayer**: 512KB buffer, mpv `low-latency` profile, `cache=no`, `untimed=yes`, exponential backoff retry (500ms→10s)
 - **Video stats bar**: Shown by default in fullscreen view (togglable). Displays codec, resolution, FPS, bitrate. FPS reads from mpv properties `container-fps` → `estimated-vf-fps` → `video-params/fps` (first valid 0-120 value wins).
 
@@ -128,7 +138,7 @@ RichIris/
 │   │   ├── config/              # API config, quality tiers, constants
 │   │   ├── models/              # Data classes (Camera, RecordingSegment, etc.)
 │   │   ├── services/            # API layer (Dio HTTP client) + settings_api.dart + backup_api.dart + update_service.dart
-│   │   ├── screens/             # Home, Fullscreen, System, Settings, SystemSettings, CameraForm
+│   │   ├── screens/             # Home, Fullscreen, System, Settings (unified), CameraForm
 │   │   ├── widgets/             # CameraGrid, CameraCard, LivePlayer, QualitySelector, StorageMigrationDialog, BackupRestoreDialog, UpdateDialog, VersionInfoDialog
 │   │   │   └── timeline/        # CustomPainter timeline (controller, painter, minimap)
 │   │   └── utils/               # Time/format utilities
@@ -279,5 +289,5 @@ One-command dev environment: downloads all external dependencies into `dependenc
 14. Configurable storage location - Installer data dir picker, runtime recordings dir migration (move/copy/path-only) via Settings screen, playback cache path fix (DONE)
 15. Data directory restructure - Structured `{data_dir}/` with database/, logs/, recordings/, thumbnails/, playback/ subdirs. Thumbnails separated from recordings. DB in own subdir with auto-migration. Data dir changeable from System Settings with move/copy/path-only migration. Installer always writes bootstrap.yaml with user's chosen data dir. (DONE)
 16. Settings simplification + installer - Removed auto-resolved settings from UI (ffmpeg paths, go2rtc host/port, recordings dir). Single data_dir controls all storage. Timezone moved to General section as dropdown (default UTC). Removed JSON log output toggle. Trickplay pane simplified to enable toggle only. Deprecated DB keys auto-cleaned on startup. Single installer that downloads deps at install time. `setup_dev.bat` for one-command dev setup. Release scripts with Claude-generated changelogs. (DONE)
-17. Backup & Restore - Full data backup/restore via System Settings (Windows only). Users select components (settings, cameras, database, recordings, thumbnails) with size previews. Creates `.richiris` ZIP archive (ZIP64, no compression for video). Restore merges recordings/thumbnails (existing files kept), upserts cameras by name, overwrites settings/DB. Progress tracking with cancel support. Services auto-stop/restart during restore. (DONE)
+17. Backup & Restore - Full data backup/restore via Settings screen (Windows only). Users select components (settings, cameras, database, recordings, thumbnails) with size previews. Creates `.richiris` ZIP archive (ZIP64, no compression for video). Restore merges recordings/thumbnails (existing files kept), upserts cameras by name, overwrites settings/DB. Progress tracking with cancel support. Services auto-stop/restart during restore. (DONE)
 18. Auto-Update - Backend periodically checks GitHub releases API (every 6h), caches latest release info. Flutter app reads cached info on startup, shows changelog + update dialog with Skip/Remind/Update options. Version shown in app bar (tappable for manual check). Backend launches Flutter app with `--update-only` flag if update found and app not running (minimal mode, no streams). Windows: downloads installer, runs `/VERYSILENT`. Android: downloads APK, opens system installer. `push_release.bat` syncs version to pubspec.yaml + main.py. (DONE)

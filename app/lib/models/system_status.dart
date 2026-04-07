@@ -5,6 +5,8 @@ class StreamStatus {
   final int? pid;
   final double? uptimeSeconds;
   final String? error;
+  final bool? go2rtcConnected;
+  final int? go2rtcConsumers;
 
   StreamStatus({
     required this.cameraId,
@@ -13,6 +15,8 @@ class StreamStatus {
     this.pid,
     this.uptimeSeconds,
     this.error,
+    this.go2rtcConnected,
+    this.go2rtcConsumers,
   });
 
   factory StreamStatus.fromJson(Map<String, dynamic> json) => StreamStatus(
@@ -22,6 +26,8 @@ class StreamStatus {
         pid: json['pid'] as int?,
         uptimeSeconds: (json['uptime_seconds'] as num?)?.toDouble(),
         error: json['error'] as String?,
+        go2rtcConnected: json['go2rtc_connected'] as bool?,
+        go2rtcConsumers: json['go2rtc_consumers'] as int?,
       );
 }
 

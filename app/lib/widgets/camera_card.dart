@@ -5,7 +5,7 @@ import '../models/camera.dart';
 import '../models/system_status.dart';
 import 'live_player.dart';
 
-class CameraCard extends StatelessWidget {
+class CameraCard extends StatefulWidget {
   final Camera camera;
   final StreamStatus? stream;
   final String streamUrl;
@@ -36,18 +36,26 @@ class CameraCard extends StatelessWidget {
   });
 
   @override
+  State<CameraCard> createState() => _CameraCardState();
+}
+
+class _CameraCardState extends State<CameraCard> {
+  LivePlayerStatus? _liveStatus;
+
+  @override
   Widget build(BuildContext context) {
-    final running = stream?.running ?? false;
+    final running = widget.stream?.running ?? false;
+    final showLive = widget.camera.enabled && running && !widget.isFullscreen;
 
     return GestureDetector(
-      onTap: onTap,
+      onTap: widget.onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: selected ? const Color(0xFF3B82F6) : const Color(0xFF404040),
-            width: selected ? 2 : 1,
+            color: widget.selected ? const Color(0xFF3B82F6) : const Color(0xFF404040),
+            width: widget.selected ? 2 : 1,
           ),
           color: const Color(0xFF1A1A1A),
         ),
@@ -59,7 +67,7 @@ class CameraCard extends StatelessWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (playbackLoading)
+                  if (widget.playbackLoading)
                     const Center(
                       child: SizedBox(
                         width: 24,
@@ -70,7 +78,7 @@ class CameraCard extends StatelessWidget {
                         ),
                       ),
                     )
-                  else if (playbackFailed)
+                  else if (widget.playbackFailed)
                     const Center(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -84,11 +92,11 @@ class CameraCard extends StatelessWidget {
                         ],
                       ),
                     )
-                  else if (playbackController != null)
+                  else if (widget.playbackController != null)
                     IgnorePointer(
                       child: _buildPlaybackVideo(),
                     )
-                  else if (camera.enabled && running && isFullscreen)
+                  else if (widget.camera.enabled && running && widget.isFullscreen)
                     Container(
                       color: const Color(0xFF0A0A0A),
                       child: const Center(
@@ -96,14 +104,17 @@ class CameraCard extends StatelessWidget {
                             color: Color(0xFF525252), size: 32),
                       ),
                     )
-                  else if (camera.enabled && running)
+                  else if (showLive)
                     IgnorePointer(
                       child: LivePlayer(
-                        url: streamUrl,
-                        rotation: camera.rotation,
+                        url: widget.streamUrl,
+                        rotation: widget.camera.rotation,
                         fit: BoxFit.contain,
-                        player: livePlayer,
-                        controller: liveController,
+                        player: widget.livePlayer,
+                        controller: widget.liveController,
+                        onStatusChanged: (status) {
+                          if (mounted) setState(() => _liveStatus = status);
+                        },
                       ),
                     )
                   else
@@ -111,9 +122,25 @@ class CameraCard extends StatelessWidget {
                       color: const Color(0xFF0A0A0A),
                       child: Center(
                         child: Icon(
-                          camera.enabled ? Icons.videocam : Icons.videocam_off,
+                          widget.camera.enabled ? Icons.videocam : Icons.videocam_off,
                           color: const Color(0xFF525252),
                           size: 32,
+                        ),
+                      ),
+                    ),
+                  // Stream status overlay
+                  if (showLive && _liveStatus != null && _liveStatus!.state != LivePlayerState.playing)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        color: Colors.black54,
+                        child: Text(
+                          _statusText(_liveStatus!),
+                          style: const TextStyle(fontSize: 10, color: Color(0xFFD4D4D4)),
+                          textAlign: TextAlign.center,
                         ),
                       ),
                     ),
@@ -124,7 +151,7 @@ class CameraCard extends StatelessWidget {
                     child: Material(
                       color: Colors.transparent,
                       child: InkWell(
-                        onTap: onEdit,
+                        onTap: widget.onEdit,
                         borderRadius: BorderRadius.circular(4),
                         child: Container(
                           padding: const EdgeInsets.all(4),
@@ -151,24 +178,26 @@ class CameraCard extends StatelessWidget {
                     height: 6,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: playbackController != null
+                      color: widget.playbackController != null
                           ? const Color(0xFF3B82F6)
-                          : running
+                          : running && (widget.stream?.go2rtcConnected ?? true)
                               ? const Color(0xFF22C55E)
-                              : camera.enabled
+                              : running
                                   ? const Color(0xFFEAB308)
-                                  : const Color(0xFFEF4444),
+                                  : widget.camera.enabled
+                                      ? const Color(0xFFEAB308)
+                                      : const Color(0xFFEF4444),
                     ),
                   ),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      camera.name,
+                      widget.camera.name,
                       style: const TextStyle(fontSize: 12),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (playbackController != null)
+                  if (widget.playbackController != null)
                     const Text('Playback',
                         style: TextStyle(fontSize: 10, color: Color(0xFF3B82F6))),
                 ],
@@ -180,10 +209,36 @@ class CameraCard extends StatelessWidget {
     );
   }
 
+  String _statusText(LivePlayerStatus status) {
+    switch (status.state) {
+      case LivePlayerState.connecting:
+        return _reasonFromBackend() ?? 'Connecting...';
+      case LivePlayerState.retrying:
+        final reason = _reasonFromBackend() ?? 'Reconnecting';
+        final retrySec = (status.nextRetryMs / 1000).ceil();
+        return '$reason (attempt ${status.retryAttempt}) - retry in ${retrySec}s';
+      case LivePlayerState.error:
+        final reason = _reasonFromBackend();
+        final msg = status.errorMessage ?? 'unknown';
+        return reason != null ? '$reason: $msg' : 'Error: $msg';
+      case LivePlayerState.playing:
+        return '';
+    }
+  }
+
+  String? _reasonFromBackend() {
+    final s = widget.stream;
+    if (s == null) return 'Waiting for backend...';
+    if (!s.running) return 'Stream not started';
+    if (s.error != null) return s.error;
+    if (s.go2rtcConnected == false) return 'Camera not responding';
+    return null;
+  }
+
   Widget _buildPlaybackVideo() {
-    final rot = camera.rotation;
+    final rot = widget.camera.rotation;
     Widget video = Video(
-      controller: playbackController!,
+      controller: widget.playbackController!,
       fit: BoxFit.cover,
     );
     if (rot != 0) {

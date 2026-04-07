@@ -551,14 +551,6 @@ class _MainNavState extends State<_MainNav> {
             onLiveStateChanged: widget.onLiveStateChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onOpenSystem: () => setState(() => _showSystem = true),
-            onOpenSettings: () {
-              Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => SettingsScreen(
-                  onSaved: widget.onServerUrlChanged,
-                  initialUrl: widget.serverUrl,
-                ),
-              ));
-            },
             onOpenSystemSettings: () {
               Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => SystemSettingsScreen(
@@ -609,6 +601,13 @@ class _MainNavState extends State<_MainNav> {
             onLiveStateChanged: widget.onLiveStateChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onBack: _exitFullscreen,
+            onEditCamera: (cam) async {
+              await Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) =>
+                    CameraFormScreen(cameraApi: widget.cameraApi, camera: cam),
+              ));
+              await widget.onRefreshCameras();
+            },
             playbackRef: _fullscreenRef,
             initialPlaybackTime: _fullscreenInitialTime,
             initialPbPlayer: _handoffPlayer,

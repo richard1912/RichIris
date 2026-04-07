@@ -34,6 +34,7 @@ class FullscreenScreen extends StatefulWidget {
   final ValueChanged<bool> onLiveStateChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback? onBack;
+  final ValueChanged<Camera>? onEditCamera;
   final Player? livePlayer;
   final VideoController? liveController;
   final PlaybackRef playbackRef;
@@ -58,6 +59,7 @@ class FullscreenScreen extends StatefulWidget {
     required this.onLiveStateChanged,
     required this.onStreamSourceChanged,
     this.onBack,
+    this.onEditCamera,
     this.livePlayer,
     this.liveController,
     required this.playbackRef,
@@ -526,6 +528,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             ),
+            if (widget.onEditCamera != null)
+              IconButton(
+                icon: const Icon(Icons.settings, size: 20),
+                tooltip: 'Camera Settings',
+                onPressed: () => widget.onEditCamera!(widget.camera),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              ),
             if (_isLive && widget.stream?.uptimeSeconds != null)
               Padding(
                 padding: const EdgeInsets.only(right: 8),

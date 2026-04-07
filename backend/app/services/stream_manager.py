@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.config import AppConfig, get_config
 from app.services.ffmpeg import build_recording_command, sanitize_camera_name
-from app.services.go2rtc_client import get_go2rtc_client
+from app.services.go2rtc_client import get_go2rtc_client, get_stream_name
 from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,11 @@ class StreamManager:
     async def start_stream(
         self, camera_id: int, camera_name: str, rtsp_url: str, sub_stream_url: str | None = None
     ) -> None:
-        """Start a recording ffmpeg process and register with go2rtc for live view."""
+        """Start a recording ffmpeg process reading from go2rtc's local RTSP.
+
+        Recording always uses the main stream direct passthrough from go2rtc,
+        so only one RTSP connection is made to the camera (shared with live view).
+        """
         if camera_id in self._streams and self._streams[camera_id].rec_process:
             logger.warning("Stream already running", extra={"camera_id": camera_id})
             return
@@ -57,10 +61,14 @@ class StreamManager:
         config = get_config()
         _ensure_directories(camera_name, config)
 
+        # Record from go2rtc's local RTSP re-publish (main stream, passthrough)
+        stream_name = get_stream_name(camera_name)
+        go2rtc_rtsp_url = f"rtsp://127.0.0.1:{config.go2rtc.rtsp_port}/{stream_name}_s1_direct"
+
         info = StreamInfo(
             camera_id=camera_id,
             camera_name=camera_name,
-            rtsp_url=rtsp_url,
+            rtsp_url=go2rtc_rtsp_url,
             sub_stream_url=sub_stream_url or None,
         )
         self._streams[camera_id] = info

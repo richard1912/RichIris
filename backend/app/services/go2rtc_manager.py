@@ -60,6 +60,7 @@ def _generate_go2rtc_config(binary_dir: Path, streams: dict | None = None) -> Pa
 
     go2rtc_config = {
         "api": {"listen": f":{config.go2rtc.port}"},
+        "rtsp": {"listen": f":{config.go2rtc.rtsp_port}"},
         "ffmpeg": {
             "bin": ffmpeg_bin,
             # Use NVENC GPU encoders

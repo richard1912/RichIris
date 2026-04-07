@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +14,6 @@ from app.database import get_db
 from app.models import Camera, ClipExport, MotionEvent, Recording
 from app.schemas import CameraCreate, CameraResponse, CameraUpdate
 from app.services.ffmpeg import sanitize_camera_name
-from app.services.go2rtc_client import get_stream_name
 from app.services.motion_detector import get_motion_detector
 from app.services.stream_manager import get_stream_manager
 
@@ -70,8 +68,6 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         try:
             mgr = get_stream_manager()
             await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
-            # Pre-warm go2rtc stream so it connects to RTSP before the app tries to play
-            asyncio.create_task(_prewarm_camera_stream(camera.name))
         except Exception:
             logger.exception("Failed to start stream for new camera", extra={"camera_id": camera.id})
 
@@ -140,7 +136,6 @@ async def update_camera(
     elif needs_restart:
         await mgr.stop_stream(camera.id)
         await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
-        asyncio.create_task(_prewarm_camera_stream(camera.name))
 
     # Update motion detection if settings changed
     detector = get_motion_detector()
@@ -170,23 +165,6 @@ async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     logger.info("Camera deleted", extra={"camera_id": camera_id})
 
-
-async def _prewarm_camera_stream(camera_name: str) -> None:
-    """Trigger go2rtc's lazy RTSP connection so the stream is ready for clients."""
-    config = get_config()
-    stream_name = get_stream_name(camera_name)
-    url = f"http://127.0.0.1:{config.go2rtc.port}/api/stream.mp4?src={stream_name}_s2_direct"
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            async with client.stream("GET", url) as resp:
-                total = 0
-                async for chunk in resp.aiter_bytes(chunk_size=8192):
-                    total += len(chunk)
-                    if total > 32768:
-                        break
-        logger.info("Pre-warmed stream for new camera", extra={"camera": camera_name})
-    except Exception:
-        logger.warning("Failed to pre-warm stream", extra={"camera": camera_name})
 
 
 async def _rename_camera_folder(

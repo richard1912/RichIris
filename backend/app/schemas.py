@@ -132,6 +132,8 @@ class StreamStatus(BaseModel):
     pid: int | None = None
     uptime_seconds: float | None = None
     error: str | None = None
+    go2rtc_connected: bool | None = None
+    go2rtc_consumers: int | None = None
 
 
 class SystemStatus(BaseModel):

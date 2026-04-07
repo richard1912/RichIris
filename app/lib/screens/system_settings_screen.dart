@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:io' show Platform, Process;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/backup_api.dart';
 import '../services/settings_api.dart';
 import '../widgets/backup_restore_dialog.dart';
@@ -19,58 +21,68 @@ class SystemSettingsScreen extends StatefulWidget {
 class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
   Map<String, Map<String, dynamic>>? _settings;
   final Map<String, String> _edits = {};
-  bool _loading = true;
+  bool _backendLoading = true;
   bool _saving = false;
-  String? _error;
+  String? _error; // save errors only
+  String? _backendError; // load/connectivity errors
   bool _restartRequired = false;
   bool _saved = false;
 
   // Data directory state
   Map<String, dynamic>? _dataDirInfo;
 
+
+  // Service diagnostics state
+  Map<String, dynamic>? _serviceInfo;
+  String? _serviceStatus; // "Running", "Stopped", "Not Installed", or null
+  bool _serviceLoading = false;
+  String? _serviceError;
+  Timer? _serviceRefreshTimer;
+
   @override
   void initState() {
     super.initState();
     _load();
+    if (Platform.isWindows) {
+      _loadServiceInfo();
+      _serviceRefreshTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => _loadServiceInfo(),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _serviceRefreshTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
-    // Retry on connection errors (service may still be starting)
-    for (var attempt = 0; attempt < 10; attempt++) {
+    setState(() {
+      _backendLoading = true;
+      _backendError = null;
+    });
+    try {
+      final settings = await widget.settingsApi.fetchSettings();
+      Map<String, dynamic>? dataDirInfo;
       try {
-        final settings = await widget.settingsApi.fetchSettings();
-        Map<String, dynamic>? dataDirInfo;
-        try {
-          dataDirInfo = await widget.settingsApi.fetchDataDir();
-        } catch (_) {}
-        if (mounted) {
-          setState(() {
-            _settings = settings;
-            _dataDirInfo = dataDirInfo;
-            _loading = false;
-            _error = null;
-          });
-        }
-        return;
-      } catch (e) {
-        final isConnectionError = e.toString().contains('connection error') ||
-            e.toString().contains('Connection refused') ||
-            e.toString().contains('SocketException');
-        if (!isConnectionError || attempt >= 9) {
-          if (mounted) {
-            setState(() {
-              _loading = false;
-              _error = 'Failed to load settings: $e';
-            });
-          }
-          return;
-        }
-        // Show waiting message and retry
-        if (mounted && attempt == 0) {
-          setState(() => _error = 'Waiting for server to start...');
-        }
-        await Future.delayed(const Duration(seconds: 1));
-        if (!mounted) return;
+        dataDirInfo = await widget.settingsApi.fetchDataDir();
+      } catch (_) {}
+      if (mounted) {
+        setState(() {
+          _settings = settings;
+          _dataDirInfo = dataDirInfo;
+          _backendLoading = false;
+          _backendError = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _backendLoading = false;
+          _backendError = 'Failed to load settings: $e';
+        });
       }
     }
   }
@@ -129,13 +141,160 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
     }
   }
 
+  Future<void> _loadServiceInfo() async {
+    // Query Windows service status via sc query
+    try {
+      final scResult = await Process.run('sc', ['query', 'RichIris']);
+      final output = scResult.stdout.toString();
+      if (scResult.exitCode != 0) {
+        if (mounted) setState(() => _serviceStatus = 'Not Installed');
+      } else if (output.contains('RUNNING')) {
+        if (mounted) setState(() => _serviceStatus = 'Running');
+      } else if (output.contains('STOPPED')) {
+        if (mounted) setState(() => _serviceStatus = 'Stopped');
+      } else if (output.contains('STOP_PENDING')) {
+        if (mounted) setState(() => _serviceStatus = 'Stopping...');
+      } else if (output.contains('START_PENDING')) {
+        if (mounted) setState(() => _serviceStatus = 'Starting...');
+      } else {
+        if (mounted) setState(() => _serviceStatus = 'Unknown');
+      }
+    } catch (_) {
+      if (mounted) setState(() => _serviceStatus = null);
+    }
+
+    // Fetch diagnostics from backend API (only if service is running)
+    if (_serviceStatus == 'Running') {
+      try {
+        final info = await widget.settingsApi.fetchServiceInfo();
+        if (mounted) setState(() {
+          _serviceInfo = info;
+          _serviceError = null;
+        });
+      } catch (_) {
+        // Backend not reachable — keep stale info
+      }
+    }
+  }
+
+  Future<void> _runServiceCommand(String action, {List<String>? args}) async {
+    setState(() {
+      _serviceLoading = true;
+      _serviceError = null;
+    });
+
+    try {
+      String command;
+
+      if (action == 'install' || action == 'uninstall') {
+        // nssm required for install/uninstall — find it
+        final nssmPath = await _findNssm();
+        if (nssmPath == null) {
+          setState(() {
+            _serviceLoading = false;
+            _serviceError = 'nssm.exe not found. Cannot $action service.';
+          });
+          return;
+        }
+        if (action == 'uninstall') {
+          command = 'Start-Process -FilePath "$nssmPath" -ArgumentList "stop RichIris" -Verb RunAs -Wait -ErrorAction SilentlyContinue; '
+              'Start-Process -FilePath "$nssmPath" -ArgumentList "remove RichIris confirm" -Verb RunAs -Wait';
+          command = command.replaceAll(r'$nssmPath', nssmPath);
+        } else {
+          final installArgs = args?.join(' ') ?? '';
+          command = 'Start-Process -FilePath "$nssmPath" -ArgumentList "install RichIris $installArgs" -Verb RunAs -Wait';
+          command = command.replaceAll(r'$nssmPath', nssmPath).replaceAll(r'$installArgs', installArgs);
+        }
+      } else {
+        // start/stop/restart use sc.exe (built-in, no nssm needed)
+        if (action == 'restart') {
+          command = 'Start-Process -FilePath "sc.exe" -ArgumentList "stop RichIris" -Verb RunAs -Wait; '
+              'Start-Process -FilePath "sc.exe" -ArgumentList "start RichIris" -Verb RunAs -Wait';
+        } else {
+          command = 'Start-Process -FilePath "sc.exe" -ArgumentList "$action RichIris" -Verb RunAs -Wait';
+          command = command.replaceAll(r'$action', action);
+        }
+      }
+
+      await Process.run('powershell', ['-Command', command]);
+      // Wait a moment for service state to change
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) {
+        await _loadServiceInfo();
+        // Reload settings if service was just started (backend now available)
+        if (_serviceStatus == 'Running' && _settings == null) {
+          await _load();
+        }
+      }
+    } catch (e) {
+      if (mounted) setState(() => _serviceError = 'Failed: $e');
+    } finally {
+      if (mounted) setState(() => _serviceLoading = false);
+    }
+  }
+
+  Future<String?> _findNssm() async {
+    // Check relative to the app executable
+    final exePath = Platform.resolvedExecutable;
+    final exeDir = exePath.substring(0, exePath.lastIndexOf(Platform.pathSeparator));
+    final candidates = [
+      '$exeDir${Platform.pathSeparator}dependencies${Platform.pathSeparator}nssm.exe',
+      '$exeDir${Platform.pathSeparator}nssm.exe',
+    ];
+
+    for (final path in candidates) {
+      try {
+        final result = await Process.run('cmd', ['/c', 'if', 'exist', path, 'echo', 'found']);
+        if (result.stdout.toString().contains('found')) return path;
+      } catch (_) {}
+    }
+
+    // Try on PATH
+    try {
+      final result = await Process.run('where', ['nssm']);
+      final path = result.stdout.toString().trim().split('\n').first.trim();
+      if (path.isNotEmpty && result.exitCode == 0) return path;
+    } catch (_) {}
+
+    return null;
+  }
+
+  Future<bool> _confirmServiceAction(String action) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${action[0].toUpperCase()}${action.substring(1)} Service?'),
+        content: Text(
+          action == 'stop'
+              ? 'Stopping the service will stop all recording and make the backend unavailable. Continue?'
+              : action == 'uninstall'
+                  ? 'This will stop and remove the RichIris Windows service. You can reinstall it later. Continue?'
+                  : action == 'restart'
+                      ? 'This will briefly stop all recording while the service restarts. Continue?'
+                      : 'Continue with $action?',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: action == 'uninstall' || action == 'stop'
+                ? ElevatedButton.styleFrom(backgroundColor: Colors.red[700])
+                : null,
+            child: Text(action[0].toUpperCase() + action.substring(1)),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('System Settings'),
+        title: const Text('Settings'),
         actions: [
-          if (_edits.isNotEmpty)
+          if (_edits.isNotEmpty && _settings != null)
             TextButton.icon(
               onPressed: _saving ? null : _save,
               icon: _saving
@@ -149,29 +308,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null && _settings == null
-              ? Center(
-                  child: _error!.startsWith('Waiting')
-                      ? Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const CircularProgressIndicator(),
-                            const SizedBox(height: 16),
-                            Text(_error!, style: const TextStyle(color: Colors.white70)),
-                          ],
-                        )
-                      : Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(_error!, style: const TextStyle(color: Colors.red)),
-                            const SizedBox(height: 16),
-                            ElevatedButton(onPressed: () { setState(() { _loading = true; _error = null; }); _load(); }, child: const Text('Retry')),
-                          ],
-                        ),
-                )
-              : _buildContent(),
+      body: _buildContent(),
     );
   }
 
@@ -227,7 +364,37 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             ),
             child: Text(_error!, style: const TextStyle(color: Colors.red)),
           ),
-        _buildSection('General', Icons.settings, [
+        if (_settings == null && !_backendLoading)
+          Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.orange.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.cloud_off, color: Colors.orange, size: 20),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Backend is unreachable. Local settings are still available.',
+                    style: TextStyle(color: Colors.orange),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _load,
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+        if (Platform.isWindows)
+          _buildSection('Backend Service', Icons.miscellaneous_services, [
+            _serviceField(),
+          ]),
+        _buildBackendSection('General', Icons.settings, () => [
           _dropdownField('logging', 'timezone', 'Timezone', [
             'UTC',
             'US/Eastern',
@@ -257,17 +424,17 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
           ]),
         ]),
         if (_dataDirInfo != null)
-          _buildSection('Storage', Icons.storage, [
+          _buildBackendSection('Storage', Icons.storage, () => [
             _dataDirField(),
           ]),
-        _buildSection('Retention', Icons.auto_delete, [
+        _buildBackendSection('Retention', Icons.auto_delete, () => [
           _numberField('retention', 'max_age_days', 'Max Age (days)'),
           _numberField('retention', 'max_storage_gb', 'Max Storage (GB)'),
         ]),
-        _buildSection('Trickplay Thumbnails', Icons.grid_view, [
+        _buildBackendSection('Trickplay Thumbnails', Icons.grid_view, () => [
           _toggleField('trickplay', 'enabled', 'Enable Trickplay'),
         ]),
-        _buildSection('Logging', Icons.article, [
+        _buildBackendSection('Logging', Icons.article, () => [
           _dropdownField('logging', 'level', 'Log Level', [
             'DEBUG',
             'INFO',
@@ -276,9 +443,22 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
           ]),
         ]),
         if (Platform.isWindows && widget.backupApi != null)
-          _buildSection('Backup & Restore', Icons.backup, [
+          _buildBackendSection('Backup & Restore', Icons.backup, () => [
             _backupRestoreField(),
           ]),
+        Center(
+          child: TextButton.icon(
+            onPressed: () => launchUrl(
+              Uri.parse('https://ko-fi.com/richard1912'),
+              mode: LaunchMode.externalApplication,
+            ),
+            icon: const Icon(Icons.favorite, color: Colors.redAccent, size: 18),
+            label: Text(
+              'Support RichIris on Ko-fi',
+              style: TextStyle(color: Colors.grey[400]),
+            ),
+          ),
+        ),
         const SizedBox(height: 80),
       ],
     );
@@ -307,6 +487,224 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildBackendSection(String title, IconData icon, List<Widget> Function() childrenBuilder) {
+    if (_backendLoading && _settings == null) {
+      return _buildSection(title, icon, [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 12),
+              Text('Loading...', style: TextStyle(color: Colors.grey[500])),
+            ],
+          ),
+        ),
+      ]);
+    }
+    if (_settings == null) {
+      return _buildSection(title, icon, [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Icon(Icons.cloud_off, size: 16, color: Colors.grey[600]),
+              const SizedBox(width: 8),
+              Text('Backend unavailable', style: TextStyle(color: Colors.grey[600])),
+            ],
+          ),
+        ),
+      ]);
+    }
+    return _buildSection(title, icon, childrenBuilder());
+  }
+
+  String _formatUptime(int seconds) {
+    final days = seconds ~/ 86400;
+    final hours = (seconds % 86400) ~/ 3600;
+    final mins = (seconds % 3600) ~/ 60;
+    if (days > 0) return '${days}d ${hours}h ${mins}m';
+    if (hours > 0) return '${hours}h ${mins}m';
+    return '${mins}m';
+  }
+
+  Widget _serviceField() {
+    final isRunning = _serviceStatus == 'Running';
+    final isStopped = _serviceStatus == 'Stopped';
+    final isNotInstalled = _serviceStatus == 'Not Installed';
+    final info = _serviceInfo;
+
+    Color statusColor;
+    IconData statusIcon;
+    if (isRunning) {
+      statusColor = Colors.green;
+      statusIcon = Icons.check_circle;
+    } else if (isStopped) {
+      statusColor = Colors.orange;
+      statusIcon = Icons.pause_circle;
+    } else if (isNotInstalled) {
+      statusColor = Colors.red;
+      statusIcon = Icons.cancel;
+    } else {
+      statusColor = Colors.grey;
+      statusIcon = Icons.help_outline;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Status row
+          Row(
+            children: [
+              Icon(statusIcon, size: 18, color: statusColor),
+              const SizedBox(width: 8),
+              Text(
+                'Status: ${_serviceStatus ?? 'Checking...'}',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: statusColor),
+              ),
+              const Spacer(),
+              if (_serviceLoading)
+                const SizedBox(
+                  width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                IconButton(
+                  onPressed: _loadServiceInfo,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  tooltip: 'Refresh',
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  padding: EdgeInsets.zero,
+                ),
+            ],
+          ),
+
+          // Diagnostics (only shown when running and we have info)
+          if (isRunning && info != null) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF333333)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _diagRow('PID', '${info['pid']}'),
+                  _diagRow('Uptime', _formatUptime((info['uptime_seconds'] as num?)?.toInt() ?? 0)),
+                  _diagRow('Memory', '${info['memory_mb']} MB'),
+                  _diagRow('Python', '${info['python_version']}'),
+                  const Divider(height: 16, color: Color(0xFF333333)),
+                  _diagRow('Cameras', '${info['active_streams']} / ${info['total_cameras']} streaming'),
+                  _diagRow('FFmpeg processes', '${info['ffmpeg_processes']}'),
+                  _diagRow('go2rtc', info['go2rtc_running'] == true
+                      ? 'Running (PID ${info['go2rtc_pid'] ?? '?'})'
+                      : 'Not running'),
+                  const Divider(height: 16, color: Color(0xFF333333)),
+                  _diagRow('Port', '${info['port']}'),
+                  _diagRow('Log file', '${info['log_file_size_mb']} MB'),
+                  _diagRow('Started', _formatStartupTime(info['startup_time'] as String?)),
+                ],
+              ),
+            ),
+          ],
+
+          if (_serviceError != null) ...[
+            const SizedBox(height: 8),
+            Text(_serviceError!, style: const TextStyle(color: Colors.red, fontSize: 13)),
+          ],
+
+          // Control buttons
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (isStopped || _serviceStatus == 'Starting...')
+                _serviceButton('Start', Icons.play_arrow, Colors.green, () async {
+                  await _runServiceCommand('start');
+                }),
+              if (isRunning || _serviceStatus == 'Stopping...')
+                _serviceButton('Stop', Icons.stop, Colors.red, () async {
+                  if (await _confirmServiceAction('stop')) {
+                    await _runServiceCommand('stop');
+                  }
+                }),
+              if (isRunning)
+                _serviceButton('Restart', Icons.restart_alt, Colors.orange, () async {
+                  if (await _confirmServiceAction('restart')) {
+                    await _runServiceCommand('restart');
+                  }
+                }),
+              if (isNotInstalled)
+                _serviceButton('Install', Icons.install_desktop, Colors.blue, () async {
+                  await _runServiceCommand('install');
+                }),
+              if (!isNotInstalled && _serviceStatus != null)
+                _serviceButton('Uninstall', Icons.delete_forever, Colors.red[300]!, () async {
+                  if (await _confirmServiceAction('uninstall')) {
+                    await _runServiceCommand('uninstall');
+                    setState(() => _serviceInfo = null);
+                  }
+                }),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+          Text(
+            'Service controls require administrator privileges (UAC prompt).',
+            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _serviceButton(String label, IconData icon, Color color, Future<void> Function() onPressed) {
+    return OutlinedButton.icon(
+      onPressed: _serviceLoading ? null : onPressed,
+      icon: Icon(icon, size: 16, color: _serviceLoading ? Colors.grey : color),
+      label: Text(label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: color,
+        side: BorderSide(color: color.withValues(alpha: 0.4)),
+      ),
+    );
+  }
+
+  Widget _diagRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 130,
+            child: Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+          ),
+          Expanded(
+            child: Text(value, style: const TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatStartupTime(String? iso) {
+    if (iso == null) return '—';
+    try {
+      final dt = DateTime.parse(iso);
+      return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+          '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return iso;
+    }
   }
 
   Widget _dataDirField() {
@@ -440,6 +838,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
       await _load();
     }
   }
+
 
   Widget _textField(String category, String key, String label,
       {String? hint}) {

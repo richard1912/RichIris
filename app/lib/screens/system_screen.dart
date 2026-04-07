@@ -179,6 +179,23 @@ class _SystemScreenState extends State<SystemScreen> {
                       child: Text('PID ${s.pid}',
                           style: const TextStyle(fontSize: 11, color: Color(0xFF525252))),
                     ),
+                  if (s.go2rtcConnected != null)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: Text(
+                        s.go2rtcConnected! ? 'rtc:ok' : 'rtc:disconnected',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: s.go2rtcConnected! ? const Color(0xFF525252) : const Color(0xFFEAB308),
+                        ),
+                      ),
+                    ),
+                  if (s.go2rtcConsumers != null && s.go2rtcConsumers! > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: Text('${s.go2rtcConsumers}v',
+                          style: const TextStyle(fontSize: 11, color: Color(0xFF525252))),
+                    ),
                   if (s.error != null)
                     Padding(
                       padding: const EdgeInsets.only(left: 8),

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -44,7 +45,6 @@ class HomeScreen extends StatefulWidget {
   final ValueChanged<bool> onLiveStateChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback onOpenSystem;
-  final VoidCallback onOpenSettings;
   final VoidCallback onOpenSystemSettings;
   final VoidCallback onAddCamera;
   final ValueChanged<Camera> onEditCamera;
@@ -77,7 +77,6 @@ class HomeScreen extends StatefulWidget {
     required this.onLiveStateChanged,
     required this.onStreamSourceChanged,
     required this.onOpenSystem,
-    required this.onOpenSettings,
     required this.onOpenSystemSettings,
     required this.onAddCamera,
     required this.onEditCamera,
@@ -443,9 +442,28 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final activeCount = widget.systemStatus?.activeStreams ?? 0;
     final totalCount = widget.systemStatus?.totalCameras ?? widget.cameras.length;
+    final isAndroid = Platform.isAndroid;
+
+    final kofiButton = TextButton.icon(
+      onPressed: () => launchUrl(
+        Uri.parse('https://ko-fi.com/richard1912'),
+        mode: LaunchMode.externalApplication,
+      ),
+      icon: const Icon(Icons.favorite, color: Colors.redAccent, size: 14),
+      label: Text(
+        'Support RichIris on Ko-fi',
+        style: TextStyle(color: Colors.grey[400], fontSize: 12),
+      ),
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
 
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: 40,
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -466,23 +484,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ],
-            const SizedBox(width: 12),
-            TextButton.icon(
-              onPressed: () => launchUrl(
-                Uri.parse('https://ko-fi.com/richard1912'),
-                mode: LaunchMode.externalApplication,
-              ),
-              icon: const Icon(Icons.favorite, color: Colors.redAccent, size: 14),
-              label: Text(
-                'Support RichIris on Ko-fi',
-                style: TextStyle(color: Colors.grey[400], fontSize: 12),
-              ),
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-            ),
+            if (!isAndroid) ...[
+              const SizedBox(width: 12),
+              kofiButton,
+            ],
           ],
         ),
         actions: [
@@ -500,36 +505,58 @@ class _HomeScreenState extends State<HomeScreen> {
             tooltip: 'Report a Bug',
             onPressed: () => _showBugReportDialog(context),
           ),
-          if (!_isLive)
-            const Padding(
-              padding: EdgeInsets.only(right: 8),
-              child: Center(
-                child: Text('Playback',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF3B82F6))),
+          if (!isAndroid) ...[
+            if (!_isLive)
+              const Padding(
+                padding: EdgeInsets.only(right: 8),
+                child: Center(
+                  child: Text('Playback',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF3B82F6))),
+                ),
               ),
-            ),
-          if (_isLive) ...[
-            StreamSourceSelector(value: widget.streamSource, onChanged: widget.onStreamSourceChanged),
-            const SizedBox(width: 4),
+            if (_isLive) ...[
+              StreamSourceSelector(value: widget.streamSource, onChanged: widget.onStreamSourceChanged),
+              const SizedBox(width: 4),
+            ],
+            QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged, isLive: _isLive),
+            const SizedBox(width: 8),
           ],
-          QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged, isLive: _isLive),
-          const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.storage, size: 20),
             tooltip: 'System Status',
             onPressed: widget.onOpenSystem,
           ),
           IconButton(
-            icon: const Icon(Icons.tune, size: 20),
-            tooltip: 'System Settings',
+            icon: const Icon(Icons.settings, size: 20),
+            tooltip: 'Settings',
             onPressed: widget.onOpenSystemSettings,
           ),
-          IconButton(
-            icon: const Icon(Icons.settings, size: 20),
-            tooltip: 'Server Settings',
-            onPressed: widget.onOpenSettings,
-          ),
         ],
+        bottom: isAndroid
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(32),
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 12, right: 8, bottom: 4),
+                  child: Row(
+                    children: [
+                      kofiButton,
+                      const Spacer(),
+                      if (!_isLive)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 8),
+                          child: Text('Playback',
+                              style: TextStyle(fontSize: 12, color: Color(0xFF3B82F6))),
+                        ),
+                      if (_isLive) ...[
+                        StreamSourceSelector(value: widget.streamSource, onChanged: widget.onStreamSourceChanged),
+                        const SizedBox(width: 4),
+                      ],
+                      QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged, isLive: _isLive),
+                    ],
+                  ),
+                ),
+              )
+            : null,
       ),
       body: Column(
         children: [

@@ -344,6 +344,14 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     }
   }
 
+  String _formatPlayheadTime(double hour) {
+    final h = hour.floor();
+    final minutesFrac = (hour - h) * 60;
+    final m = minutesFrac.floor();
+    final s = ((minutesFrac - m) * 60).floor();
+    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
   void _changeDate(int delta) {
     final parts = _ctrl.selectedDate.split('-');
     final dt = DateTime(int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
@@ -589,6 +597,60 @@ class _TimelineWidgetState extends State<TimelineWidget> {
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
         ),
+        if (_ctrl.selectedDate != todayDate(tzOffsetMs: widget.tzOffsetMs))
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: SizedBox(
+              height: 26,
+              child: TextButton(
+                onPressed: () {
+                  _ctrl.setDate(todayDate(tzOffsetMs: widget.tzOffsetMs));
+                  _fetchSegments();
+                },
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: Size.zero,
+                  foregroundColor: const Color(0xFFA3A3A3),
+                ),
+                child: const Text('Today', style: TextStyle(fontSize: 11)),
+              ),
+            ),
+          ),
+        // Playhead timestamp
+        if (_ctrl.playheadHour != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: Text(
+              _formatPlayheadTime(_ctrl.playheadHour!),
+              style: const TextStyle(fontSize: 12, color: Color(0xFFA3A3A3), fontFeatures: [FontFeature.tabularFigures()]),
+            ),
+          ),
+        // LIVE button
+        Padding(
+          padding: const EdgeInsets.only(left: 6),
+          child: SizedBox(
+            height: 26,
+            child: ElevatedButton(
+              onPressed: () {
+                _manualPan = false;
+                final today = todayDate(tzOffsetMs: widget.tzOffsetMs);
+                if (_ctrl.selectedDate != today) {
+                  _ctrl.setDate(today);
+                  _fetchSegments();
+                }
+                widget.onLive();
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: widget.isLive
+                    ? (widget.isPaused ? const Color(0xFFEA580C) : const Color(0xFFEF4444))
+                    : const Color(0xFF404040),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                minimumSize: Size.zero,
+              ),
+              child: const Text('LIVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ),
         const Spacer(),
         // Hover time
         if (_hoverTime != null && !_ctrl.exportMode)
@@ -610,25 +672,6 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               _ctrl.exportMode ? 'Cancel' : 'Export Clip',
               style: const TextStyle(fontSize: 11),
             ),
-          ),
-        ),
-        const SizedBox(width: 4),
-        // LIVE button
-        SizedBox(
-          height: 26,
-          child: ElevatedButton(
-            onPressed: () {
-              _manualPan = false;
-              widget.onLive();
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: widget.isLive
-                  ? (widget.isPaused ? const Color(0xFFEA580C) : const Color(0xFFEF4444))
-                  : const Color(0xFF404040),
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              minimumSize: Size.zero,
-            ),
-            child: const Text('LIVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
           ),
         ),
       ],

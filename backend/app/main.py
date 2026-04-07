@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-import httpx
 from sqlalchemy import select
 
 from app.config import get_app_dir, get_config
@@ -78,8 +77,8 @@ async def lifespan(app: FastAPI):
     # Start recording ffmpeg processes
     await _start_camera_recordings(cameras_list)
 
-    # Pre-warm go2rtc sub-stream direct connections (serialized, staggered)
-    asyncio.create_task(_prewarm_streams(cameras_list))
+    # No pre-warming needed: recording ffmpeg keeps s1_direct alive,
+    # motion detection + thumbnail capture keep s2_direct alive.
 
     thumb_capture = get_thumbnail_capture()
     thumb_capture.start(cameras_list)
@@ -212,37 +211,6 @@ async def _start_camera_recordings(cameras_list: list) -> None:
 
     logger.info("Started enabled cameras", extra={"count": len(cameras_list)})
 
-
-async def _prewarm_streams(cameras_list: list) -> None:
-    """Trigger go2rtc lazy RTSP connections so streams are ready for clients.
-
-    Uses go2rtc's /api/frame.jpeg endpoint which triggers a single RTSP
-    connection and frame decode without the persistent fMP4 streaming that
-    causes go2rtc to panic on client disconnect.
-
-    Streams are warmed one at a time with a short delay to avoid triggering
-    go2rtc's concurrent map write bug (multiple new streams starting at once).
-    """
-    from app.services.go2rtc_client import get_stream_name, get_snapshot_semaphore, wait_for_go2rtc_ready
-
-    config = get_config()
-    await wait_for_go2rtc_ready()
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-        for cam in cameras_list:
-            stream_name = get_stream_name(cam.name)
-            url = f"http://127.0.0.1:{config.go2rtc.port}/api/frame.jpeg?src={stream_name}_s2_direct"
-            try:
-                async with get_snapshot_semaphore():
-                    resp = await client.get(url)
-                if resp.status_code == 200:
-                    logger.info("Pre-warmed stream", extra={"camera": cam.name})
-                else:
-                    logger.warning("Pre-warm returned non-200",
-                                   extra={"camera": cam.name, "status": resp.status_code})
-            except Exception:
-                logger.warning("Failed to pre-warm stream", extra={"camera": cam.name})
-            await asyncio.sleep(3)  # Stagger to avoid go2rtc concurrent map panic
 
 
 def create_app() -> FastAPI:

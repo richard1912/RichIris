@@ -37,6 +37,10 @@ def _build_quality_profiles(
 ) -> dict[str, tuple[str | None, str]]:
     """Build quality profiles with probed bitrates.
 
+    Direct streams source from the camera RTSP URL. Transcoded streams
+    (high/low/ultralow) chain off the direct stream name in go2rtc, so
+    only one RTSP connection per stream (main/sub) is made to the camera.
+
     High = source-matched visual quality (HEVC re-encode at source bitrate).
     Low = 1/8 of High bitrate.
     Ultra-low = 1/16 of source bitrate, 15fps, no B-frames, short GOP.
@@ -51,24 +55,18 @@ def _build_quality_profiles(
     # Ultra-low: 15fps, no B-frames, short GOP (30 frames = 2s at 15fps)
     ul_extra = "#raw=-r#raw=15#raw=-bf#raw=0#raw=-g#raw=30"
 
-    # Use HEVC output — matches source codec, supports 8K resolution (no 4096
-    # width limit like H.264 NVENC), and is more efficient at the same bitrate.
-    main_high = _format_bitrate(main_kbps)
-    main_low = _format_bitrate(max(main_kbps // 8, 500))
-    main_ultralow = _format_bitrate(max(main_kbps // 16, 300))
-    sub_high = _format_bitrate(sub_kbps)
-    sub_low = _format_bitrate(max(sub_kbps // 8, 250))
-    sub_ultralow = _format_bitrate(max(sub_kbps // 16, 150))
-
     return {
+        # Direct streams: source_key used to look up camera RTSP URL
         "_s1_direct":   (None, "main"),
-        "_s1_high":     (f"#video=h265#raw=-b:v#raw={main_high}", "main"),
-        "_s1_low":      (f"#video=h265#raw=-b:v#raw={main_low}", "main"),
-        "_s1_ultralow": (f"#video=h265#raw=-b:v#raw={main_ultralow}{ul_extra}", "main"),
         "_s2_direct":   (None, "sub"),
-        "_s2_high":     (f"#video=h265#raw=-b:v#raw={sub_high}", "sub"),
-        "_s2_low":      (f"#video=h265#raw=-b:v#raw={sub_low}", "sub"),
-        "_s2_ultralow": (f"#video=h265#raw=-b:v#raw={sub_ultralow}{ul_extra}", "sub"),
+        # Transcoded streams: source_key "chain_s1"/"chain_s2" signals chaining
+        # off the direct stream (resolved in build_streams_config)
+        "_s1_high":     (f"#video=h265#raw=-b:v#raw={main_high}", "chain_s1"),
+        "_s1_low":      (f"#video=h265#raw=-b:v#raw={main_low}", "chain_s1"),
+        "_s1_ultralow": (f"#video=h265#raw=-b:v#raw={main_ultralow}{ul_extra}", "chain_s1"),
+        "_s2_high":     (f"#video=h265#raw=-b:v#raw={sub_high}", "chain_s2"),
+        "_s2_low":      (f"#video=h265#raw=-b:v#raw={sub_low}", "chain_s2"),
+        "_s2_ultralow": (f"#video=h265#raw=-b:v#raw={sub_ultralow}{ul_extra}", "chain_s2"),
     }
 
 
@@ -87,8 +85,8 @@ def build_streams_config(
 
     for name, rtsp_url, sub_url in cameras:
         stream_name = get_stream_name(name)
-        sub = sub_url or rtsp_url
-        sources = {"main": rtsp_url, "sub": sub}
+        has_sub = bool(sub_url)
+        sources = {"main": rtsp_url, "sub": sub_url or rtsp_url}
 
         if probed_bitrates and name in probed_bitrates:
             main_kbps, sub_kbps, main_codec, sub_codec = probed_bitrates[name]
@@ -100,10 +98,28 @@ def build_streams_config(
 
         profiles = _build_quality_profiles(main_kbps, sub_kbps, main_codec, sub_codec)
 
+        # Resolve chain references: transcoded streams source from the direct
+        # stream name in go2rtc (one RTSP connection per stream to the camera).
+        # When no sub-stream URL is configured, s2_direct also chains off
+        # s1_direct so only one RTSP connection is made to the camera.
+        chain_sources = {
+            "chain_s1": f"{stream_name}_s1_direct",
+            "chain_s2": f"{stream_name}_s2_direct",
+        }
+
         for suffix, (params, source_key) in profiles.items():
             key = f"{stream_name}{suffix}"
-            raw_url = sources[source_key]
-            source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
+            if source_key in chain_sources:
+                # Transcoded: chain off the direct stream within go2rtc
+                source_url = f"ffmpeg:{chain_sources[source_key]}{params}"
+            elif source_key == "sub" and not has_sub:
+                # No sub-stream configured: s2_direct chains off s1_direct
+                # (one RTSP connection instead of two to the same URL)
+                source_url = f"{stream_name}_s1_direct"
+            else:
+                # Direct: point to camera RTSP URL
+                raw_url = sources[source_key]
+                source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
             streams[key] = [source_url]
 
     return streams
@@ -129,6 +145,7 @@ class Go2rtcClient:
         S1/S2 × Direct/High/Low. High matches source bitrate, Low is 1/8.
         """
         stream_name = get_stream_name(camera_name)
+        has_sub = bool(sub_stream_url)
         sub_url = sub_stream_url or rtsp_url
         sources = {"main": rtsp_url, "sub": sub_url}
 
@@ -169,12 +186,24 @@ class Go2rtcClient:
             except Exception:
                 logger.exception("Failed to register stream with go2rtc", extra={"stream_name": key})
 
+        # Resolve chain references for transcoded streams
+        chain_sources = {
+            "chain_s1": f"{stream_name}_s1_direct",
+            "chain_s2": f"{stream_name}_s2_direct",
+        }
+
         async with httpx.AsyncClient(timeout=10) as client:
             tasks = []
             for suffix, (params, source_key) in profiles.items():
                 key = f"{stream_name}{suffix}"
-                raw_url = sources[source_key]
-                source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
+                if source_key in chain_sources:
+                    source_url = f"ffmpeg:{chain_sources[source_key]}{params}"
+                elif source_key == "sub" and not has_sub:
+                    # No sub-stream: s2_direct chains off s1_direct
+                    source_url = f"{stream_name}_s1_direct"
+                else:
+                    raw_url = sources[source_key]
+                    source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
                 tasks.append(_register_one(client, key, source_url))
             await asyncio.gather(*tasks)
 
@@ -254,6 +283,21 @@ class Go2rtcClient:
                 return resp.status_code == 200
         except Exception:
             return False
+
+    async def get_streams_health(self) -> dict:
+        """Query go2rtc /api/streams for per-stream producer/consumer status.
+
+        Returns the raw JSON dict keyed by stream name. Active producers have
+        'bytes_recv' > 0; lazy/unconnected ones only have a 'url' stub.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{self._base_url}/api/streams")
+                resp.raise_for_status()
+                return resp.json()
+        except Exception:
+            logger.warning("Failed to query go2rtc streams health")
+            return {}
 
 
 # Singleton

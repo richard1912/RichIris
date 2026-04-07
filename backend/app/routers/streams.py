@@ -71,13 +71,23 @@ async def proxy_fmp4(camera_id: int, stream: str = "s2", quality: str = "direct"
     client = _get_pool()
 
     async def stream_generator():
+        logger.info("fMP4 client connected", extra={"camera_id": camera_id, "stream_name": stream_name})
         try:
             async with client.stream("GET", go2rtc_url) as resp:
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes(chunk_size=65536):
                     yield chunk
+            logger.debug("fMP4 stream ended normally", extra={"camera_id": camera_id})
+        except httpx.ConnectError:
+            logger.warning("fMP4 proxy: connection refused from go2rtc", extra={"camera_id": camera_id, "go2rtc_url": go2rtc_url})
+        except httpx.ConnectTimeout:
+            logger.warning("fMP4 proxy: connection timeout to go2rtc", extra={"camera_id": camera_id})
+        except httpx.HTTPStatusError as e:
+            logger.warning("fMP4 proxy: HTTP error from go2rtc", extra={"camera_id": camera_id, "status": e.response.status_code})
+        except GeneratorExit:
+            logger.debug("fMP4 client disconnected", extra={"camera_id": camera_id})
         except Exception:
-            logger.debug("fMP4 proxy stream ended", extra={"camera_id": camera_id})
+            logger.warning("fMP4 proxy: unexpected error", extra={"camera_id": camera_id}, exc_info=True)
 
     return StreamingResponse(stream_generator(), media_type="video/mp4")
 
