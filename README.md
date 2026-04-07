@@ -73,7 +73,7 @@ SQLite DB + Recordings + Thumbnails
 ```
 
 - **Recording**: One FFmpeg process per camera, codec passthrough (no transcode), 15-minute `.ts` segments
-- **Live view**: go2rtc receives RTSP streams and serves HTTP fMP4, proxied through the backend
+- **Live view**: go2rtc receives RTSP streams and serves HTTP fMP4, proxied through the backend with pre-fetch buffering for instant playback
 - **Playback**: Direct mode serves raw segments instantly. Other quality tiers transcode on-the-fly via NVENC
 - **AI detection**: Snapshot-based pipeline -- motion pre-filter, then YOLO inference only when motion detected
 

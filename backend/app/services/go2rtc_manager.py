@@ -64,8 +64,8 @@ def _generate_go2rtc_config(binary_dir: Path, streams: dict | None = None) -> Pa
         "ffmpeg": {
             "bin": ffmpeg_bin,
             # Use NVENC GPU encoders
-            "h264": "-c:v h264_nvenc -g:v 30 -bf 0 -profile:v high -level:v auto",
-            "h265": "-c:v hevc_nvenc -g:v 30 -bf 0 -profile:v main -level:v auto",
+            "h264": "-c:v h264_nvenc -g:v 30 -delay 0 -profile:v high -level:v auto",
+            "h265": "-c:v hevc_nvenc -g:v 30 -delay 0 -profile:v main -level:v auto",
         },
     }
     if streams:

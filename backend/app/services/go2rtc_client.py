@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import time
 from urllib.parse import quote
 
 import httpx
@@ -52,22 +53,27 @@ def _build_quality_profiles(
     sub_low = _format_bitrate(max(sub_kbps // 8, 250))
     sub_ultralow = _format_bitrate(max(sub_kbps // 16, 150))
 
-    # Ultra-low: 15fps, no B-frames, short GOP (30 frames = 2s at 15fps)
-    ul_extra = "#raw=-r#raw=15#raw=-bf#raw=0#raw=-g#raw=30"
+    # Ultra-low: 15fps, short GOP (30 frames = 2s at 15fps)
+    ul_extra = "#raw=-r#raw=15#raw=-g#raw=30"
 
-    return {
+    profiles: dict[str, tuple[str | None, str]] = {
         # Direct streams: source_key used to look up camera RTSP URL
         "_s1_direct":   (None, "main"),
         "_s2_direct":   (None, "sub"),
         # Transcoded streams: source_key "chain_s1"/"chain_s2" signals chaining
         # off the direct stream (resolved in build_streams_config)
-        "_s1_high":     (f"#video=h265#raw=-b:v#raw={main_high}", "chain_s1"),
         "_s1_low":      (f"#video=h265#raw=-b:v#raw={main_low}", "chain_s1"),
         "_s1_ultralow": (f"#video=h265#raw=-b:v#raw={main_ultralow}{ul_extra}", "chain_s1"),
-        "_s2_high":     (f"#video=h265#raw=-b:v#raw={sub_high}", "chain_s2"),
         "_s2_low":      (f"#video=h265#raw=-b:v#raw={sub_low}", "chain_s2"),
         "_s2_ultralow": (f"#video=h265#raw=-b:v#raw={sub_ultralow}{ul_extra}", "chain_s2"),
     }
+    # Only add high quality re-encode when source isn't already HEVC
+    # (re-encoding HEVC→HEVC at the same bitrate wastes GPU for no benefit)
+    if main_codec != "hevc":
+        profiles["_s1_high"] = (f"#video=h265#raw=-b:v#raw={main_high}", "chain_s1")
+    if sub_codec != "hevc":
+        profiles["_s2_high"] = (f"#video=h265#raw=-b:v#raw={sub_high}", "chain_s2")
+    return profiles
 
 
 def build_streams_config(
@@ -207,40 +213,56 @@ class Go2rtcClient:
                 tasks.append(_register_one(client, key, source_url))
             await asyncio.gather(*tasks)
 
-    async def register_streams_from_config(self, streams: dict[str, list[str]]) -> None:
-        """Register ALL streams one at a time to avoid go2rtc concurrent map writes.
+    def store_streams_config(self, streams: dict[str, list[str]]) -> None:
+        """Store the full streams config for on-demand registration.
 
-        streams: dict from build_streams_config() — {name: [source_url]}
-        Transcoded streams are lazy in go2rtc — defining them doesn't start
-        ffmpeg until a client actually requests the stream.
+        Streams are already baked into go2rtc.yaml at startup, so no API
+        registration needed. This just stores the config so
+        ensure_stream_registered() can register streams that get wiped
+        (e.g. after go2rtc config reload).
         """
-        async with httpx.AsyncClient(timeout=15) as client:
-            for key, sources in streams.items():
-                await self._register_one_stream(client, key, sources)
-                await asyncio.sleep(0.1)
-
-        logger.info("All streams registered with go2rtc", extra={
-            "count": len(streams),
+        self._all_streams = streams
+        self._registered: set[str] = set()
+        # Log which streams are available by type
+        direct = [k for k in streams if k.endswith("_direct")]
+        transcoded = [k for k in streams if not k.endswith("_direct")]
+        logger.info("Streams config stored", extra={
+            "total": len(streams), "direct": len(direct), "transcoded": len(transcoded),
+            "transcoded_streams": sorted(transcoded),
         })
 
-    async def ensure_stream_registered(self, stream_name: str) -> None:
-        """Register a transcoded stream on-demand if not yet registered.
+    def has_stream(self, stream_name: str) -> bool:
+        """Check if a stream exists in the stored config."""
+        exists = stream_name in getattr(self, '_all_streams', {})
+        if not exists:
+            logger.debug("Stream not in config (skipped)", extra={"stream_name": stream_name})
+        return exists
 
-        Called when a client requests a non-direct quality for live view.
+    async def ensure_stream_registered(self, stream_name: str) -> None:
+        """Re-register a transcoded stream if it was wiped by go2rtc config reload.
+
+        Streams are baked into go2rtc.yaml at startup, but go2rtc wipes
+        API-registered streams on config reload. This re-registers on demand.
         """
-        if not hasattr(self, '_registered') :
+        if not hasattr(self, '_registered'):
             self._registered: set[str] = set()
         if stream_name in self._registered:
+            logger.debug("Stream already registered (cached)", extra={"stream_name": stream_name})
             return
 
         streams = getattr(self, '_all_streams', {})
         if stream_name not in streams:
+            logger.debug("Stream not in config, skipping registration", extra={"stream_name": stream_name})
             return
 
+        t0 = time.monotonic()
         async with httpx.AsyncClient(timeout=15) as client:
             await self._register_one_stream(client, stream_name, streams[stream_name])
+        dt = (time.monotonic() - t0) * 1000
         self._registered.add(stream_name)
-        logger.info("On-demand stream registered", extra={"stream_name": stream_name})
+        logger.info("On-demand stream registered", extra={
+            "stream_name": stream_name, "ms": round(dt, 1),
+        })
 
     async def _register_one_stream(
         self, client: httpx.AsyncClient, key: str, sources: list[str]
@@ -251,8 +273,15 @@ class Go2rtcClient:
             resp = await client.put(url)
             resp.raise_for_status()
             logger.debug("Stream registered", extra={"stream_name": key})
+        except httpx.HTTPStatusError as e:
+            logger.warning("Failed to register stream", extra={
+                "stream_name": key, "status": e.response.status_code,
+                "response": e.response.text[:200],
+            })
         except Exception:
-            logger.warning("Failed to register stream", extra={"stream_name": key})
+            logger.warning("Failed to register stream", extra={
+                "stream_name": key,
+            }, exc_info=True)
 
     async def remove_stream(self, camera_name: str) -> None:
         """Remove all quality variants of a camera stream from go2rtc."""

@@ -250,13 +250,18 @@ class StreamManager:
         full_stream = f"{stream_name}_{stream_suffix}"
         fmp4_url = f"http://127.0.0.1:{config.go2rtc.port}/api/stream.mp4?src={full_stream}"
 
+        import time as _time
         from app.services.go2rtc_client import wait_for_go2rtc_ready
         await wait_for_go2rtc_ready()
         if startup_delay > 0:
+            logger.debug("Keepalive waiting for staggered start",
+                         extra={"camera_id": camera_id, "stream": full_stream,
+                                "delay_s": startup_delay})
             await asyncio.sleep(startup_delay)
 
         while self._running:
             try:
+                t_connect = _time.monotonic()
                 async with httpx.AsyncClient(timeout=httpx.Timeout(
                     connect=10, read=60, write=10, pool=10
                 )) as client:
@@ -268,10 +273,17 @@ class StreamManager:
                             await asyncio.sleep(5)
                             continue
 
-                        logger.info("Keepalive connected",
-                                    extra={"camera_id": camera_id, "stream": full_stream})
-
+                        connect_ms = round((_time.monotonic() - t_connect) * 1000, 1)
+                        # Read first chunk to confirm data is flowing
+                        first_chunk = True
                         async for _chunk in resp.aiter_bytes(chunk_size=65536):
+                            if first_chunk:
+                                first_chunk_ms = round((_time.monotonic() - t_connect) * 1000, 1)
+                                logger.info("Keepalive connected",
+                                            extra={"camera_id": camera_id, "stream": full_stream,
+                                                   "connect_ms": connect_ms,
+                                                   "first_chunk_ms": first_chunk_ms})
+                                first_chunk = False
                             if not self._running:
                                 return
 

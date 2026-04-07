@@ -431,6 +431,7 @@ class _MainNavState extends State<_MainNav> {
     mpv.setProperty('untimed', 'yes');
     mpv.setProperty('demuxer-max-bytes', '524288');
     mpv.setProperty('demuxer-readahead-secs', '0');
+    mpv.setProperty('demuxer-lavf-o', 'timeout=15000000');
     mpv.setProperty('hwdec', 'auto');
     player.setVolume(0);
     _livePlayers[cameraId] = player;

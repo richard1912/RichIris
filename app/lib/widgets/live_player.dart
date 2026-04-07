@@ -81,6 +81,7 @@ class _LivePlayerState extends State<LivePlayer> {
       mpv.setProperty('untimed', 'yes');
       mpv.setProperty('demuxer-max-bytes', '524288');
       mpv.setProperty('demuxer-readahead-secs', '0');
+      mpv.setProperty('demuxer-lavf-o', 'timeout=15000000');
       mpv.setProperty('hwdec', 'auto');
       _controller = VideoController(_player);
     }

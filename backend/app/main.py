@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -56,26 +57,46 @@ async def lifespan(app: FastAPI):
         await cleanup_missing_recordings(session)
 
     # Load enabled cameras for go2rtc config and stream startup
+    t0 = time.monotonic()
     cameras_list = await _load_enabled_cameras()
+    logger.info("Startup: cameras loaded", extra={
+        "count": len(cameras_list), "ms": round((time.monotonic() - t0) * 1000, 1),
+    })
 
     # Build go2rtc streams config
     from app.services.go2rtc_client import build_streams_config, get_go2rtc_client
+    t0 = time.monotonic()
     streams_config = build_streams_config([
         (cam.name, cam.rtsp_url, cam.sub_stream_url) for cam in cameras_list
     ])
+    logger.info("Startup: streams config built", extra={
+        "stream_count": len(streams_config), "ms": round((time.monotonic() - t0) * 1000, 1),
+    })
 
     from app.services.go2rtc_manager import start_go2rtc, stop_go2rtc
+    t0 = time.monotonic()
     await start_go2rtc(streams=streams_config)
+    logger.info("Startup: go2rtc started", extra={
+        "ms": round((time.monotonic() - t0) * 1000, 1),
+    })
 
     # Verify go2rtc is reachable (live view depends on it, recording does not)
+    t0 = time.monotonic()
     await _check_go2rtc_health()
+    logger.info("Startup: go2rtc health verified", extra={
+        "ms": round((time.monotonic() - t0) * 1000, 1),
+    })
 
-    # Register all streams (serialized to avoid go2rtc concurrent map crash)
+    # Store streams config for on-demand registration (streams already in go2rtc.yaml)
     client = get_go2rtc_client()
-    await client.register_streams_from_config(streams_config)
+    client.store_streams_config(streams_config)
 
     # Start recording ffmpeg processes
+    t0 = time.monotonic()
     await _start_camera_recordings(cameras_list)
+    logger.info("Startup: recordings started", extra={
+        "ms": round((time.monotonic() - t0) * 1000, 1),
+    })
 
     # No pre-warming needed: recording ffmpeg keeps s1_direct alive,
     # motion detection + thumbnail capture keep s2_direct alive.
