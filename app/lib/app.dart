@@ -587,6 +587,7 @@ class _MainNavState extends State<_MainNav> {
             },
             child: FullscreenScreen(
             camera: fullscreenCam,
+            cameras: widget.cameras,
             stream: _streamForCamera(_fullscreenCameraId!),
             quality: widget.quality,
             streamSource: widget.streamSource,

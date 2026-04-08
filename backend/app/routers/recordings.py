@@ -135,21 +135,9 @@ async def start_playback_session(
     )
     has_more = has_more_result.first() is not None
 
-    # Direct = raw .ts file
-    if quality == "direct":
-        logger.info(
-            "Playback segment found (direct)",
-            extra={"camera_id": camera_id, "recording_id": seg.id, "seek_seconds": seek_seconds},
-        )
-        return {
-            "segment_url": f"/api/recordings/segment/{seg.id}",
-            "seek_seconds": seek_seconds,
-            "segment_start": seg.start_time.isoformat(),
-            "segment_end": seg_end.isoformat(),
-            "has_more": has_more,
-        }
-
-    # Transcoded: start a PlaybackManager session
+    # All qualities go through PlaybackManager for clean fMP4 output.
+    # Direct = ffmpeg -c copy remux (fixes .ts timestamp offset that causes
+    # green frames). Transcoded = HEVC NVENC encode.
     session_key = f"{seg.id}-{quality}-{seek_seconds:.0f}"
     session_id = hashlib.md5(session_key.encode()).hexdigest()[:12]
 
@@ -168,7 +156,7 @@ async def start_playback_session(
         raise HTTPException(status_code=500, detail="Playback transcode failed")
 
     logger.info(
-        "Playback session ready (transcoded)",
+        "Playback session ready",
         extra={"camera_id": camera_id, "recording_id": seg.id, "quality": quality, "session_id": session_id},
     )
 

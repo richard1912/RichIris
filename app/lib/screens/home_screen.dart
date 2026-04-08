@@ -137,6 +137,11 @@ class _HomeScreenState extends State<HomeScreen> {
   void didUpdateWidget(covariant HomeScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     _setupRef();
+    // Cancel in-flight playback session creation when entering fullscreen
+    // (HomeScreen stays mounted via Offstage, so mounted check won't help)
+    if (widget.fullscreenCameraId != null && oldWidget.fullscreenCameraId == null) {
+      _generation++;
+    }
     if (widget.resumePlaybackGen != _lastResumePlaybackGen) {
       _lastResumePlaybackGen = widget.resumePlaybackGen;
       if (widget.resumePlaybackTime != null) {
@@ -200,6 +205,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final enabledCameras = widget.cameras.where((c) => c.enabled).toList();
 
+    // Set playback start immediately so _getNvrTime returns the intended time
+    // even while sessions are still loading (prevents fallback to DateTime.now()
+    // which causes 404 when fullscreen is entered before sessions finish).
+    _playbackStartIso = start;
+    _playbackWallStartMs = null;
+    _syncRefState();
+
     setState(() {
       _isLive = false;
       _paused = false;
@@ -212,9 +224,14 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
 
-    // Fetch all sessions in parallel, then start all players together
+    // Fetch sessions sequentially to avoid launching all ffmpeg transcode
+    // processes simultaneously (which can freeze the GPU/system).
+    // Also checks _generation each iteration so entering fullscreen cancels
+    // remaining requests (HomeScreen stays mounted via Offstage).
     final sessions = <int, PlaybackSession>{};
-    final futures = enabledCameras.map((cam) async {
+    for (var i = 0; i < enabledCameras.length; i++) {
+      if (_generation != gen) return;
+      final cam = enabledCameras[i];
       try {
         final session = await widget.recordingApi.startPlayback(
           cam.id, start, widget.quality.param,
@@ -225,14 +242,11 @@ class _HomeScreenState extends State<HomeScreen> {
           _pbFailed.add(cam.id);
         }
       }
-    });
-    await Future.wait(futures);
-    if (_generation != gen || !mounted) return;
+    }
+    if (_generation != gen) return;
 
-    // Set shared clock ONCE, then open all players simultaneously
-    _playbackStartIso = start;
+    // Set wall clock for accurate master time tracking
     _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
-    _syncRefState();
 
     for (final entry in sessions.entries) {
       _pbLoading.remove(entry.key);
@@ -343,14 +357,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
   int _getNvrTime() {
     if (!_isLive && _playbackStartIso != null) {
+      final startMs = DateTime.parse(_playbackStartIso!).millisecondsSinceEpoch;
       // Use a reference player's actual position so the playhead stops
       // when the stream freezes/buffers instead of advancing blindly.
       final refId = widget.selectedCameraId;
       final refPlayer = refId != null ? _pbPlayers[refId] : _pbPlayers.values.firstOrNull;
       if (refPlayer != null) {
-        final startMs = DateTime.parse(_playbackStartIso!).millisecondsSinceEpoch;
         return startMs + refPlayer.state.position.inMilliseconds + widget.tzOffsetMs;
       }
+      // No player ready yet (sessions still loading) — return the intended
+      // playback start time so fullscreen entry doesn't fall back to now().
+      return startMs + widget.tzOffsetMs;
     }
     return DateTime.now().millisecondsSinceEpoch + widget.tzOffsetMs;
   }
@@ -601,6 +618,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onLive: _goLive,
                 getNvrTime: _getNvrTime,
                 initialDate: _timelineDateOverride,
+                cameras: widget.cameras.where((c) => c.enabled).toList(),
               ),
             ),
         ],

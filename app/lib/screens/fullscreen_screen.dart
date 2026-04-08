@@ -22,6 +22,7 @@ import '../widgets/timeline/timeline_widget.dart';
 
 class FullscreenScreen extends StatefulWidget {
   final Camera camera;
+  final List<Camera> cameras;
   final StreamStatus? stream;
   final Quality quality;
   final StreamSource streamSource;
@@ -47,6 +48,7 @@ class FullscreenScreen extends StatefulWidget {
   const FullscreenScreen({
     super.key,
     required this.camera,
+    required this.cameras,
     this.stream,
     required this.quality,
     required this.streamSource,
@@ -147,6 +149,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _statsTimer?.cancel();
     _seekSub?.cancel();
     _pbPositionSub?.cancel();
+    _completedSub?.cancel();
     if (!_adoptedPlayer) {
       _pbPlayer?.dispose();
     }
@@ -161,6 +164,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   }
 
   StreamSubscription? _seekSub;
+  StreamSubscription? _completedSub;
 
   bool _pbVideoReady = false;
   StreamSubscription? _pbPositionSub;
@@ -184,8 +188,9 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         setState(() => _pbVideoReady = true);
       }
     });
-    _pbPlayer!.stream.completed.listen((completed) {
-      if (completed && _speedTimer == null && _hasMore && _windowEnd != null) {
+    _completedSub?.cancel();
+    _completedSub = _pbPlayer!.stream.completed.listen((completed) {
+      if (completed && mounted && _speedTimer == null && _hasMore && _windowEnd != null) {
         _startPlayback(_windowEnd!);
       }
     });
@@ -496,6 +501,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               onSpeedChanged: _onSpeedChanged,
               getNvrTime: _getNvrTime,
               initialDate: widget.initialPlaybackTime?.substring(0, 10),
+              cameras: widget.cameras.where((c) => c.enabled).toList(),
             ),
           ],
         ),

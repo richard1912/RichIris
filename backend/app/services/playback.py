@@ -162,6 +162,9 @@ class PlaybackManager:
 
         # For single file: direct input with fast seek (-ss before -i)
         # For multiple files: use concat demuxer (no seek support, use -ss after -i)
+        # -avoid_negative_ts make_zero: shifts timestamps so first frame starts at
+        # pts=0. Fixes green frames caused by .ts segments with initial timestamp
+        # offset (e.g., first keyframe at pts=1.4s instead of 0).
         if len(segment_paths) == 1:
             cmd = [
                 config.ffmpeg.path, "-y",
@@ -170,6 +173,7 @@ class PlaybackManager:
                 "-i", segment_paths[0],
                 "-t", str(duration_limit),
                 *codec_args,
+                "-avoid_negative_ts", "make_zero",
                 "-movflags", movflags,
                 str(output_path),
             ]
@@ -190,6 +194,7 @@ class PlaybackManager:
                 "-ss", str(seek_seconds),
                 "-t", str(duration_limit),
                 *codec_args,
+                "-avoid_negative_ts", "make_zero",
                 "-movflags", movflags,
                 str(output_path),
             ]
