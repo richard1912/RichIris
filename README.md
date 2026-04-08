@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="RichIris Logo" width="128">
+  <img src="assets/logo.png" alt="RichIris Logo" width="256">
 </p>
 
 # RichIris NVR
