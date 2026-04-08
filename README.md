@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="RichIris Logo" width="128">
+</p>
+
 # RichIris NVR
 
 A self-hosted NVR (Network Video Recorder) for 24/7 recording of RTSP cameras with live view, timeline playback, trickplay thumbnails, motion detection, and AI object detection. Free and open source.
