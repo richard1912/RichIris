@@ -163,7 +163,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Player _ensurePlayer(int cameraId) {
     if (!_pbPlayers.containsKey(cameraId)) {
-      final player = Player();
+      final player = Player(
+        configuration: PlayerConfiguration(
+          vo: 'gpu',
+          logLevel: MPVLogLevel.warn,
+        ),
+      );
+      (player.platform as NativePlayer).setProperty('hwdec', 'auto');
       player.setVolume(0);
       _pbPlayers[cameraId] = player;
       _pbControllers[cameraId] = VideoController(player);

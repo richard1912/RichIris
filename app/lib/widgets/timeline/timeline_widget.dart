@@ -350,6 +350,62 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
+  Future<List<int>?> _showHmsPickerDialog(BuildContext ctx, int initH, int initM, int initS) {
+    final hCtrl = FixedExtentScrollController(initialItem: initH);
+    final mCtrl = FixedExtentScrollController(initialItem: initM);
+    final sCtrl = FixedExtentScrollController(initialItem: initS);
+    int h = initH, m = initM, s = initS;
+
+    Widget spinner(FixedExtentScrollController c, int count, ValueChanged<int> onChanged) {
+      return SizedBox(
+        width: 52,
+        height: 150,
+        child: ListWheelScrollView.useDelegate(
+          controller: c,
+          itemExtent: 36,
+          physics: const FixedExtentScrollPhysics(),
+          diameterRatio: 1.2,
+          onSelectedItemChanged: onChanged,
+          childDelegate: ListWheelChildBuilderDelegate(
+            childCount: count,
+            builder: (_, i) => Center(
+              child: Text(i.toString().padLeft(2, '0'),
+                  style: const TextStyle(fontSize: 20, color: Colors.white)),
+            ),
+          ),
+        ),
+      );
+    }
+
+    Widget label(String text) => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Text(text, style: const TextStyle(fontSize: 20, color: Colors.white54)),
+    );
+
+    return showDialog<List<int>>(
+      context: ctx,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Go to time', style: TextStyle(fontSize: 16, color: Colors.white)),
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            spinner(hCtrl, 24, (v) => h = v),
+            label(':'),
+            spinner(mCtrl, 60, (v) => m = v),
+            label(':'),
+            spinner(sCtrl, 60, (v) => s = v),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, [h, m, s]), child: const Text('Go')),
+        ],
+      ),
+    );
+  }
+
   void _changeDate(int delta) {
     final parts = _ctrl.selectedDate.split('-');
     final dt = DateTime(int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
@@ -614,13 +670,43 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               ),
             ),
           ),
-        // Playhead timestamp
+        // Playhead timestamp (tap to pick time)
         if (_ctrl.playheadHour != null)
           Padding(
             padding: const EdgeInsets.only(left: 8),
-            child: Text(
-              _formatPlayheadTime(_ctrl.playheadHour!),
-              style: const TextStyle(fontSize: 12, color: Color(0xFFA3A3A3), fontFeatures: [FontFeature.tabularFigures()]),
+            child: GestureDetector(
+              onTap: () async {
+                final h = _ctrl.playheadHour!.floor();
+                final minutesFrac = (_ctrl.playheadHour! - h) * 60;
+                final m = minutesFrac.floor();
+                final s = ((minutesFrac - m) * 60).floor();
+                final result = await _showHmsPickerDialog(context, h, m, s);
+                if (result == null) return;
+                final targetHour = result[0] + result[1] / 60.0 + result[2] / 3600.0;
+                // Ignore future times on today
+                final now = DateTime.now();
+                final todayStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+                if (_ctrl.selectedDate == todayStr) {
+                  final nowHour = now.hour + now.minute / 60.0 + now.second / 3600.0;
+                  if (targetHour > nowHour) return;
+                }
+                _manualPan = true;
+                _ctrl.setPlayhead(targetHour);
+                _playheadHoldUntilMs = DateTime.now().millisecondsSinceEpoch + 3000;
+                final iso = hourToISO(_ctrl.selectedDate, targetHour);
+                widget.onPlayback(iso);
+              },
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _formatPlayheadTime(_ctrl.playheadHour!),
+                    style: const TextStyle(fontSize: 12, color: Color(0xFFA3A3A3), decoration: TextDecoration.underline, decorationColor: Color(0x80A3A3A3), fontFeatures: [FontFeature.tabularFigures()]),
+                  ),
+                  const SizedBox(width: 2),
+                  const Icon(Icons.access_time, size: 11, color: Color(0x80A3A3A3)),
+                ],
+              ),
             ),
           ),
         // LIVE button

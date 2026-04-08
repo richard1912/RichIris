@@ -42,6 +42,8 @@ def build_recording_output(camera_name: str, config: AppConfig) -> list[str]:
         "-segment_time", str(config.ffmpeg.segment_duration),
         "-segment_atclocktime", "1",
         "-reset_timestamps", "1",
+        "-muxdelay", "0",
+        "-muxpreload", "0",
         "-strftime", "1",
         segment_pattern,
     ]

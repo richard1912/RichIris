@@ -146,6 +146,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _clearSpeedTimer();
     _statsTimer?.cancel();
     _seekSub?.cancel();
+    _pbPositionSub?.cancel();
     if (!_adoptedPlayer) {
       _pbPlayer?.dispose();
     }
@@ -161,11 +162,28 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
 
   StreamSubscription? _seekSub;
 
+  bool _pbVideoReady = false;
+  StreamSubscription? _pbPositionSub;
+
   void _ensurePlayer() {
     if (_pbPlayer != null) return;
-    _pbPlayer = Player();
+    _pbPlayer = Player(
+      configuration: PlayerConfiguration(
+        vo: 'gpu',
+        logLevel: MPVLogLevel.warn,
+      ),
+    );
+    final mpv = _pbPlayer!.platform as NativePlayer;
+    mpv.setProperty('hwdec', 'auto');
     _pbController = VideoController(_pbPlayer!);
     _pbPlayer!.setVolume(0);
+    _pbVideoReady = false;
+    _pbPositionSub?.cancel();
+    _pbPositionSub = _pbPlayer!.stream.position.listen((pos) {
+      if (pos > Duration.zero && !_pbVideoReady && mounted) {
+        setState(() => _pbVideoReady = true);
+      }
+    });
     _pbPlayer!.stream.completed.listen((completed) {
       if (completed && _speedTimer == null && _hasMore && _windowEnd != null) {
         _startPlayback(_windowEnd!);
@@ -198,6 +216,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
 
       _ensurePlayer();
+      _pbVideoReady = false;
       _pbPlayer!.open(Media(fullUrl));
 
       // Seek to offset within segment
@@ -277,6 +296,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
 
         _ensurePlayer();
+        _pbVideoReady = false;
         _pbPlayer!.open(Media(fullUrl));
 
         if (session.seekSeconds > 1.0) {
@@ -392,6 +412,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
 
           _ensurePlayer();
+          _pbVideoReady = false;
           _pbPlayer!.open(Media(fullUrl));
 
           _pbPlayer!.stream.duration.listen((dur) {
@@ -663,6 +684,15 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         video = Transform.rotate(
           angle: rot * 3.14159265 / 180,
           child: isRotated ? Transform.scale(scale: 0.5625, child: video) : video,
+        );
+      }
+      // Black overlay until first real frame renders (hides green decoder artifacts)
+      if (!_pbVideoReady) {
+        video = Stack(
+          children: [
+            video,
+            Positioned.fill(child: Container(color: Colors.black)),
+          ],
         );
       }
       return video;
