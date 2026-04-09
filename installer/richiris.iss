@@ -171,10 +171,11 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    // Stop existing service before upgrading
+    // Stop and remove existing service before upgrading (prevents auto-restart during install)
     if FileExists(ExpandConstant('{app}\nssm.exe')) then
     begin
       Exec(ExpandConstant('{app}\nssm.exe'), 'stop RichIris', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(ExpandConstant('{app}\nssm.exe'), 'remove RichIris confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
   end;
 

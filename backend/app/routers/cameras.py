@@ -71,6 +71,12 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
             await restart_go2rtc()
             mgr = get_stream_manager()
             await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+            # Start thumbnail capture for the new camera
+            from app.services.thumbnail_capture import get_thumbnail_capture
+            get_thumbnail_capture().add_camera(camera)
+            # Start motion detection for the new camera
+            from app.services.motion_detector import get_detector
+            await get_detector().update_camera(camera)
         except Exception:
             logger.exception("Failed to start stream for new camera", extra={"camera_id": camera.id})
 

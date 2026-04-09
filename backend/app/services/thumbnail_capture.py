@@ -40,6 +40,20 @@ class ThumbnailCapture:
             self._tasks.append(task)
         logger.info("Thumbnail capture started", extra={"cameras": len(cameras)})
 
+    def add_camera(self, camera) -> None:
+        """Start thumbnail capture for a newly added camera."""
+        if not self._running:
+            return
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=15)
+        task = asyncio.create_task(self._capture_loop(camera, startup_delay=2))
+        self._tasks.append(task)
+        logger.info("Thumbnail capture added camera", extra={"camera": camera.name})
+
+    def remove_camera(self, camera_name: str) -> None:
+        """Stop thumbnail capture for a removed camera (handled by task cancellation on next stop/restart)."""
+        pass  # Tasks check self._running; full cleanup happens in stop()
+
     async def stop(self) -> None:
         self._running = False
         for task in self._tasks:
