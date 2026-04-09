@@ -67,12 +67,16 @@ def _build_quality_profiles(
         "_s2_low":      (f"#video=h265#raw=-b:v#raw={sub_low}", "chain_s2"),
         "_s2_ultralow": (f"#video=h265#raw=-b:v#raw={sub_ultralow}{ul_extra}", "chain_s2"),
     }
-    # Only add high quality re-encode when source isn't already HEVC
-    # (re-encoding HEVC→HEVC at the same bitrate wastes GPU for no benefit)
+    # For non-HEVC sources: re-encode to HEVC at source bitrate.
+    # For HEVC sources: alias high to direct (no re-encode needed).
     if main_codec != "hevc":
         profiles["_s1_high"] = (f"#video=h265#raw=-b:v#raw={main_high}", "chain_s1")
+    else:
+        profiles["_s1_high"] = (None, "main")
     if sub_codec != "hevc":
         profiles["_s2_high"] = (f"#video=h265#raw=-b:v#raw={sub_high}", "chain_s2")
+    else:
+        profiles["_s2_high"] = (None, "sub")
     return profiles
 
 

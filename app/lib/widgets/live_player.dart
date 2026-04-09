@@ -70,28 +70,35 @@ class _LivePlayerState extends State<LivePlayer> {
     } else {
       _player = Player(
         configuration: PlayerConfiguration(
-          vo: 'gpu',
           logLevel: MPVLogLevel.warn,
         ),
       );
       final mpv = _player.platform as NativePlayer;
-      mpv.setProperty('profile', 'low-latency');
-      mpv.setProperty('cache', 'no');
+      mpv.setProperty('cache', 'yes');
       mpv.setProperty('cache-pause', 'no');
-      mpv.setProperty('untimed', 'yes');
-      mpv.setProperty('demuxer-max-bytes', '524288');
-      mpv.setProperty('demuxer-readahead-secs', '0');
-      mpv.setProperty('demuxer-lavf-o', 'timeout=15000000');
+      mpv.setProperty('cache-secs', '5');
+      mpv.setProperty('demuxer-max-bytes', '16777216');
+      mpv.setProperty('demuxer-readahead-secs', '5');
+      mpv.setProperty('rtsp-transport', 'tcp');
       mpv.setProperty('hwdec', 'auto');
+      mpv.setProperty('network-timeout', '30');
       _controller = VideoController(_player);
     }
     _player.setVolume(0);
     _errorSub = _player.stream.error.listen((err) {
-      widget.onStatusChanged?.call(LivePlayerStatus(
-        LivePlayerState.error,
-        errorMessage: err,
-      ));
-      _scheduleRetry();
+      debugPrint('LivePlayer error: $err');
+      // Don't immediately reconnect — let the stall detector handle transient
+      // RTSP hiccups. Only reconnect on fatal errors (end-of-file, connection refused).
+      if (err.contains('end of file') ||
+          err.contains('Connection refused') ||
+          err.contains('No route to host') ||
+          err.contains('Failed to resolve')) {
+        widget.onStatusChanged?.call(LivePlayerStatus(
+          LivePlayerState.error,
+          errorMessage: err,
+        ));
+        _scheduleRetry();
+      }
     });
     _widthSub = _player.stream.width.listen((w) {
       if (w != null && w > 0) {
@@ -191,6 +198,7 @@ class _LivePlayerState extends State<LivePlayer> {
     Widget video = Video(
       controller: _controller,
       fit: widget.fit,
+      controls: NoVideoControls,
     );
 
     if (rot != 0) {

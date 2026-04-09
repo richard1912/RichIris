@@ -240,6 +240,7 @@ class _CameraCardState extends State<CameraCard> {
     Widget video = Video(
       controller: widget.playbackController!,
       fit: BoxFit.cover,
+      controls: NoVideoControls,
     );
     if (rot != 0) {
       final isRotated = rot == 90 || rot == 270;

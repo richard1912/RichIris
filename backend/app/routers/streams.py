@@ -241,6 +241,35 @@ async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quali
     return StreamingResponse(stream_generator(), media_type="video/mp4")
 
 
+@router.get("/{camera_id}/rtsp-info")
+async def rtsp_info(camera_id: int, stream: str = "s2", quality: str = "direct"):
+    """Return the go2rtc RTSP URL for a camera stream."""
+    mgr = get_stream_manager()
+    info = mgr.streams.get(camera_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Stream not found")
+
+    if stream not in ("s1", "s2"):
+        stream = "s2"
+    if quality not in ("direct", "high", "low", "ultralow"):
+        quality = "direct"
+
+    config = get_config()
+    base_name = get_stream_name(info.camera_name)
+    stream_name = f"{base_name}_{stream}_{quality}"
+
+    if quality != "direct":
+        go2rtc = get_go2rtc_client()
+        if not go2rtc.has_stream(stream_name):
+            quality = "direct"
+            stream_name = f"{base_name}_{stream}_direct"
+
+    return {
+        "rtsp_url": f"rtsp://127.0.0.1:{config.go2rtc.rtsp_port}/{stream_name}",
+        "stream_name": stream_name,
+    }
+
+
 @router.websocket("/{camera_id}/ws")
 async def proxy_ws(websocket: WebSocket, camera_id: int):
     """Proxy WebSocket between browser and go2rtc for MSE streaming."""

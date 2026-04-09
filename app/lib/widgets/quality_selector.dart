@@ -48,12 +48,10 @@ class QualitySelector extends StatelessWidget {
 
   static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
-  List<Quality> get _availableQualities =>
-      (_isAndroid && isLive) ? Quality.values.where((q) => q != Quality.direct).toList() : Quality.values;
+  List<Quality> get _availableQualities => Quality.values;
 
-  /// Effective quality shown in the chip — on Android live view, Direct displays as High.
-  Quality get _displayQuality =>
-      (_isAndroid && isLive && value == Quality.direct) ? Quality.high : value;
+  /// Effective quality shown in the chip.
+  Quality get _displayQuality => value;
 
   @override
   Widget build(BuildContext context) {

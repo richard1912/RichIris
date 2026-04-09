@@ -32,15 +32,15 @@ update claude md as needed for code changes
 ## Architecture
 ```
 Camera RTSP (main) ← ffmpeg recording (direct, -c:v copy → .ts)
-Camera RTSP (main) ← go2rtc:1984 (keepalive) ──→ live view clients (HTTP fMP4)
+Camera RTSP (main) ← go2rtc:1984 (keepalive) ──→ live view clients (RTSP via :8554)
                                                ──→ transcoded quality variants (lazy)
 
 Camera RTSP (sub)  ← go2rtc:1984 (keepalive) ──→ motion detection (snapshots)
                                                ──→ thumbnail capture (snapshots)
-                                               ──→ live view clients (HTTP fMP4)
+                                               ──→ live view clients (RTSP via :8554)
                                                ──→ transcoded quality variants (lazy)
 
-Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
+Flutter App (Win/Android) → RTSP → go2rtc:8554 (live view)
                           → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
                                     |                    |
                           {data_dir}\database\       {data_dir}\recordings\
@@ -50,7 +50,7 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
 - **Recording**: ffmpeg connects directly to cameras for maximum reliability (independent of go2rtc). One ffmpeg process per camera (always on). Uses `-c:v copy` (passthrough, no transcode, no GPU) → HEVC 4K .ts files. Segments renamed by scanner to `{Camera Name} {YYYY-MM-DD} {HH.MM} - {HH.MM}.ts`. Folders use camera name with spaces and capitals (e.g., `Camera 1/`).
 - **go2rtc keepalives for instant live view**: StreamManager runs an in-process httpx HTTP fMP4 consumer per stream (s1_direct + s2_direct) that reads from go2rtc's HTTP API (`/api/stream.mp4`) and discards data. This keeps go2rtc's camera RTSP connections alive so live view loads instantly when a client connects. Keepalives start staggered (1s apart per camera) to avoid overwhelming go2rtc. Auto-reconnects on failure with 5s retry. Transcoded quality variants (high/low/ultralow) chain off the direct stream within go2rtc — no additional camera connections regardless of quality level. If no sub-stream URL is configured, s2_direct chains off s1_direct within go2rtc.
 - **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
-- **Live view (HTTP fMP4)**: `GET /api/streams/{camera_id}/live.mp4?quality=` proxies go2rtc's HTTP fMP4 stream (`http://127.0.0.1:1984/api/stream.mp4?src={name}`) through the backend as a StreamingResponse. The Flutter app uses media_kit (libmpv) to play this URL natively — no MSE/WebSocket needed. Grid view uses "low" quality for bandwidth savings; fullscreen uses the selected quality. Auto-reconnects on stream errors. **Pre-fetch + queue-buffered proxy**: the backend connects to go2rtc and waits for the first chunk of video data (up to 15s) BEFORE returning the HTTP response. This hides ffmpeg transcoder startup latency (3-8s for transcoded sub-streams) in the HTTP request phase — the client only sees the response once data is actually flowing, preventing mpv from timing out on an empty stream. After pre-fetch, upstream go2rtc reads and downstream client writes are decoupled via an `asyncio.Queue(maxsize=128)`. A dedicated reader task fills the queue from httpx; the async generator yields from it. If the client falls behind and the queue overflows, the connection closes (forces player reconnect with fresh keyframe). 30s read timeout detects dead streams. This prevents slow clients from causing backpressure that blocks httpx reads → go2rtc packet drops → corrupted HEVC → permanent freeze.
+- **Live view (RTSP)**: Flutter app connects directly to go2rtc's RTSP output (`rtsp://{host}:8554/{stream_name}`) via media_kit (libmpv). No backend proxy needed for live view — the app constructs the RTSP URL client-side from the camera name and quality selection. This replaced the previous HTTP fMP4 proxy approach which caused choppy HEVC playback due to media_kit's texture rendering pipeline struggling with fMP4 container format. RTSP provides smooth playback for both HEVC and H.264 on Windows and Android. The HTTP fMP4 proxy endpoint (`GET /api/streams/{id}/live.mp4`) is retained as a fallback. Player uses 5s cache, 16MB demuxer buffer, TCP RTSP transport, hardware decoding. Error handler only reconnects on fatal errors (EOF, connection refused) — transient RTSP hiccups are handled by mpv internally. Stall detection reconnects if position doesn't advance for 10s. Exponential backoff retry (500ms→10s). Video controls hidden (app's own timeline handles playback controls).
 - **Playback**: Recordings are HEVC .ts files. Direct = raw `.ts` served instantly (no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode via `PlaybackManager` into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via `StreamingResponse`. ffmpeg handles seek (`-ss` before `-i`). Sessions auto-cleanup after 30s idle; same-camera eviction prevents ffmpeg accumulation.
 - NVIDIA RTX 4080 SUPER available (used for AI object detection via YOLO + NVENC transcoding)
 - **Motion detection + AI object detection**: Simplified snapshot-based pipeline. Fetches JPEG snapshots from go2rtc's HTTP frame API (`GET /api/frame.jpeg?src={stream}_s2_direct`) every ~1s using httpx (no cv2.VideoCapture — clean HTTP timeouts, no hung threads). go2rtc HTTP API on port **1984**. Motion pre-filter uses running weighted-average baseline: `avg = alpha * frame + (1-alpha) * avg` (alpha=0.2 for first 25 frames, then 0.01). Diff against baseline → GaussianBlur(21,21) → absdiff → threshold(25). `changed_pct > 40%` triggers hard baseline reset (IR switch). Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. When motion exceeds threshold and AI is enabled, frame goes directly to YOLO — if matching object detected above confidence threshold, event fires immediately. No Frigate-style median/history pipeline. Uses YOLO11x ONNX model via `onnxruntime-directml` (GPU-accelerated on any GPU, no CUDA required, ~16ms inference). Falls back to CPU if no GPU available. Min bounding box 0.2% of frame area. **Multi-category detection**: per-camera toggles for persons (COCO class 0), vehicles (bicycle/car/motorcycle/bus/truck — classes 1,2,3,5,7), and animals (bird/cat/dog/horse/sheep/cow/elephant/bear/zebra/giraffe — classes 14-23). `detection_label` stores the specific COCO class name (e.g., "car", "dog"). Events stored as MotionEvent rows (start_time, end_time, peak_intensity, detection_label, detection_confidence). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `ai_detection` (master bool), `ai_detect_persons`/`ai_detect_vehicles`/`ai_detect_animals` (category bools), `ai_confidence_threshold` (0-100), `motion_scripts` (JSON array of script pairs with per-category triggers). **Multiple script pairs**: each entry has `on`/`off` scripts and category booleans (`persons`, `vehicles`, `animals`, `motion_only`). A script only fires if its category matches the detection — e.g., a script with only `persons: true` won't fire for vehicle detections. Legacy `motion_script`/`motion_script_off` fields auto-migrated to `motion_scripts` on startup. Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes take effect immediately via `detector.update_camera()`. Heartbeat log every 5 min per camera.
@@ -61,25 +61,24 @@ Flutter App (Win/Android) → HTTP fMP4 → FastAPI:8700 → go2rtc:1984
   - Stream persisted in SharedPreferences key `richiris-stream-source`, live quality in `richiris-quality`, playback quality in `richiris-playback-quality`
   - Separate quality preferences for live vs playback — switching modes restores the saved preference for that mode
   - Changing quality during playback triggers `didUpdateWidget` → restarts playback at current position with new quality
-  - **Android**: Direct quality hidden for live view only (raw passthrough has compatibility issues with HTMS cameras). Direct available for playback. Default quality is High (live) / Direct (playback) on Android, Direct on Windows.
+  - All quality tiers available on both Windows and Android (Direct, High, Low, Ultra Low).
 - **Bitrate probing**: At startup, backend probes each camera's actual bitrate (5s ffmpeg sample) and codec (ffprobe). Playback also probes .ts file bitrate+codec via ffprobe before transcoding.
-- **Live streams**: go2rtc registers streams per camera, all baked into go2rtc.yaml at startup (no API registration needed — survives config reloads). Direct streams connect to the camera RTSP URL; transcoded variants chain off the direct stream within go2rtc (no additional camera connections). Unused transcoded streams are lazy — zero resources until a client connects. **High quality is skipped for HEVC sources** (re-encoding HEVC→HEVC at the same bitrate wastes GPU for no benefit) — the proxy falls back to direct automatically.
+- **Live streams**: go2rtc registers streams per camera, all baked into go2rtc.yaml at startup (no API registration needed — survives config reloads). Direct streams connect to the camera RTSP URL; transcoded variants chain off the direct stream within go2rtc (no additional camera connections). Unused transcoded streams are lazy — zero resources until a client connects. **High quality aliases to direct for HEVC sources** (re-encoding HEVC→HEVC at the same bitrate wastes GPU for no benefit). For non-HEVC sources (e.g. H.264 Reolink), high re-encodes to HEVC at source bitrate.
   - Main Direct: raw 4K HEVC passthrough (always connected — httpx keepalive consumer)
-  - Main High: HEVC re-encode from s1_direct, source-matched quality — **only for non-HEVC sources** (e.g. H.264 Reolink)
+  - Main High: alias to direct for HEVC sources; HEVC re-encode at source bitrate for non-HEVC sources
   - Main Low: HEVC re-encode from s1_direct, 1/8 of source bitrate
   - Main Ultra Low: HEVC re-encode from s1_direct, 1/16 of source bitrate, 15fps, short GOP (30 frames)
   - Sub Direct: raw sub-stream passthrough (always connected — httpx keepalive consumer)
-  - Sub High: HEVC re-encode from s2_direct, source-matched quality — **only for non-HEVC sources**
+  - Sub High: alias to direct for HEVC sources; HEVC re-encode at source bitrate for non-HEVC sources
   - Sub Low: HEVC re-encode from s2_direct, 1/8 of source bitrate
   - Sub Ultra Low: HEVC re-encode from s2_direct, 1/16 of source bitrate, 15fps, short GOP
 - **Playback**: Quality tiers work for both live and playback. Direct = raw `.ts` file served instantly (no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode via `PlaybackManager` into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via `StreamingResponse`. ffmpeg applies seek (`-ss` before `-i`), so client gets `seek_seconds: 0`. Sessions auto-cleanup after 30s idle; same-camera eviction prevents ffmpeg accumulation.
   - High: source bitrate (probed from .ts file via ffprobe)
   - Low: 1/8 of source bitrate
   - Ultra Low: 1/16 of source bitrate, 15fps, short GOP (`-g 30`)
-- Backend `streams.py` accepts `?stream=s1/s2&quality=direct/high/low/ultralow` params for HTTP fMP4
-- Backend uses module-level connection-pooled httpx client for go2rtc fMP4 proxying
+- Backend `streams.py` retains HTTP fMP4 proxy (`?stream=s1/s2&quality=direct/high/low/ultralow`) as fallback; also provides `GET /api/streams/{id}/rtsp-info` for RTSP URL lookup
 - No pre-warming needed — httpx keepalive consumers (one per stream, s1_direct + s2_direct) keep go2rtc RTSP connections alive permanently via HTTP fMP4 streaming. Snapshot-based consumers (motion/thumbnails) don't count as persistent consumers in go2rtc.
-- **Low-latency LivePlayer**: 512KB buffer, mpv `low-latency` profile, `cache=no`, `untimed=yes`, 15s lavf network timeout (tolerates slow transcoder startup), exponential backoff retry (500ms→10s)
+- **LivePlayer**: 5s cache, 16MB demuxer buffer, RTSP/TCP transport, hardware decoding, 30s network timeout, exponential backoff retry (500ms→10s). Video controls hidden (NoVideoControls). Only fatal errors trigger reconnect; transient hiccups handled by mpv internally.
 - **Video stats bar**: Shown by default in fullscreen view (togglable). Displays codec, resolution, FPS, bitrate. FPS reads from mpv properties `container-fps` → `estimated-vf-fps` → `video-params/fps` (first valid 0-120 value wins).
 
 ### Important: Timezone handling
@@ -184,7 +183,8 @@ RichIris/
 - `POST /api/backup/restore/{id}/cancel` - Cancel in-progress restore
 - `GET/POST/PUT/DELETE /api/cameras` - Camera CRUD
 - `GET /api/streams/{id}/live` - go2rtc stream info (stream_name, port) for WebSocket MSE URL construction
-- `GET /api/streams/{id}/live.mp4?stream=&quality=` - HTTP fMP4 proxy for native app live view (proxies go2rtc stream.mp4)
+- `GET /api/streams/{id}/live.mp4?stream=&quality=` - HTTP fMP4 proxy fallback (proxies go2rtc stream.mp4)
+- `GET /api/streams/{id}/rtsp-info?stream=&quality=` - Returns go2rtc RTSP URL for a camera stream
 - `GET /api/recordings/{id}/dates` - List dates with recordings
 - `GET /api/recordings/{id}/segments?date=YYYY-MM-DD` - List segments for a date
 - `POST /api/recordings/{id}/playback?start=ISO&quality=` - Start playback session. Direct = raw segment URL. High/Low/Ultra Low = NVENC transcode session URL.
@@ -229,7 +229,7 @@ RichIris/
 ## Key Dependencies
 - **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy, onnxruntime-directml (YOLO11x ONNX inference)
 - **Service**: NSSM (installed via `winget install NSSM.NSSM`)
-- **Live view**: go2rtc (Go binary, RTSP → HTTP fMP4, managed as child process of backend)
+- **Live view**: go2rtc (Go binary, RTSP relay on port 8554, managed as child process of backend)
 - **Packaging**: PyInstaller (backend → standalone exe), Inno Setup (installer)
 - **All external binaries in `dependencies/`**: ffmpeg.exe, ffprobe.exe, nssm.exe, go2rtc/go2rtc.exe, models/yolo11x.onnx (gitignored, ~388 MB total). `build_release.bat` copies from here — no downloads during build.
 

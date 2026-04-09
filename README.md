@@ -11,7 +11,7 @@ A self-hosted NVR (Network Video Recorder) for 24/7 recording of RTSP cameras wi
 ## Features
 
 - **24/7 continuous recording** -- HEVC passthrough (no transcode, no GPU usage) into 15-minute segments
-- **Live view** -- low-latency HTTP fMP4 via go2rtc with multi-quality streaming (Direct/High/Low/Ultra Low)
+- **Live view** -- low-latency RTSP via go2rtc with multi-quality streaming (Direct/High/Low/Ultra Low)
 - **Timeline playback** -- zoomable 24h timeline, instant seek, speed controls (1x to 32x), date picker
 - **Trickplay thumbnails** -- hover/scrub preview on timeline
 - **Motion detection** -- per-camera sensitivity, timeline overlay, configurable script triggers
@@ -70,14 +70,14 @@ The data directory and port are also stored in `bootstrap.yaml` next to the appl
 Flutter App (Windows/Android)
     |
     v
-FastAPI backend (:8700) --> go2rtc (:1984) <-- RTSP cameras
+FastAPI backend (:8700) --> go2rtc (:1984/:8554) <-- RTSP cameras
     |
     v
 SQLite DB + Recordings + Thumbnails
 ```
 
 - **Recording**: One FFmpeg process per camera, codec passthrough (no transcode), 15-minute `.ts` segments
-- **Live view**: go2rtc receives RTSP streams and serves HTTP fMP4, proxied through the backend with pre-fetch buffering for instant playback
+- **Live view**: go2rtc receives camera RTSP streams and re-serves via RTSP (:8554). Flutter app connects directly to go2rtc for smooth HEVC playback
 - **Playback**: Direct mode serves raw segments instantly. Other quality tiers transcode on-the-fly via NVENC
 - **AI detection**: Snapshot-based pipeline -- motion pre-filter, then YOLO inference only when motion detected
 

@@ -668,7 +668,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           ),
         );
       }
-      final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param);
+      final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param, cameraName: widget.camera.name);
       return LivePlayer(
         url: url,
         player: widget.livePlayer,
@@ -684,6 +684,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       Widget video = Video(
         controller: _pbController!,
         fit: BoxFit.contain,
+        controls: NoVideoControls,
       );
       if (rot != 0) {
         final isRotated = rot == 90 || rot == 270;

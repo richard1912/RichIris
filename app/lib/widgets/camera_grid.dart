@@ -67,7 +67,7 @@ class CameraGrid extends StatelessWidget {
           return _AddCameraCard(onTap: onAddCamera);
         }
         final cam = cameras[index];
-        final url = streamApi.liveUrl(cam.id, streamSource, quality);
+        final url = streamApi.liveUrl(cam.id, streamSource, quality, cameraName: cam.name);
         final isFullscreen = cam.id == fullscreenCameraId;
         return CameraCard(
           camera: cam,
