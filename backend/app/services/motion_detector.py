@@ -1,4 +1,4 @@
-"""Motion detection + AI object detection using go2rtc snapshots and YOLO."""
+"""Motion detection + AI object detection using go2rtc snapshots and RT-DETR."""
 
 import asyncio
 import json
@@ -44,8 +44,8 @@ MOTION_ALPHA_STARTUP = 0.2
 BASELINE_STARTUP_FRAMES = 25
 FRAME_TIMEOUT = 10.0      # HTTP timeout for snapshot fetch
 HEARTBEAT_INTERVAL = 300   # Log heartbeat every 5 minutes (seconds)
-# Min fraction of a YOLO bbox that must overlap the motion mask to count as "moving".
-# Filters out static objects (e.g. parked cars) that YOLO detects but aren't actually moving.
+# Min fraction of a detection bbox that must overlap the motion mask to count as "moving".
+# Filters out static objects (e.g. parked cars) that are detected but aren't actually moving.
 MIN_MOTION_OVERLAP = 0.10  # 10% of bbox area must have changed pixels
 # Multi-frame AI confirmation: require N detections in M frames + positional movement
 AI_CONFIRM_REQUIRED = 2   # detections needed within the window
@@ -53,10 +53,11 @@ AI_CONFIRM_WINDOW = 3     # sliding window size (frames)
 AI_MIN_MOVE_PCT = 1.5     # min bbox center movement as % of frame diagonal
 
 
-def _snapshot_url(camera_name: str, host: str, port: int) -> str:
+def _snapshot_url(camera_name: str) -> str:
     """Return go2rtc snapshot URL for a camera's sub-stream."""
+    from app.services.go2rtc_manager import get_api_port
     stream_name = get_stream_name(camera_name) + "_s2_direct"
-    return f"http://{host}:{port}/api/frame.jpeg?src={stream_name}"
+    return f"http://localhost:{get_api_port()}/api/frame.jpeg?src={stream_name}"
 
 
 class MotionDetector:
@@ -98,12 +99,11 @@ class MotionDetector:
         self._client = httpx.AsyncClient(timeout=FRAME_TIMEOUT)
         # Close any orphaned events from previous runs (service restart / crash)
         await self._close_orphaned_events()
-        cfg = get_config().go2rtc
         # Stagger camera starts to avoid concurrent go2rtc stream creation
         stagger_delay = 0
         for cam in cameras:
             if cam.motion_sensitivity > 0 and (cam.sub_stream_url or cam.rtsp_url):
-                url = _snapshot_url(cam.name, cfg.host, cfg.port)
+                url = _snapshot_url(cam.name)
                 scripts = self._parse_motion_scripts(cam)
                 task = asyncio.create_task(
                     self._detect_loop(
@@ -170,8 +170,7 @@ class MotionDetector:
             self._clear_ai_history(cam_id)
 
         if self._running and camera.motion_sensitivity > 0 and camera.enabled:
-            cfg = get_config().go2rtc
-            url = _snapshot_url(camera.name, cfg.host, cfg.port)
+            url = _snapshot_url(camera.name)
             if camera.ai_detection:
                 detector = get_object_detector()
                 await detector.start()
@@ -253,7 +252,7 @@ class MotionDetector:
         ai_threshold: float = 0.5,
         startup_delay: float = 0,
     ) -> None:
-        """Per-camera detection loop: snapshot → motion check → YOLO → event."""
+        """Per-camera detection loop: snapshot → motion check → AI detection → event."""
         if startup_delay > 0:
             await asyncio.sleep(startup_delay)
         threshold_pct = (101 - sensitivity) * 0.05
@@ -314,7 +313,7 @@ class MotionDetector:
                     self._clear_ai_history(cam_id)
                     await self._check_cooldown(cam_id)
                 elif changed_pct >= threshold_pct:
-                    # Motion detected — run YOLO if AI enabled, otherwise fire event
+                    # Motion detected — run AI detection if enabled, otherwise fire event
                     if ai_detection:
                         # Compute move threshold once from frame dimensions
                         if cam_id not in self._move_threshold:

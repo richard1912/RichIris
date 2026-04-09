@@ -140,6 +140,7 @@ class SystemStatus(BaseModel):
     streams: list[StreamStatus]
     total_cameras: int
     active_streams: int
+    go2rtc_rtsp_port: int = 18554
 
 
 class CameraStorageStats(BaseModel):

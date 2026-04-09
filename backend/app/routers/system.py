@@ -92,10 +92,12 @@ async def get_system_status(db: AsyncSession = Depends(get_db)):
     active = sum(1 for s in stream_statuses if s.running)
     logger.debug("System status queried", extra={"total": len(cameras), "active": active})
 
+    from app.services.go2rtc_manager import get_rtsp_port
     return SystemStatus(
         streams=stream_statuses,
         total_cameras=len(cameras),
         active_streams=active,
+        go2rtc_rtsp_port=get_rtsp_port(),
     )
 
 

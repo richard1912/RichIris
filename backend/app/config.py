@@ -154,8 +154,8 @@ class FFmpegConfig:
 @dataclass
 class Go2rtcConfig:
     host: str = "localhost"
-    port: int = 1984
-    rtsp_port: int = 8554
+    port: int = 18700      # Unique port — avoids conflict with standalone go2rtc (default 1984)
+    rtsp_port: int = 18554  # Unique port — avoids conflict with standalone go2rtc (default 8554)
 
 
 @dataclass

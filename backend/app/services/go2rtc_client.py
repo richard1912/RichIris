@@ -287,6 +287,17 @@ class Go2rtcClient:
                 "stream_name": key,
             }, exc_info=True)
 
+    async def register_streams_from_config(self, streams: dict[str, list[str]]) -> None:
+        """Register all streams from a config dict via go2rtc API.
+
+        Used when go2rtc is already running externally (not launched by us)
+        or after a crash restart, so streams need to be pushed via API.
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            for key, sources in streams.items():
+                await self._register_one_stream(client, key, sources)
+        logger.info("All streams registered via API", extra={"count": len(streams)})
+
     async def remove_stream(self, camera_name: str) -> None:
         """Remove all quality variants of a camera stream from go2rtc."""
         stream_name = get_stream_name(camera_name)
@@ -343,12 +354,19 @@ _client: Go2rtcClient | None = None
 
 
 def get_go2rtc_client() -> Go2rtcClient:
-    """Return the singleton Go2rtcClient instance."""
+    """Return the singleton Go2rtcClient instance (uses dynamic ports from go2rtc_manager)."""
     global _client
     if _client is None:
+        from app.services.go2rtc_manager import get_api_port
         config = get_config()
-        _client = Go2rtcClient(config.go2rtc.host, config.go2rtc.port)
+        _client = Go2rtcClient(config.go2rtc.host, get_api_port())
     return _client
+
+
+def reset_go2rtc_client() -> None:
+    """Reset the singleton so it picks up new ports after restart."""
+    global _client
+    _client = None
 
 
 # Global semaphore to serialize go2rtc snapshot requests.

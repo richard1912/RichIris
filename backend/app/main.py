@@ -238,7 +238,7 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="RichIris NVR",
-        version="0.0.1",
+        version="0.0.2",
         lifespan=lifespan,
     )
 

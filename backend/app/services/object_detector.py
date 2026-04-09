@@ -1,7 +1,8 @@
 """ONNX Runtime-based object detector for AI detection on motion frames.
 
-Uses YOLO11x exported to ONNX format. Runs on GPU via DirectML (any GPU,
-no CUDA required) with CPU fallback. ~16ms inference on RTX 4080 SUPER.
+Uses RT-DETR-L (Real-Time Detection Transformer) exported to ONNX format.
+Transformer-based: NMS-free, fewer false positives on ambiguous shapes.
+Runs on GPU via DirectML (any GPU, no CUDA required) with CPU fallback.
 """
 
 import asyncio
@@ -19,11 +20,8 @@ logger = logging.getLogger(__name__)
 # Filters out tiny false-positive detections (shadows, artifacts).
 MIN_BOX_AREA_FRACTION = 0.002  # 0.2% of frame
 
-# YOLO input size (must match export: imgsz=640)
+# Model input size (must match export: imgsz=640)
 INPUT_SIZE = 640
-
-# NMS parameters
-NMS_IOU_THRESHOLD = 0.45
 
 # COCO class IDs grouped by detection category
 CATEGORY_CLASSES = {
@@ -41,7 +39,7 @@ COCO_CLASS_NAMES = {
     22: "zebra", 23: "giraffe",
 }
 
-# All class IDs we care about (for filtering YOLO's 80-class output)
+# All class IDs we care about (for filtering output)
 ALL_DETECTION_CLASSES = set()
 for ids in CATEGORY_CLASSES.values():
     ALL_DETECTION_CLASSES.update(ids)
@@ -92,40 +90,43 @@ def _postprocess(
     confidence_threshold: float,
     classes: set[int] | None,
 ) -> list[Detection]:
-    """Parse YOLO output [1, 84, 8400] → list of Detection.
+    """Parse RT-DETR output [1, 300, 84] → list of Detection.
 
-    YOLO output format: each of 8400 proposals has [cx, cy, w, h, class_scores×80].
+    RT-DETR output: 300 queries, each [cx, cy, w, h, class_scores×80].
+    Coordinates are normalized [0,1]. NMS-free — transformer deduplicates.
     """
-    # output shape: (1, 84, 8400) → transpose to (8400, 84)
-    preds = output[0].T  # (8400, 84)
+    preds = output[0]  # (300, 84) — no transpose needed
 
-    # Extract boxes (cx, cy, w, h) and class scores
-    boxes_cxcywh = preds[:, :4]
-    scores_all = preds[:, 4:]  # (8400, 80)
+    # Extract boxes (normalized cx, cy, w, h) and class scores
+    boxes_norm = preds[:, :4]
+    scores_all = preds[:, 4:]  # (300, 80)
 
-    # Get best class per proposal
+    # Get best class per query
     class_ids = np.argmax(scores_all, axis=1)
     confidences = scores_all[np.arange(len(class_ids)), class_ids]
 
-    # Filter by confidence
+    # Filter by confidence and class
     mask = confidences >= confidence_threshold
     if classes:
-        class_mask = np.isin(class_ids, list(classes))
-        mask &= class_mask
+        mask &= np.isin(class_ids, list(classes))
 
     indices = np.where(mask)[0]
     if len(indices) == 0:
         return []
 
-    boxes_cxcywh = boxes_cxcywh[indices]
+    boxes_norm = boxes_norm[indices]
     class_ids = class_ids[indices]
     confidences = confidences[indices]
 
-    # Convert cx,cy,w,h → x1,y1,x2,y2 in input (640×640) coords
-    x1 = boxes_cxcywh[:, 0] - boxes_cxcywh[:, 2] / 2
-    y1 = boxes_cxcywh[:, 1] - boxes_cxcywh[:, 3] / 2
-    x2 = boxes_cxcywh[:, 0] + boxes_cxcywh[:, 2] / 2
-    y2 = boxes_cxcywh[:, 1] + boxes_cxcywh[:, 3] / 2
+    # Normalized cx,cy,w,h → pixel x1,y1,x2,y2 in 640×640 space
+    cx = boxes_norm[:, 0] * INPUT_SIZE
+    cy = boxes_norm[:, 1] * INPUT_SIZE
+    w = boxes_norm[:, 2] * INPUT_SIZE
+    h = boxes_norm[:, 3] * INPUT_SIZE
+    x1 = cx - w / 2
+    y1 = cy - h / 2
+    x2 = cx + w / 2
+    y2 = cy + h / 2
 
     # Undo letterbox: remove padding, rescale to original image
     x1 = (x1 - pad_x) / scale
@@ -139,25 +140,12 @@ def _postprocess(
     x2 = np.clip(x2, 0, frame_w).astype(np.int32)
     y2 = np.clip(y2, 0, frame_h).astype(np.int32)
 
-    # NMS per class
-    boxes_for_nms = np.stack([x1, y1, x2, y2], axis=1).tolist()
-    nms_indices = cv2.dnn.NMSBoxes(
-        boxes_for_nms,
-        confidences.tolist(),
-        confidence_threshold,
-        NMS_IOU_THRESHOLD,
-    )
-    if len(nms_indices) == 0:
-        return []
-
-    nms_indices = nms_indices.flatten()
-
-    # Filter by minimum box area
+    # Filter by minimum box area (no NMS needed — RT-DETR is NMS-free)
     frame_area = frame_h * frame_w
     min_box_area = frame_area * MIN_BOX_AREA_FRACTION
 
     detections = []
-    for i in nms_indices:
+    for i in range(len(indices)):
         bx1, by1, bx2, by2 = int(x1[i]), int(y1[i]), int(x2[i]), int(y2[i])
         if (bx2 - bx1) * (by2 - by1) < min_box_area:
             continue
@@ -172,6 +160,10 @@ def _postprocess(
     return detections
 
 
+# Model filenames to search for, in priority order
+_MODEL_FILENAMES = ["rtdetr-l.onnx", "yolo11x.onnx"]
+
+
 class ObjectDetector:
     """Singleton ONNX Runtime-based object detector shared across all cameras.
 
@@ -182,7 +174,7 @@ class ObjectDetector:
     def __init__(self):
         self._session = None
         self._input_name = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detector")
         self._started = False
         self._provider = "cpu"
 
@@ -203,19 +195,21 @@ class ObjectDetector:
         data_dir = Path(get_bootstrap().data_dir)
         app_dir = get_app_dir()
 
-        # Search order: data_dir → bundled dependencies/models/
-        candidates = [
-            data_dir / "yolo11x.onnx",
-            app_dir / "dependencies" / "models" / "yolo11x.onnx",
-        ]
+        # Search for any supported model file
         model_path = None
-        for p in candidates:
-            if p.exists():
-                model_path = p
+        for filename in _MODEL_FILENAMES:
+            for directory in [data_dir, app_dir / "dependencies" / "models"]:
+                p = directory / filename
+                if p.exists():
+                    model_path = p
+                    break
+            if model_path:
                 break
 
         if model_path is None:
-            logger.error("YOLO ONNX model not found", extra={"searched": [str(c) for c in candidates]})
+            logger.error("Detection ONNX model not found", extra={
+                "searched_filenames": _MODEL_FILENAMES,
+            })
             return
 
         # Try DirectML (GPU) first, then CPU
@@ -236,7 +230,7 @@ class ObjectDetector:
                 dummy = np.random.rand(1, 3, INPUT_SIZE, INPUT_SIZE).astype(np.float32)
                 self._session.run(None, {self._input_name: dummy})
 
-                logger.info("YOLO ONNX model loaded", extra={
+                logger.info("Detection model loaded", extra={
                     "model": model_path.name,
                     "provider": self._provider,
                     "attempted": label,
@@ -246,7 +240,7 @@ class ObjectDetector:
                 logger.debug("Provider %s not available, trying next", label)
                 continue
 
-        logger.error("Failed to load YOLO model with any provider")
+        logger.error("Failed to load detection model with any provider")
 
     async def stop(self) -> None:
         """Release model and executor."""

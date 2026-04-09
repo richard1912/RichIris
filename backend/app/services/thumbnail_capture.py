@@ -73,7 +73,8 @@ class ThumbnailCapture:
         tp = config.trickplay
         safe_name = sanitize_camera_name(camera.name)
         stream_name = get_stream_name(camera.name)
-        go2rtc_base = f"http://{config.go2rtc.host}:{config.go2rtc.port}"
+        from app.services.go2rtc_manager import get_api_port
+        go2rtc_base = f"http://{config.go2rtc.host}:{get_api_port()}"
         # Use sub-stream direct for thumbnails — lightweight, no transcode
         snapshot_url = (
             f"{go2rtc_base}/api/frame.jpeg"

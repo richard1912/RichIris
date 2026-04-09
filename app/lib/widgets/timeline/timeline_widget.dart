@@ -419,19 +419,23 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   // --- Clip export ---
 
   void _toggleClipsPanel() {
+    debugPrint('[EXPORT] _toggleClipsPanel: _showClips=$_showClips, exportMode=${_ctrl.exportMode}, cameras=${widget.cameras?.length}');
     if (_showClips) {
       // Close everything
       if (_ctrl.exportMode) _ctrl.toggleExportMode();
       _stopClipPolling();
       setState(() => _showClips = false);
     } else {
-      // Open clips panel
+      // Open clips panel — ensure export mode is clean
+      if (_ctrl.exportMode) _ctrl.toggleExportMode();
       _fetchClips();
       setState(() => _showClips = true);
+      debugPrint('[EXPORT] Panel opened: _showClips=$_showClips, exportMode=${_ctrl.exportMode}');
     }
   }
 
   void _enterTimelineExportMode() {
+    debugPrint('[EXPORT] _enterTimelineExportMode: exportMode=${_ctrl.exportMode}');
     if (!_ctrl.exportMode) _ctrl.toggleExportMode();
   }
 
@@ -808,6 +812,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   }
 
   Widget _buildClipsPanel() {
+    debugPrint('[EXPORT] _buildClipsPanel: exportMode=${_ctrl.exportMode}, cameras=${widget.cameras?.length}, clips=${_clips.length}');
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [

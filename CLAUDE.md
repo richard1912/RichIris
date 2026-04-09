@@ -3,7 +3,7 @@ update claude md as needed for code changes
 ## Quick Reference
 - **Backend**: Runs as Windows service `RichIris` via NSSM (FastAPI on port 8700)
 - **Restart**: `nssm restart RichIris`
-- **go2rtc**: Managed as child process of backend (auto-starts/stops with RichIris). Falls back to external service if already running.
+- **go2rtc**: Always launched as its own child process with dynamically assigned free ports (preferred: API 18700, RTSP 18554). Runs independently of any user-installed go2rtc instance. Ports reported to Flutter app via `/api/system/status` → `go2rtc_rtsp_port`.
 - **Config**: `bootstrap.yaml` (data_dir + port only). All other settings in SQLite `settings` table, editable via GUI (Settings screen) or `GET/PUT /api/settings`.
 - **Legacy**: `config.yaml` still supported — migrated to DB on first startup (one-time, idempotent).
 - **Data directory**: `data_dir` (bootstrap.yaml) holds all data in structured subdirectories. Changeable from Settings screen (with optional move/copy migration). Requires service restart.
@@ -32,15 +32,15 @@ update claude md as needed for code changes
 ## Architecture
 ```
 Camera RTSP (main) ← ffmpeg recording (direct, -c:v copy → .ts)
-Camera RTSP (main) ← go2rtc:1984 (keepalive) ──→ live view clients (RTSP via :8554)
+Camera RTSP (main) ← go2rtc (dynamic port) (keepalive) ──→ live view clients (RTSP via dynamic port)
                                                ──→ transcoded quality variants (lazy)
 
-Camera RTSP (sub)  ← go2rtc:1984 (keepalive) ──→ motion detection (snapshots)
+Camera RTSP (sub)  ← go2rtc (dynamic port) (keepalive) ──→ motion detection (snapshots)
                                                ──→ thumbnail capture (snapshots)
-                                               ──→ live view clients (RTSP via :8554)
+                                               ──→ live view clients (RTSP via dynamic port)
                                                ──→ transcoded quality variants (lazy)
 
-Flutter App (Win/Android) → RTSP → go2rtc:8554 (live view)
+Flutter App (Win/Android) → RTSP → go2rtc (dynamic port, from /api/system/status)
                           → HTTP MP4 (playback) → FastAPI:8700 → FFmpeg remux
                                     |                    |
                           {data_dir}\database\       {data_dir}\recordings\
@@ -52,8 +52,8 @@ Flutter App (Win/Android) → RTSP → go2rtc:8554 (live view)
 - **Recording reliability**: ffmpeg uses `-timeout` (30s socket I/O timeout) so it exits if a camera stops sending data. A watchdog task per camera checks every 2 minutes that `.ts` files are being modified; if no file has been updated in 5 minutes, it kills the stale ffmpeg process. Both mechanisms trigger the existing process monitor to auto-restart recording.
 - **Live view (RTSP)**: Flutter app connects directly to go2rtc's RTSP output (`rtsp://{host}:8554/{stream_name}`) via media_kit (libmpv). No backend proxy needed for live view — the app constructs the RTSP URL client-side from the camera name and quality selection. This replaced the previous HTTP fMP4 proxy approach which caused choppy HEVC playback due to media_kit's texture rendering pipeline struggling with fMP4 container format. RTSP provides smooth playback for both HEVC and H.264 on Windows and Android. The HTTP fMP4 proxy endpoint (`GET /api/streams/{id}/live.mp4`) is retained as a fallback. Player uses 5s cache, 16MB demuxer buffer, TCP RTSP transport, hardware decoding. Error handler only reconnects on fatal errors (EOF, connection refused) — transient RTSP hiccups are handled by mpv internally. Stall detection reconnects if position doesn't advance for 10s. Exponential backoff retry (500ms→10s). Video controls hidden (app's own timeline handles playback controls).
 - **Playback**: Recordings are HEVC .ts files. Direct = raw `.ts` served instantly (no ffmpeg). High/Low/Ultra Low = HEVC NVENC transcode via `PlaybackManager` into fragmented MP4 (`-movflags frag_keyframe+empty_moov`) streamed via `StreamingResponse`. ffmpeg handles seek (`-ss` before `-i`). Sessions auto-cleanup after 30s idle; same-camera eviction prevents ffmpeg accumulation.
-- NVIDIA RTX 4080 SUPER available (used for AI object detection via YOLO + NVENC transcoding)
-- **Motion detection + AI object detection**: Simplified snapshot-based pipeline. Fetches JPEG snapshots from go2rtc's HTTP frame API (`GET /api/frame.jpeg?src={stream}_s2_direct`) every ~1s using httpx (no cv2.VideoCapture — clean HTTP timeouts, no hung threads). go2rtc HTTP API on port **1984**. Motion pre-filter uses running weighted-average baseline: `avg = alpha * frame + (1-alpha) * avg` (alpha=0.2 for first 25 frames, then 0.01). Diff against baseline → GaussianBlur(21,21) → absdiff → threshold(25). `changed_pct > 40%` triggers hard baseline reset (IR switch). Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. When motion exceeds threshold and AI is enabled, frame goes to YOLO. Detections go through **multi-frame confirmation**: requires 2 detections in 3 consecutive frames AND positional movement (bbox center must shift by ≥1.5% of frame diagonal between frames). This filters single-frame ghost detections and static objects (statues, parked cars). Best-confidence frame from the confirmation window is used for the event thumbnail. Motion-only events (no AI) fire immediately without confirmation. Uses YOLO11x ONNX model via `onnxruntime-directml` (GPU-accelerated on any GPU, no CUDA required, ~16ms inference). Falls back to CPU if no GPU available. Min bounding box 0.2% of frame area. **Multi-category detection**: per-camera toggles for persons (COCO class 0), vehicles (bicycle/car/motorcycle/bus/truck — classes 1,2,3,5,7), and animals (bird/cat/dog/horse/sheep/cow/elephant/bear/zebra/giraffe — classes 14-23). `detection_label` stores the specific COCO class name (e.g., "car", "dog"). Events stored as MotionEvent rows (start_time, end_time, peak_intensity, detection_label, detection_confidence). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `ai_detection` (master bool), `ai_detect_persons`/`ai_detect_vehicles`/`ai_detect_animals` (category bools), `ai_confidence_threshold` (0-100), `motion_scripts` (JSON array of script pairs with per-category triggers). **Multiple script pairs**: each entry has `on`/`off` scripts and category booleans (`persons`, `vehicles`, `animals`, `motion_only`). A script only fires if its category matches the detection — e.g., a script with only `persons: true` won't fire for vehicle detections. Legacy `motion_script`/`motion_script_off` fields auto-migrated to `motion_scripts` on startup. Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes take effect immediately via `detector.update_camera()`. Heartbeat log every 5 min per camera.
+- NVIDIA RTX 4080 SUPER available (used for AI object detection via RT-DETR + NVENC transcoding)
+- **Motion detection + AI object detection**: Simplified snapshot-based pipeline. Fetches JPEG snapshots from go2rtc's HTTP frame API (`GET /api/frame.jpeg?src={stream}_s2_direct`) every ~1s using httpx (no cv2.VideoCapture — clean HTTP timeouts, no hung threads). go2rtc HTTP API on dynamic port (preferred 18700). Motion pre-filter uses running weighted-average baseline: `avg = alpha * frame + (1-alpha) * avg` (alpha=0.2 for first 25 frames, then 0.01). Diff against baseline → GaussianBlur(21,21) → absdiff → threshold(25). `changed_pct > 40%` triggers hard baseline reset (IR switch). Sensitivity 0-100 maps to area threshold: `(101 - sensitivity) * 0.05%`. When motion exceeds threshold and AI is enabled, frame goes to RT-DETR. Detections go through **multi-frame confirmation**: requires 2 detections in 3 consecutive frames AND positional movement (bbox center must shift by ≥1.5% of frame diagonal between frames). This filters single-frame ghost detections and static objects (statues, parked cars). Best-confidence frame from the confirmation window is used for the event thumbnail. Motion-only events (no AI) fire immediately without confirmation. Uses RT-DETR-L ONNX model (transformer-based, NMS-free) via `onnxruntime-directml` (GPU-accelerated on any GPU, no CUDA required, ~11ms inference). Falls back to CPU if no GPU available. Must be exported with opset 17 for DirectML performance. Min bounding box 0.2% of frame area. **Multi-category detection**: per-camera toggles for persons (COCO class 0), vehicles (bicycle/car/motorcycle/bus/truck — classes 1,2,3,5,7), and animals (bird/cat/dog/horse/sheep/cow/elephant/bear/zebra/giraffe — classes 14-23). `detection_label` stores the specific COCO class name (e.g., "car", "dog"). Events stored as MotionEvent rows (start_time, end_time, peak_intensity, detection_label, detection_confidence). 10-second cooldown between events. Per-camera fields: `motion_sensitivity` (0=off), `ai_detection` (master bool), `ai_detect_persons`/`ai_detect_vehicles`/`ai_detect_animals` (category bools), `ai_confidence_threshold` (0-100), `motion_scripts` (JSON array of script pairs with per-category triggers). **Multiple script pairs**: each entry has `on`/`off` scripts and category booleans (`persons`, `vehicles`, `animals`, `motion_only`). A script only fires if its category matches the detection — e.g., a script with only `persons: true` won't fire for vehicle detections. Legacy `motion_script`/`motion_script_off` fields auto-migrated to `motion_scripts` on startup. Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE. Script must use full path to python.exe (not `python3`) since NSSM service PATH differs from user PATH. Changes take effect immediately via `detector.update_camera()`. Heartbeat log every 5 min per camera.
 
 ### Video Quality Selection
 - **Two independent selectors** in header (also in fullscreen view): **Stream** (Main/Sub) and **Quality** (Direct/High/Low/Ultra Low)
@@ -154,7 +154,7 @@ RichIris/
 │   ├── ffprobe.exe              # FFprobe (codec/bitrate probing)
 │   ├── nssm.exe                 # Windows service manager
 │   ├── go2rtc/go2rtc.exe        # RTSP → HTTP fMP4
-│   └── models/yolo11x.onnx      # YOLO11x ONNX model (218 MB)
+│   └── models/rtdetr-l.onnx      # RT-DETR-L ONNX model (126 MB)
 ├── setup_dev.bat                # One-command dev setup (downloads deps + installs packages)
 ├── installer/
 │   ├── richiris.iss             # Inno Setup installer script (full + slim modes)
@@ -227,16 +227,16 @@ RichIris/
 - **Inline transitions**: Grid↔fullscreen transitions render inline (no Navigator.push) for faster view switching. No route transition animation delay.
 
 ## Key Dependencies
-- **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy, onnxruntime-directml (YOLO11x ONNX inference)
+- **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy, onnxruntime-directml (RT-DETR-L ONNX inference)
 - **Service**: NSSM (installed via `winget install NSSM.NSSM`)
-- **Live view**: go2rtc (Go binary, RTSP relay on port 8554, managed as child process of backend)
+- **Live view**: go2rtc (Go binary, RTSP relay on dynamic port, always launched as child process of backend)
 - **Packaging**: PyInstaller (backend → standalone exe), Inno Setup (installer)
 - **All external binaries in `dependencies/`**: ffmpeg.exe, ffprobe.exe, nssm.exe, go2rtc/go2rtc.exe, models/yolo11x.onnx (gitignored, ~388 MB total). `build_release.bat` copies from here — no downloads during build.
 
 ## Build & Distribution
 
 ### Release build (`build_release.bat`)
-Builds the backend (PyInstaller) + Flutter Windows app + assembles into `dist/richiris/`. Only nssm.exe is bundled — all other dependencies (ffmpeg, go2rtc, YOLO model) are downloaded by the installer at install time.
+Builds the backend (PyInstaller) + Flutter Windows app + assembles into `dist/richiris/`. Only nssm.exe is bundled — all other dependencies (ffmpeg, go2rtc, RT-DETR model) are downloaded by the installer at install time.
 
 Steps: verify nssm → PyInstaller backend → Flutter Windows build → assemble `dist/richiris/` → verify.
 
@@ -250,7 +250,7 @@ Installer wizard flow:
    - Creates data subdirectories (`database/`, `logs/`, `recordings/`, `thumbnails/`, `playback/`)
    - Writes `bootstrap.yaml` with chosen data_dir and port 8700
    - Sets NSSM stdout/stderr log paths to `{data_dir}/logs/`
-   - Runs `download_deps.ps1` via PowerShell to download ffmpeg, go2rtc, and YOLO model. Skips already-present files (upgrade scenario). Shows error dialog if downloads fail but continues.
+   - Runs `download_deps.ps1` via PowerShell to download ffmpeg, go2rtc, and RT-DETR model. Skips already-present files (upgrade scenario). Shows error dialog if downloads fail but continues.
    - Installs + starts Windows service `RichIris` via NSSM
    - Optionally launches the Flutter app
 

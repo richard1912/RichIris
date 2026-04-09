@@ -75,7 +75,8 @@ async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quali
         # No ensure_stream_registered needed — all streams are baked into
         # go2rtc.yaml at startup and survive config reloads.
 
-    go2rtc_url = f"http://127.0.0.1:{config.go2rtc.port}/api/stream.mp4?src={stream_name}"
+    from app.services.go2rtc_manager import get_api_port
+    go2rtc_url = f"http://127.0.0.1:{get_api_port()}/api/stream.mp4?src={stream_name}"
 
     t_setup = time.monotonic()
     logger.info("fMP4 request", extra={
@@ -254,7 +255,7 @@ async def rtsp_info(camera_id: int, stream: str = "s2", quality: str = "direct")
     if quality not in ("direct", "high", "low", "ultralow"):
         quality = "direct"
 
-    config = get_config()
+    from app.services.go2rtc_manager import get_rtsp_port
     base_name = get_stream_name(info.camera_name)
     stream_name = f"{base_name}_{stream}_{quality}"
 
@@ -265,7 +266,7 @@ async def rtsp_info(camera_id: int, stream: str = "s2", quality: str = "direct")
             stream_name = f"{base_name}_{stream}_direct"
 
     return {
-        "rtsp_url": f"rtsp://127.0.0.1:{config.go2rtc.rtsp_port}/{stream_name}",
+        "rtsp_url": f"rtsp://127.0.0.1:{get_rtsp_port()}/{stream_name}",
         "stream_name": stream_name,
     }
 
@@ -295,7 +296,8 @@ async def proxy_ws(websocket: WebSocket, camera_id: int):
             ws_quality = "direct"
             stream_name = f"{base_name}_{ws_stream}_direct"
 
-    go2rtc_url = f"ws://127.0.0.1:{config.go2rtc.port}/api/ws?src={stream_name}"
+    from app.services.go2rtc_manager import get_api_port as _get_api_port
+    go2rtc_url = f"ws://127.0.0.1:{_get_api_port()}/api/ws?src={stream_name}"
 
     await websocket.accept()
 

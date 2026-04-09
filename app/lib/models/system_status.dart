@@ -35,11 +35,13 @@ class SystemStatus {
   final List<StreamStatus> streams;
   final int totalCameras;
   final int activeStreams;
+  final int go2rtcRtspPort;
 
   SystemStatus({
     required this.streams,
     required this.totalCameras,
     required this.activeStreams,
+    required this.go2rtcRtspPort,
   });
 
   factory SystemStatus.fromJson(Map<String, dynamic> json) => SystemStatus(
@@ -48,5 +50,6 @@ class SystemStatus {
             .toList(),
         totalCameras: json['total_cameras'] as int,
         activeStreams: json['active_streams'] as int,
+        go2rtcRtspPort: json['go2rtc_rtsp_port'] as int? ?? 18554,
       );
 }

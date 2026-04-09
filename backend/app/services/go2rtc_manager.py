@@ -3,6 +3,7 @@
 import asyncio
 import ctypes
 import logging
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,35 @@ _process: subprocess.Popen | None = None
 _log_file = None  # Keep file handle open for go2rtc's lifetime
 _monitor_task: asyncio.Task | None = None
 _shutting_down = False
+# Actual ports assigned at startup (may differ from config defaults if ports were busy)
+_api_port: int | None = None
+_rtsp_port: int | None = None
+
+
+def _find_free_port(preferred: int) -> int:
+    """Return preferred port if available, otherwise find a free one."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", preferred))
+            return preferred
+    except OSError:
+        # Preferred port busy — let OS pick a free one
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+            logger.info("Preferred port busy, using free port",
+                        extra={"preferred": preferred, "assigned": port})
+            return port
+
+
+def get_api_port() -> int:
+    """Return the go2rtc API port (assigned at startup)."""
+    return _api_port or get_config().go2rtc.port
+
+
+def get_rtsp_port() -> int:
+    """Return the go2rtc RTSP port (assigned at startup)."""
+    return _rtsp_port or get_config().go2rtc.rtsp_port
 
 
 def _resolve_go2rtc_binary() -> str | None:
@@ -47,20 +77,25 @@ def _get_short_path(path: str) -> str:
     return path
 
 
-def _generate_go2rtc_config(binary_dir: Path, streams: dict | None = None) -> Path:
+def _generate_go2rtc_config(
+    binary_dir: Path, streams: dict | None = None,
+    api_port: int | None = None, rtsp_port: int | None = None,
+) -> Path:
     """Generate go2rtc.yaml with ffmpeg config and camera streams.
 
     Streams are baked into the config file so they survive go2rtc config reloads.
     go2rtc watches its config file; API-registered streams get wiped on reload.
     """
     config = get_config()
+    api_port = api_port or config.go2rtc.port
+    rtsp_port = rtsp_port or config.go2rtc.rtsp_port
 
     # Use Windows 8.3 short path for ffmpeg — go2rtc can't handle spaces in bin path
     ffmpeg_bin = _get_short_path(config.ffmpeg.path)
 
     go2rtc_config = {
-        "api": {"listen": f":{config.go2rtc.port}"},
-        "rtsp": {"listen": f":{config.go2rtc.rtsp_port}"},
+        "api": {"listen": f":{api_port}"},
+        "rtsp": {"listen": f":{rtsp_port}"},
         "ffmpeg": {
             "bin": ffmpeg_bin,
             # Use NVENC GPU encoders
@@ -82,16 +117,6 @@ def _generate_go2rtc_config(binary_dir: Path, streams: dict | None = None) -> Pa
     })
     return config_path
 
-
-async def _is_go2rtc_running() -> bool:
-    """Check if go2rtc is already responding on the configured port."""
-    config = get_config()
-    try:
-        async with httpx.AsyncClient(timeout=2) as client:
-            resp = await client.get(f"http://{config.go2rtc.host}:{config.go2rtc.port}/api")
-            return resp.status_code == 200
-    except Exception:
-        return False
 
 
 def _launch_process(binary: str, config_path: Path, log_path: Path) -> subprocess.Popen:
@@ -157,7 +182,10 @@ async def _monitor_go2rtc() -> None:
 
         # Bake all streams into config
         streams = await _build_streams_from_db()
-        config_path = _generate_go2rtc_config(binary_dir, streams=streams)
+        config_path = _generate_go2rtc_config(
+            binary_dir, streams=streams,
+            api_port=_api_port, rtsp_port=_rtsp_port,
+        )
 
         from app.config import get_bootstrap
         log_path = Path(get_bootstrap().data_dir) / "logs" / "go2rtc.log"
@@ -187,22 +215,26 @@ async def _monitor_go2rtc() -> None:
 
 
 async def start_go2rtc(streams: dict | None = None) -> bool:
-    """Start go2rtc as a child process.
+    """Start go2rtc as a child process on dynamically assigned free ports.
+
+    Always launches our own instance — finds free ports at startup to avoid
+    conflicts with any standalone go2rtc or other services.
 
     Args:
-        streams: Stream definitions to bake into go2rtc.yaml. If None, starts
-                 with empty streams (useful when go2rtc is already running externally).
+        streams: Stream definitions to bake into go2rtc.yaml.
 
-    Returns True if started, False if already running.
+    Returns True if started successfully, False on failure.
     """
-    global _process, _monitor_task, _shutting_down
+    global _process, _monitor_task, _shutting_down, _api_port, _rtsp_port
 
     _shutting_down = False
+    config = get_config()
 
-    # If already running externally (dev mode / separate service), skip
-    if await _is_go2rtc_running():
-        logger.info("go2rtc already running, skipping child process launch")
-        return False
+    # Find free ports (prefers configured defaults, falls back to any free port)
+    _api_port = _find_free_port(config.go2rtc.port)
+    _rtsp_port = _find_free_port(config.go2rtc.rtsp_port)
+    logger.info("go2rtc ports assigned",
+                extra={"api_port": _api_port, "rtsp_port": _rtsp_port})
 
     binary = _resolve_go2rtc_binary()
     if not binary:
@@ -210,7 +242,10 @@ async def start_go2rtc(streams: dict | None = None) -> bool:
         return False
 
     binary_dir = Path(binary).parent
-    config_path = _generate_go2rtc_config(binary_dir, streams=streams)
+    config_path = _generate_go2rtc_config(
+        binary_dir, streams=streams,
+        api_port=_api_port, rtsp_port=_rtsp_port,
+    )
 
     from app.config import get_bootstrap
     data_dir = Path(get_bootstrap().data_dir)
@@ -246,8 +281,10 @@ async def start_go2rtc(streams: dict | None = None) -> bool:
 
 async def restart_go2rtc() -> bool:
     """Restart go2rtc with fresh config from database (e.g. after camera add/remove)."""
+    from app.services.go2rtc_client import reset_go2rtc_client
     streams = await _build_streams_from_db()
     await stop_go2rtc()
+    reset_go2rtc_client()  # Ports may change on restart
     return await start_go2rtc(streams=streams)
 
 

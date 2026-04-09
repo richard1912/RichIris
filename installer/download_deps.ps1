@@ -29,7 +29,7 @@ $GO2RTC_VERSION = "1.9.14"
 # Download URLs
 $FFMPEG_URL = "https://github.com/GyanD/codexffmpeg/releases/download/$FFMPEG_VERSION/ffmpeg-$FFMPEG_VERSION-essentials_build.zip"
 $GO2RTC_URL = "https://github.com/AlexxIT/go2rtc/releases/download/v$GO2RTC_VERSION/go2rtc_win64.zip"
-$YOLO_URL   = "https://github.com/richard1912/RichIris/releases/download/models/yolo11x.onnx"
+$RTDETR_URL = "https://github.com/richard1912/RichIris/releases/download/models/rtdetr-l.onnx"
 
 $DepsDir = Join-Path $InstallDir "dependencies"
 $TempDir = Join-Path $env:TEMP "richiris_setup"
@@ -151,19 +151,19 @@ if (-not (Test-Path $go2rtcPath)) {
     Log "go2rtc: already present, skipping"
 }
 
-# --- YOLO ONNX model ---
-$yoloPath = Join-Path $DepsDir "models\yolo11x.onnx"
-if (-not (Test-Path $yoloPath)) {
-    Write-Host "Downloading YOLO model (218 MB, please wait)..."
+# --- RT-DETR ONNX model ---
+$rtdetrPath = Join-Path $DepsDir "models\rtdetr-l.onnx"
+if (-not (Test-Path $rtdetrPath)) {
+    Write-Host "Downloading RT-DETR model (126 MB, please wait)..."
     try {
-        Download-File -Url $YOLO_URL -OutFile $yoloPath -Label "YOLO model"
-        Log "YOLO: OK"
+        Download-File -Url $RTDETR_URL -OutFile $rtdetrPath -Label "RT-DETR model"
+        Log "RT-DETR: OK"
     } catch {
-        Log "YOLO: FAILED - $_ (AI detection will not be available)"
-        $failed += "yolo"
+        Log "RT-DETR: FAILED - $_ (AI detection will not be available)"
+        $failed += "rtdetr"
     }
 } else {
-    Log "YOLO: already present, skipping"
+    Log "RT-DETR: already present, skipping"
 }
 
 # Cleanup temp
@@ -193,12 +193,12 @@ foreach ($check in $checks) {
     }
 }
 
-# YOLO is optional (AI detection only)
-if (Test-Path $yoloPath) {
-    $sizeMB = [math]::Round((Get-Item $yoloPath).Length / 1MB, 1)
-    Log "  OK: yolo11x.onnx ($sizeMB MB)"
+# RT-DETR is optional (AI detection only)
+if (Test-Path $rtdetrPath) {
+    $sizeMB = [math]::Round((Get-Item $rtdetrPath).Length / 1MB, 1)
+    Log "  OK: rtdetr-l.onnx ($sizeMB MB)"
 } else {
-    Log "  MISSING: yolo11x.onnx (AI detection disabled)"
+    Log "  MISSING: rtdetr-l.onnx (AI detection disabled)"
 }
 
 if ($failed.Count -gt 0) {

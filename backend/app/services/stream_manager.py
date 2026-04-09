@@ -245,10 +245,10 @@ class StreamManager:
         if not info:
             return
 
-        config = get_config()
+        from app.services.go2rtc_manager import get_api_port
         stream_name = get_stream_name(info.camera_name)
         full_stream = f"{stream_name}_{stream_suffix}"
-        fmp4_url = f"http://127.0.0.1:{config.go2rtc.port}/api/stream.mp4?src={full_stream}"
+        fmp4_url = f"http://127.0.0.1:{get_api_port()}/api/stream.mp4?src={full_stream}"
 
         import time as _time
         from app.services.go2rtc_client import wait_for_go2rtc_ready

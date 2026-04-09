@@ -173,10 +173,12 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
           _systemApi!.fetchStatus(),
         ]);
         if (mounted) {
+          final status = results[2] as SystemStatus;
+          _streamApi?.updateRtspPort(status.go2rtcRtspPort);
           setState(() {
             _tzOffsetMs = results[0] as int;
             _cameras = results[1] as List<Camera>;
-            _systemStatus = results[2] as SystemStatus;
+            _systemStatus = status;
           });
         }
         return;
@@ -199,6 +201,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   Future<void> _refreshStatus() async {
     try {
       final status = await _systemApi!.fetchStatus();
+      _streamApi?.updateRtspPort(status.go2rtcRtspPort);
       if (mounted) setState(() => _systemStatus = status);
     } catch (_) {}
   }
