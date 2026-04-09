@@ -38,58 +38,55 @@ $TempDir = Join-Path $env:TEMP "richiris_setup"
 function Download-File {
     param([string]$Url, [string]$OutFile, [string]$Label)
     Log "Downloading $Label from $Url"
-    $client = New-Object System.Net.WebClient
 
-    # Progress tracking via async download
-    $script:dlDone = $false
-    $script:dlError = $null
-    $script:dlLastPct = -1
-
-    $client.add_DownloadProgressChanged({
-        param($sender, $e)
-        if ($e.ProgressPercentage -ne $script:dlLastPct -and ($e.ProgressPercentage % 5 -eq 0)) {
-            $script:dlLastPct = $e.ProgressPercentage
-            $mb = [math]::Round($e.BytesReceived / 1MB, 1)
-            $total = [math]::Round($e.TotalBytesToReceive / 1MB, 1)
-            Write-Host "`r  $Label : $mb MB / $total MB ($($e.ProgressPercentage)%)    " -NoNewline
-        }
-    })
-
-    $client.add_DownloadFileCompleted({
-        param($sender, $e)
-        if ($e.Error) { $script:dlError = $e.Error }
-        $script:dlDone = $true
-    })
-
+    # Get file size via HEAD request for progress calculation
+    $totalBytes = 0
     try {
-        $uri = New-Object System.Uri($Url)
-        $client.DownloadFileAsync($uri, $OutFile)
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.Method = "HEAD"
+        $req.AllowAutoRedirect = $true
+        $resp = $req.GetResponse()
+        $totalBytes = $resp.ContentLength
+        $resp.Close()
+    } catch { }
+    $totalMB = [math]::Round($totalBytes / 1MB, 1)
 
-        # Wait with timeout (5 minutes)
-        $timeout = [DateTime]::Now.AddMinutes(5)
-        while (-not $script:dlDone) {
-            Start-Sleep -Milliseconds 200
-            if ([DateTime]::Now -gt $timeout) {
-                $client.CancelAsync()
-                throw "Download timed out after 5 minutes"
+    # Start synchronous download in a background job
+    $job = Start-Job -ScriptBlock {
+        param($u, $o)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $c = New-Object System.Net.WebClient
+        $c.DownloadFile($u, $o)
+        $c.Dispose()
+    } -ArgumentList $Url, $OutFile
+
+    # Poll file size for progress while job runs
+    while ($job.State -eq 'Running') {
+        Start-Sleep -Milliseconds 500
+        if (Test-Path $OutFile) {
+            $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+            if ($totalBytes -gt 0) {
+                $pct = [math]::Min(100, [math]::Round(($sizeMB / $totalMB) * 100))
+                Write-Host "`r  $Label : $sizeMB MB / $totalMB MB ($pct%)    " -NoNewline
+            } else {
+                Write-Host "`r  $Label : $sizeMB MB downloaded    " -NoNewline
             }
         }
-        Write-Host ""  # newline after progress
-
-        if ($script:dlError) {
-            throw $script:dlError
-        }
-
-        $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
-        Log "  Downloaded: $sizeMB MB"
-    } catch {
-        Write-Host ""
-        Log "  ERROR: $($_.Exception.Message)"
-        if ($_.Exception.InnerException) { Log "  Inner: $($_.Exception.InnerException.Message)" }
-        throw
-    } finally {
-        $client.Dispose()
     }
+    Write-Host ""
+
+    # Check for errors
+    $result = Receive-Job $job -ErrorAction SilentlyContinue
+    if ($job.State -eq 'Failed') {
+        $errMsg = ($job.ChildJobs[0].JobStateInfo.Reason.Message)
+        Remove-Job $job -Force
+        Log "  ERROR: $errMsg"
+        throw $errMsg
+    }
+    Remove-Job $job -Force
+
+    $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+    Log "  Downloaded: $sizeMB MB"
 }
 
 # Clean temp
