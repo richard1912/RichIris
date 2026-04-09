@@ -141,7 +141,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (widget.resumePlaybackGen != _lastResumePlaybackGen) {
       _lastResumePlaybackGen = widget.resumePlaybackGen;
       if (widget.resumePlaybackTime != null) {
-        debugPrint('HOME: resumePlaybackGen changed → _startPlayback(${widget.resumePlaybackTime})');
         _timelineDateOverride = widget.resumePlaybackTime!.substring(0, 10);
         _startPlayback(widget.resumePlaybackTime!);
       }
