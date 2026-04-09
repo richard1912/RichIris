@@ -39,11 +39,51 @@ function Download-File {
     param([string]$Url, [string]$OutFile, [string]$Label)
     Log "Downloading $Label from $Url"
     $client = New-Object System.Net.WebClient
+
+    # Progress tracking via async download
+    $script:dlDone = $false
+    $script:dlError = $null
+    $script:dlLastPct = -1
+
+    $client.add_DownloadProgressChanged({
+        param($sender, $e)
+        if ($e.ProgressPercentage -ne $script:dlLastPct -and ($e.ProgressPercentage % 5 -eq 0)) {
+            $script:dlLastPct = $e.ProgressPercentage
+            $mb = [math]::Round($e.BytesReceived / 1MB, 1)
+            $total = [math]::Round($e.TotalBytesToReceive / 1MB, 1)
+            Write-Host "`r  $Label : $mb MB / $total MB ($($e.ProgressPercentage)%)    " -NoNewline
+        }
+    })
+
+    $client.add_DownloadFileCompleted({
+        param($sender, $e)
+        if ($e.Error) { $script:dlError = $e.Error }
+        $script:dlDone = $true
+    })
+
     try {
-        $client.DownloadFile($Url, $OutFile)
+        $uri = New-Object System.Uri($Url)
+        $client.DownloadFileAsync($uri, $OutFile)
+
+        # Wait with timeout (5 minutes)
+        $timeout = [DateTime]::Now.AddMinutes(5)
+        while (-not $script:dlDone) {
+            Start-Sleep -Milliseconds 200
+            if ([DateTime]::Now -gt $timeout) {
+                $client.CancelAsync()
+                throw "Download timed out after 5 minutes"
+            }
+        }
+        Write-Host ""  # newline after progress
+
+        if ($script:dlError) {
+            throw $script:dlError
+        }
+
         $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
         Log "  Downloaded: $sizeMB MB"
     } catch {
+        Write-Host ""
         Log "  ERROR: $($_.Exception.Message)"
         if ($_.Exception.InnerException) { Log "  Inner: $($_.Exception.InnerException.Message)" }
         throw

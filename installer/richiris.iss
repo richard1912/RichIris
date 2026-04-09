@@ -62,6 +62,8 @@ Name: "{commondesktop}\RichIris"; Filename: "{app}\app\{#MyAppGUIName}"; Tasks: 
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Run]
+; Download dependencies (ffmpeg, go2rtc, YOLO model) — runs BEFORE service start
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\download_deps.ps1"" -InstallDir ""{app}"""; StatusMsg: "Downloading dependencies (this may take a few minutes)..."; Flags: waituntilterminated
 ; Remove any existing service first (handles upgrade from different install path)
 Filename: "{app}\nssm.exe"; Parameters: "stop RichIris"; Flags: runhidden waituntilterminated
 Filename: "{app}\nssm.exe"; Parameters: "remove RichIris confirm"; Flags: runhidden waituntilterminated
@@ -89,7 +91,6 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""RichIris
 var
   DataDirPage: TInputDirWizardPage;
   ResultCode: Integer;
-  DownloadFailed: Boolean;
 
 function ReadExistingDataDir(): String;
 var
@@ -167,7 +168,6 @@ var
   BootstrapContent: String;
   YamlDir: String;
   AppDir: String;
-  PSScript: String;
 begin
   if CurStep = ssInstall then
   begin
@@ -219,33 +219,7 @@ begin
     Exec('netsh', 'advfirewall firewall add rule name="RichIris go2rtc API" dir=in action=allow protocol=tcp localport=1984 profile=private,public',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Download dependencies if not already present
-    PSScript := AppDir + '\download_deps.ps1';
-    if FileExists(PSScript) then
-    begin
-      if not FileExists(AppDir + '\dependencies\ffmpeg.exe') or
-         not FileExists(AppDir + '\dependencies\go2rtc\go2rtc.exe') then
-      begin
-        DownloadFailed := False;
-        if not Exec('powershell.exe',
-          '-ExecutionPolicy Bypass -File "' + PSScript + '" -InstallDir "' + AppDir + '"',
-          '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
-        begin
-          DownloadFailed := True;
-        end
-        else if ResultCode <> 0 then
-        begin
-          DownloadFailed := True;
-        end;
-
-        if DownloadFailed then
-        begin
-          MsgBox('Some dependencies failed to download. The NVR may not work correctly until they are installed.' + #13#10 + #13#10 +
-            'You can re-run the installer to retry, or download them manually into:' + #13#10 +
-            AppDir + '\dependencies\', mbError, MB_OK);
-        end;
-      end;
-    end;
+    // Dependencies are now downloaded via [Run] section (before service start)
   end;
 end;
 

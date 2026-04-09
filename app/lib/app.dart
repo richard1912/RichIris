@@ -54,11 +54,11 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   String? _serverUrl;
   String _appVersion = '';
   bool _loading = true;
-  Quality _liveQuality = Quality.high;
+  Quality _liveQuality = Quality.direct;
   Quality _playbackQuality = Quality.direct;
   Quality get _quality => _isLive ? _liveQuality : _playbackQuality;
   bool _isLive = true;
-  StreamSource _streamSource = StreamSource.s2;
+  StreamSource _streamSource = StreamSource.s1;
   int _tzOffsetMs = 0;
 
   List<Camera> _cameras = [];
@@ -87,7 +87,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     final lqName = prefs.getString(kQualityKey);
     final lq = Quality.values.firstWhere(
       (v) => v.name == lqName,
-      orElse: () => Quality.high,
+      orElse: () => Quality.direct,
     );
     final pqName = prefs.getString(kPlaybackQualityKey);
     final pq = Quality.values.firstWhere(
@@ -97,7 +97,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     final sName = prefs.getString(kStreamSourceKey);
     final s = StreamSource.values.firstWhere(
       (v) => v.name == sName,
-      orElse: () => StreamSource.s2,
+      orElse: () => StreamSource.s1,
     );
     setState(() {
       _liveQuality = lq;

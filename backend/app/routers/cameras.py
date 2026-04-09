@@ -66,6 +66,9 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
 
     if camera.enabled:
         try:
+            # Restart go2rtc so it picks up the new camera's streams
+            from app.services.go2rtc_manager import restart_go2rtc
+            await restart_go2rtc()
             mgr = get_stream_manager()
             await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
         except Exception:
@@ -164,6 +167,13 @@ async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(camera)
     await db.commit()
     logger.info("Camera deleted", extra={"camera_id": camera_id})
+
+    # Restart go2rtc to remove deleted camera's streams
+    try:
+        from app.services.go2rtc_manager import restart_go2rtc
+        await restart_go2rtc()
+    except Exception:
+        logger.exception("Failed to restart go2rtc after camera delete")
 
 
 

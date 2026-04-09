@@ -244,6 +244,13 @@ async def start_go2rtc(streams: dict | None = None) -> bool:
         return False
 
 
+async def restart_go2rtc() -> bool:
+    """Restart go2rtc with fresh config from database (e.g. after camera add/remove)."""
+    streams = await _build_streams_from_db()
+    await stop_go2rtc()
+    return await start_go2rtc(streams=streams)
+
+
 async def stop_go2rtc() -> None:
     """Stop the go2rtc child process."""
     global _process, _log_file, _monitor_task, _shutting_down
