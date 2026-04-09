@@ -83,7 +83,7 @@ Flutter App (Win/Android) → RTSP → go2rtc:8554 (live view)
 
 ### Important: Timezone handling
 - Recordings are stored in the DB as **local time without timezone** (e.g. `2026-03-08T10:36:02`)
-- Timezone is configurable via Settings → General (dropdown, defaults to UTC)
+- Timezone is configurable via Settings → General (dropdown, auto-detected from system on first install via tzlocal, falls back to UTC)
 - Frontend must NOT use `.toISOString()` for playback times (converts to UTC, breaks queries)
 - Always format times as local ISO strings to match DB format
 

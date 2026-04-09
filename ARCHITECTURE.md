@@ -70,10 +70,11 @@ ffmpeg -rtsp_transport tcp -timeout 30000000 -i <stream_url> \
 
 ### go2rtc (Live View)
 
-go2rtc handles all live view streaming. Streams are registered dynamically via REST API on camera startup. Provides:
-- HTTP fMP4 streams for the Flutter app (proxied through FastAPI)
+go2rtc handles all live view streaming. Streams are baked into `go2rtc.yaml` at startup (no API registration needed — survives config reloads). Provides:
+- RTSP output on port 8554 for direct Flutter app connections (low-latency HEVC playback)
 - JPEG frame snapshots for motion detection
-- Multiple quality tiers per camera (S1/S2 x Direct/High/Low), lazy-initialized
+- Multiple quality tiers per camera (S1/S2 x Direct/High/Low/Ultra Low), lazy-initialized
+- Httpx keepalive consumers keep camera RTSP connections alive permanently for instant live view
 
 ### Database (SQLite)
 
@@ -88,28 +89,26 @@ SQLite chosen for simplicity (single-file, no server process). Async access via 
 ### Storage Layout
 
 ```
-G:\RichIris\                    # Recording storage (configurable)
-├── Camera 1\
-│   ├── 2026-03-08\
-│   │   ├── Camera 1 2026-03-08 00.00 - 00.15.ts
-│   │   ├── Camera 1 2026-03-08 00.15 - 00.30.ts
-│   │   └── ...
-│   └── ...
-
-C:\01-Self-Hosting\RichIris\
-├── data\
-│   ├── richiris.db             # SQLite database
-│   └── playback\               # Temporary remux cache
+{data_dir}/                         # Configurable via installer or Settings
+├── database/richiris.db            # SQLite database
+├── logs/                           # Application logs
+├── recordings/{camera}/            # Recording .ts files per camera per day
+│   └── Camera 1/
+│       └── 2026-03-08/
+│           ├── Camera 1 2026-03-08 00.00 - 00.15.ts
+│           └── ...
+├── thumbnails/{camera}/            # Trickplay + detection thumbnails
+└── playback/                       # Transient transcoded MP4s (auto-cleaned)
 ```
 
 ### Flutter App (`app/`)
 
 Flutter (Windows + Android) with media_kit (libmpv) for video playback.
-- **Live View**: Responsive camera grid with HTTP fMP4 streams via media_kit
+- **Live View**: Responsive camera grid with direct RTSP streaming via go2rtc (port 8554). media_kit connects natively via mpv with 5s cache, 16MB demuxer buffer, TCP transport, and hardware decoding. Zoomable video (pinch/scroll to zoom in fullscreen).
 - **Timeline**: CustomPainter-based zoomable timeline with recording segments, motion events, trickplay thumbnails
 - **Playback**: Fragmented MP4 streaming, speed controls (-32x to 32x)
 - **Clip Export**: Time range selector, MP4 export, download
-- **Settings**: Camera management, system status
+- **Settings**: Camera management, system status, backup/restore
 
 ## Environment
 

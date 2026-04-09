@@ -11,11 +11,11 @@ A self-hosted NVR (Network Video Recorder) for 24/7 recording of RTSP cameras wi
 ## Features
 
 - **24/7 continuous recording** -- HEVC passthrough (no transcode, no GPU usage) into 15-minute segments
-- **Live view** -- low-latency RTSP via go2rtc with multi-quality streaming (Direct/High/Low/Ultra Low)
+- **Live view** -- low-latency direct RTSP via go2rtc with multi-quality streaming (Direct/High/Low/Ultra Low), zoomable video
 - **Timeline playback** -- zoomable 24h timeline, instant seek, speed controls (1x to 32x), date picker
 - **Trickplay thumbnails** -- hover/scrub preview on timeline
 - **Motion detection** -- per-camera sensitivity, timeline overlay, configurable script triggers
-- **AI object detection** -- YOLO11x for persons, vehicles, and animals with color-coded timeline bars
+- **AI object detection** -- YOLO11x for persons, vehicles, and animals with color-coded timeline bars and multi-frame confirmation
 - **Clip export** -- select a time range and export an MP4
 - **Retention management** -- configurable max age and max storage, oldest recordings purged first
 - **Native apps** -- Windows desktop and Android client
@@ -48,7 +48,7 @@ Download `RichIris-Android.apk` from [Releases](https://github.com/richard1912/R
 - **Windows 10/11** (64-bit)
 - RTSP-capable IP cameras
 - Sufficient storage for recordings (varies by camera count and retention settings)
-- **Optional**: NVIDIA GPU for AI object detection acceleration (falls back to CPU)
+- **Optional**: NVIDIA GPU for AI object detection acceleration (falls back to CPU via DirectML)
 
 ## Configuration
 
@@ -77,9 +77,9 @@ SQLite DB + Recordings + Thumbnails
 ```
 
 - **Recording**: One FFmpeg process per camera, codec passthrough (no transcode), 15-minute `.ts` segments
-- **Live view**: go2rtc receives camera RTSP streams and re-serves via RTSP (:8554). Flutter app connects directly to go2rtc for smooth HEVC playback
+- **Live view**: go2rtc receives camera RTSP streams and re-serves via RTSP (:8554). Flutter app connects directly to go2rtc for smooth HEVC playback. Zoomable video in fullscreen.
 - **Playback**: Direct mode serves raw segments instantly. Other quality tiers transcode on-the-fly via NVENC
-- **AI detection**: Snapshot-based pipeline -- motion pre-filter, then YOLO inference only when motion detected
+- **AI detection**: Snapshot-based pipeline -- motion pre-filter, then YOLO inference with multi-frame confirmation (2 detections in 3 frames + positional movement)
 
 ## Video Quality
 
