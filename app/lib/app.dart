@@ -261,6 +261,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   cameras: _cameras,
                   systemStatus: _systemStatus,
                   quality: _quality,
+                  isLive: _isLive,
                   streamSource: _streamSource,
                   tzOffsetMs: _tzOffsetMs,
                   onQualityChanged: _onQualityChanged,
@@ -290,6 +291,7 @@ class _MainNav extends StatefulWidget {
   final List<Camera> cameras;
   final SystemStatus? systemStatus;
   final Quality quality;
+  final bool isLive;
   final StreamSource streamSource;
   final int tzOffsetMs;
   final ValueChanged<Quality> onQualityChanged;
@@ -315,6 +317,7 @@ class _MainNav extends StatefulWidget {
     required this.cameras,
     required this.systemStatus,
     required this.quality,
+    required this.isLive,
     required this.streamSource,
     required this.tzOffsetMs,
     required this.onQualityChanged,
@@ -357,6 +360,20 @@ class _MainNavState extends State<_MainNav> {
     _scheduleUpdateCheck();
   }
 
+  @override
+  void didUpdateWidget(covariant _MainNav oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Stop live players when entering playback to free GPU decoder memory.
+    // On Android especially, 6 live + 6 playback = 12 decoders → OOM.
+    if (oldWidget.isLive && !widget.isLive) {
+      for (final p in _livePlayers.values) {
+        p.stop();
+      }
+    }
+    // Live players will be re-opened by LivePlayer widgets when they rebuild
+    // with the shared player (checks playlist.medias.isEmpty → calls _open).
+  }
+
   void _scheduleUpdateCheck() {
     Future.delayed(const Duration(seconds: 10), () async {
       if (!mounted) return;
@@ -396,13 +413,13 @@ class _MainNavState extends State<_MainNav> {
       final fsTime = _fullscreenRef.getNvrTime!();
       final gridTime = _gridRef.getNvrTime?.call();
       final timeDrift = gridTime != null ? (fsTime - gridTime).abs() : double.infinity;
-      print('EXIT_FS: fsTime=$fsTime gridTime=$gridTime drift=$timeDrift gridIsLive=${_gridRef.isLive}');
+      debugPrint('EXIT_FS: fsTime=$fsTime gridTime=$gridTime drift=$timeDrift gridIsLive=${_gridRef.isLive}');
       if (_gridRef.isLive || timeDrift > 5000) {
-        print('EXIT_FS: RESTARTING playback (gridIsLive=${_gridRef.isLive} drift=$timeDrift)');
+        debugPrint('EXIT_FS: RESTARTING playback (gridIsLive=${_gridRef.isLive} drift=$timeDrift)');
         _resumePlaybackTime = formatLocalISOFromMs(fsTime - widget.tzOffsetMs);
         _resumePlaybackGen++;
       } else {
-        print('EXIT_FS: SEAMLESS return (no restart needed)');
+        debugPrint('EXIT_FS: SEAMLESS return (no restart needed)');
       }
     } else if (_fullscreenRef.isLive && !_gridRef.isLive) {
       // Fullscreen went live but grid is still in playback — make grid go live
