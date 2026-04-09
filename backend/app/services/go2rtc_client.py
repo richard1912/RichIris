@@ -299,8 +299,13 @@ class Go2rtcClient:
             try:
                 resp = await client.delete(url)
                 resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 400:
+                    pass  # Stream baked into config, can't remove via API — harmless
+                else:
+                    logger.warning("Failed to remove stream from go2rtc", extra={"stream_name": key, "status": e.response.status_code})
             except Exception:
-                logger.exception("Failed to remove stream from go2rtc", extra={"stream_name": key})
+                logger.debug("Failed to remove stream from go2rtc", extra={"stream_name": key})
 
         async with httpx.AsyncClient(timeout=10) as client:
             await asyncio.gather(*[

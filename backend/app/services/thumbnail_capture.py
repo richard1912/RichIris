@@ -101,10 +101,17 @@ class ThumbnailCapture:
                 async with get_snapshot_semaphore():
                     resp = await self._client.get(snapshot_url)
                 if resp.status_code != 200:
-                    logger.debug("Snapshot request failed", extra={
-                        "camera": camera.name, "status": resp.status_code,
-                    })
+                    fail_count = getattr(self, f'_fail_{camera.id}', 0) + 1
+                    setattr(self, f'_fail_{camera.id}', fail_count)
+                    if fail_count == 1 or fail_count % 60 == 0:
+                        logger.debug("Snapshot request failed", extra={
+                            "camera": camera.name, "status": resp.status_code,
+                            "consecutive_failures": fail_count,
+                        })
                     continue
+                # Reset failure counter on success
+                if getattr(self, f'_fail_{camera.id}', 0) > 0:
+                    setattr(self, f'_fail_{camera.id}', 0)
 
                 data = resp.content
                 if len(data) < 2000:
