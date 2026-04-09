@@ -61,19 +61,26 @@ class UpdateService {
   }
 
   /// Get cached update info from backend (instant, no GitHub API call).
-  Future<UpdateInfo?> getUpdate() async {
+  /// Returns ({UpdateInfo? update, String? lastChecked}).
+  Future<({UpdateInfo? update, String? lastChecked})> getUpdate() async {
     final resp = await _client.dio.get('/api/system/update');
     final data = resp.data as Map<String, dynamic>;
-    if (data['update_available'] != true || data['latest'] == null) return null;
-    return UpdateInfo.fromJson(data, data['last_checked'] as String?);
+    final lastChecked = data['last_checked'] as String?;
+    if (data['update_available'] != true || data['latest'] == null) {
+      return (update: null, lastChecked: lastChecked);
+    }
+    return (update: UpdateInfo.fromJson(data, lastChecked), lastChecked: lastChecked);
   }
 
   /// Force backend to re-check GitHub now.
-  Future<UpdateInfo?> checkNow() async {
+  Future<({UpdateInfo? update, String? lastChecked})> checkNow() async {
     final resp = await _client.dio.post('/api/system/update/check');
     final data = resp.data as Map<String, dynamic>;
-    if (data['update_available'] != true || data['latest'] == null) return null;
-    return UpdateInfo.fromJson(data, data['last_checked'] as String?);
+    final lastChecked = data['last_checked'] as String?;
+    if (data['update_available'] != true || data['latest'] == null) {
+      return (update: null, lastChecked: lastChecked);
+    }
+    return (update: UpdateInfo.fromJson(data, lastChecked), lastChecked: lastChecked);
   }
 
   /// Download the appropriate asset to temp dir. Returns file path.

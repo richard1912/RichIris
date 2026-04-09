@@ -33,11 +33,11 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
 
   Future<void> _loadCached() async {
     try {
-      final update = await widget.updateService.getUpdate();
+      final result = await widget.updateService.getUpdate();
       if (mounted) {
         setState(() {
-          _update = update;
-          _lastChecked = update?.lastChecked;
+          _update = result.update;
+          _lastChecked = result.lastChecked;
         });
       }
     } catch (_) {}
@@ -50,17 +50,21 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
     });
 
     try {
-      final update = await widget.updateService.checkNow();
+      final result = await widget.updateService.checkNow();
       if (!mounted) return;
       setState(() {
-        _update = update;
-        _state = update != null ? _CheckState.updateAvailable : _CheckState.upToDate;
+        _update = result.update;
+        _lastChecked = result.lastChecked;
+        _state = result.update != null ? _CheckState.updateAvailable : _CheckState.upToDate;
       });
     } catch (e) {
       if (mounted) {
+        final msg = e.toString();
         setState(() {
           _state = _CheckState.error;
-          _error = 'Could not check for updates';
+          _error = msg.contains('DioException')
+              ? 'Could not reach the server'
+              : 'Could not check for updates: $msg';
         });
       }
     }

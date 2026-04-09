@@ -136,8 +136,9 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     // In update-only mode, wait for backend to be reachable, then show dialog
     for (var attempt = 0; attempt < 10; attempt++) {
       try {
-        final update = await _updateService!.getUpdate();
-        if (update != null && mounted) {
+        final result = await _updateService!.getUpdate();
+        if (result.update != null && mounted) {
+          final update = result.update!;
           // ignore: use_build_context_synchronously
           showDialog(
             context: context,
@@ -357,8 +358,9 @@ class _MainNavState extends State<_MainNav> {
     Future.delayed(const Duration(seconds: 10), () async {
       if (!mounted) return;
       try {
-        final update = await widget.updateService.getUpdate();
-        if (update == null || !mounted) return;
+        final result = await widget.updateService.getUpdate();
+        if (result.update == null || !mounted) return;
+        final update = result.update!;
         if (await widget.updateService.isVersionSkipped(update.version)) return;
         showDialog(
           // ignore: use_build_context_synchronously

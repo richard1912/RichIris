@@ -47,6 +47,10 @@ HEARTBEAT_INTERVAL = 300   # Log heartbeat every 5 minutes (seconds)
 # Min fraction of a YOLO bbox that must overlap the motion mask to count as "moving".
 # Filters out static objects (e.g. parked cars) that YOLO detects but aren't actually moving.
 MIN_MOTION_OVERLAP = 0.10  # 10% of bbox area must have changed pixels
+# Multi-frame AI confirmation: require N detections in M frames + positional movement
+AI_CONFIRM_REQUIRED = 2   # detections needed within the window
+AI_CONFIRM_WINDOW = 3     # sliding window size (frames)
+AI_MIN_MOVE_PCT = 1.5     # min bbox center movement as % of frame diagonal
 
 
 def _snapshot_url(camera_name: str, host: str, port: int) -> str:
@@ -67,6 +71,13 @@ class MotionDetector:
         self._avg_baseline: dict[int, np.ndarray | None] = {}
         self._baseline_frames: dict[int, int] = {}
         self._client: httpx.AsyncClient | None = None
+        # Multi-frame AI confirmation buffers
+        self._detection_history: dict[tuple[int, str], list[bool]] = {}
+        self._detection_positions: dict[tuple[int, str], list[tuple[float, float] | None]] = {}
+        # Best detection seen in current confirmation window: (label, confidence, intensity, frame)
+        self._pending_detections: dict[tuple[int, str], tuple] = {}
+        # Cached move threshold per camera (pixels), computed from frame dimensions
+        self._move_threshold: dict[int, float] = {}
 
     @staticmethod
     def _parse_motion_scripts(camera) -> list[dict]:
@@ -152,10 +163,11 @@ class MotionDetector:
             except (asyncio.CancelledError, Exception):
                 pass
             del self._tasks[cam_id]
-            # Finalize all active events for this camera
+            # Finalize all active events and clear AI history for this camera
             keys = [k for k in self._active_events if k[0] == cam_id]
             for key in keys:
                 await self._finalize_event(key)
+            self._clear_ai_history(cam_id)
 
         if self._running and camera.motion_sensitivity > 0 and camera.enabled:
             cfg = get_config().go2rtc
@@ -179,6 +191,45 @@ class MotionDetector:
             )
             self._tasks[cam_id] = task
             logger.info("Motion detection restarted", extra={"camera": camera.name})
+
+    def _clear_ai_history(self, cam_id: int) -> None:
+        """Clear all AI confirmation buffers for a camera (e.g. on baseline reset)."""
+        for key in list(self._detection_history):
+            if key[0] == cam_id:
+                del self._detection_history[key]
+        for key in list(self._detection_positions):
+            if key[0] == cam_id:
+                del self._detection_positions[key]
+        for key in list(self._pending_detections):
+            if key[0] == cam_id:
+                del self._pending_detections[key]
+
+    def _record_detection(self, cam_id: int, category: str, detected: bool,
+                          bbox_center: tuple[float, float] | None = None) -> bool:
+        """Record a frame result. Returns True if confirmed (enough frames + movement)."""
+        key = (cam_id, category)
+        history = self._detection_history.setdefault(key, [])
+        history.append(detected)
+        if len(history) > AI_CONFIRM_WINDOW:
+            history.pop(0)
+        positions = self._detection_positions.setdefault(key, [])
+        positions.append(bbox_center)
+        if len(positions) > AI_CONFIRM_WINDOW:
+            positions.pop(0)
+        # Not enough detections yet
+        if sum(history) < AI_CONFIRM_REQUIRED:
+            return False
+        # Check positional movement between detected frames
+        detected_pos = [p for p in positions if p is not None]
+        if len(detected_pos) < 2:
+            return True  # only 1 position so far — trust it (conservative)
+        max_dist = 0.0
+        for i, p1 in enumerate(detected_pos):
+            for p2 in detected_pos[i + 1:]:
+                d = ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
+                if d > max_dist:
+                    max_dist = d
+        return max_dist >= self._move_threshold.get(cam_id, 0)
 
     async def _fetch_frame(self, url: str) -> np.ndarray | None:
         """Fetch a JPEG snapshot from go2rtc and decode it."""
@@ -257,13 +308,20 @@ class MotionDetector:
                 changed_pct = (np.count_nonzero(thresh) / thresh.size) * 100
 
                 if changed_pct > MAX_CHANGE_PCT:
-                    # IR switch / exposure shift — reset baseline
+                    # IR switch / exposure shift — reset baseline + AI history
                     self._avg_baseline[cam_id] = gray.astype(np.float32)
                     self._baseline_frames[cam_id] = 0
+                    self._clear_ai_history(cam_id)
                     await self._check_cooldown(cam_id)
                 elif changed_pct >= threshold_pct:
                     # Motion detected — run YOLO if AI enabled, otherwise fire event
                     if ai_detection:
+                        # Compute move threshold once from frame dimensions
+                        if cam_id not in self._move_threshold:
+                            h, w = frame.shape[:2]
+                            diag = (h ** 2 + w ** 2) ** 0.5
+                            self._move_threshold[cam_id] = diag * AI_MIN_MOVE_PCT / 100
+
                         from app.services.object_detector import build_class_list
                         detector = get_object_detector()
                         classes = build_class_list(ai_detect_persons, ai_detect_vehicles, ai_detect_animals)
@@ -276,21 +334,60 @@ class MotionDetector:
                             box_area = roi.size
                             if box_area > 0 and np.count_nonzero(roi) / box_area >= MIN_MOTION_OVERLAP:
                                 moving.append(d)
-                        if moving:
-                            # Group by category, fire one event per category
-                            by_cat: dict[str, list] = {}
-                            for d in moving:
-                                cat = _label_category(d.label)
-                                by_cat.setdefault(cat, []).append(d)
-                            for cat_detections in by_cat.values():
-                                best = max(cat_detections, key=lambda d: d.confidence)
-                                await self._on_motion(
-                                    cam_id, cam_name, changed_pct, scripts,
-                                    detection_label=best.label,
-                                    detection_confidence=best.confidence,
-                                    frame=frame,
-                                )
-                        else:
+                        # Group moving detections by category
+                        by_cat: dict[str, list] = {}
+                        for d in moving:
+                            cat = _label_category(d.label)
+                            by_cat.setdefault(cat, []).append(d)
+                        # Build set of all enabled AI categories for this camera
+                        enabled_cats = set()
+                        if ai_detect_persons:
+                            enabled_cats.add("person")
+                        if ai_detect_vehicles:
+                            enabled_cats.add("vehicle")
+                        if ai_detect_animals:
+                            enabled_cats.add("animal")
+                        # Record detection result for each enabled category
+                        any_confirmed = False
+                        for cat in enabled_cats:
+                            if cat in by_cat:
+                                best = max(by_cat[cat], key=lambda d: d.confidence)
+                                cx = (best.x1 + best.x2) / 2.0
+                                cy = (best.y1 + best.y2) / 2.0
+                                confirmed = self._record_detection(cam_id, cat, True, (cx, cy))
+                                # Track best pending detection for when confirmation fires
+                                pkey = (cam_id, cat)
+                                prev = self._pending_detections.get(pkey)
+                                if prev is None or best.confidence > prev[1]:
+                                    self._pending_detections[pkey] = (
+                                        best.label, best.confidence, changed_pct, frame.copy(),
+                                    )
+                                if confirmed:
+                                    any_confirmed = True
+                                    pending = self._pending_detections.pop(pkey, None)
+                                    if pending:
+                                        await self._on_motion(
+                                            cam_id, cam_name, pending[2], scripts,
+                                            detection_label=pending[0],
+                                            detection_confidence=pending[1],
+                                            frame=pending[3],
+                                        )
+                                    else:
+                                        await self._on_motion(
+                                            cam_id, cam_name, changed_pct, scripts,
+                                            detection_label=best.label,
+                                            detection_confidence=best.confidence,
+                                            frame=frame,
+                                        )
+                            else:
+                                # Category not detected this frame — record miss
+                                self._record_detection(cam_id, cat, False)
+                                # Clear pending if window is all misses
+                                pkey = (cam_id, cat)
+                                hist = self._detection_history.get(pkey, [])
+                                if hist and not any(hist):
+                                    self._pending_detections.pop(pkey, None)
+                        if not any_confirmed:
                             await self._check_cooldown(cam_id)
                     else:
                         await self._on_motion(cam_id, cam_name, changed_pct, scripts, frame=frame)
