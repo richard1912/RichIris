@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/camera.dart';
+import '../services/api_client.dart';
 import '../services/camera_api.dart';
 import '../utils/detection_colors.dart';
+import '../widgets/rtsp_wizard_dialog.dart';
 
 class _ScriptEntry {
   final TextEditingController onCtrl;
@@ -23,9 +25,10 @@ class _ScriptEntry {
 
 class CameraFormScreen extends StatefulWidget {
   final CameraApi cameraApi;
+  final ApiClient apiClient;
   final Camera? camera;
 
-  const CameraFormScreen({super.key, required this.cameraApi, this.camera});
+  const CameraFormScreen({super.key, required this.cameraApi, required this.apiClient, this.camera});
 
   @override
   State<CameraFormScreen> createState() => _CameraFormScreenState();
@@ -179,6 +182,42 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _openRtspWizard() async {
+    // Try to extract IP from existing RTSP URL for pre-fill
+    String initialIp = '';
+    final existingUrl = _rtspCtrl.text.trim();
+    if (existingUrl.isNotEmpty) {
+      final uri = Uri.tryParse(existingUrl);
+      if (uri != null && uri.host.isNotEmpty) {
+        initialIp = uri.host;
+      }
+    }
+
+    final result = await showDialog<RtspWizardResult>(
+      context: context,
+      builder: (ctx) => RtspWizardDialog(
+        apiClient: widget.apiClient,
+        initialIp: initialIp,
+        initialUsername: _usernameCtrl.text.trim(),
+        initialPassword: _passwordCtrl.text.trim(),
+      ),
+    );
+    if (result == null || !mounted) return;
+
+    setState(() {
+      _rtspCtrl.text = result.mainUrl;
+      if (result.subUrl != null && result.subUrl!.isNotEmpty) {
+        _subStreamCtrl.text = result.subUrl!;
+      }
+      if (result.username.isNotEmpty) {
+        _usernameCtrl.text = result.username;
+      }
+      if (result.password.isNotEmpty) {
+        _passwordCtrl.text = result.password;
+      }
+    });
   }
 
   Future<void> _delete() async {
@@ -397,13 +436,35 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
               ),
               const SizedBox(height: 14),
-              TextFormField(
-                controller: _rtspCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Main-Stream RTSP URL',
-                  hintText: 'rtsp://192.168.1.100/stream1',
-                ),
-                validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _rtspCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Main-Stream RTSP URL',
+                        hintText: 'rtsp://192.168.1.100/stream1',
+                      ),
+                      validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Tooltip(
+                      message: 'Auto-discover RTSP URL',
+                      child: ElevatedButton.icon(
+                        onPressed: _openRtspWizard,
+                        icon: const Icon(Icons.wifi_find, size: 18),
+                        label: const Text('Find'),
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 14),
               TextFormField(

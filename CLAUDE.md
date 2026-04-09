@@ -173,6 +173,7 @@ RichIris/
 - Log entry/exit, parameters, and outcomes for significant operations
 
 ## API Endpoints
+- `POST /api/cameras/discover` - Probe common RTSP URL patterns on camera IP `{ip, username?, password?, port?}`, returns list of working streams with brand/codec/resolution
 - `GET /api/backup/preview` - Size estimates per backup component
 - `POST /api/backup/create` - Start backup `{components: [...], target_path}`, returns backup_id
 - `GET /api/backup/{id}/progress` - Poll backup progress (files/bytes done, status, current_file)

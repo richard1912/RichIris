@@ -581,14 +581,14 @@ class _MainNavState extends State<_MainNav> {
             },
             onAddCamera: () async {
               await Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => CameraFormScreen(cameraApi: widget.cameraApi),
+                builder: (_) => CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient),
               ));
               await widget.onRefreshCameras();
             },
             onEditCamera: (cam) async {
               await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) =>
-                    CameraFormScreen(cameraApi: widget.cameraApi, camera: cam),
+                    CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam),
               ));
               await widget.onRefreshCameras();
             },
@@ -625,7 +625,7 @@ class _MainNavState extends State<_MainNav> {
             onEditCamera: (cam) async {
               await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) =>
-                    CameraFormScreen(cameraApi: widget.cameraApi, camera: cam),
+                    CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam),
               ));
               await widget.onRefreshCameras();
             },

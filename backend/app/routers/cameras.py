@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,162 @@ from app.services.stream_manager import get_stream_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
+
+
+# --- RTSP URL patterns for popular camera brands ---
+# Each entry: (brand, main_path, sub_path_or_None)
+_RTSP_PATTERNS: list[tuple[str, str, str | None]] = [
+    # ONVIF Profile S (very common)
+    ("ONVIF", "/stream1", "/stream2"),
+    ("ONVIF", "/MediaInput/stream_1", "/MediaInput/stream_2"),
+    ("ONVIF", "/Streaming/Channels/101", "/Streaming/Channels/102"),
+    # Hikvision
+    ("Hikvision", "/Streaming/Channels/101", "/Streaming/Channels/102"),
+    ("Hikvision", "/ISAPI/Streaming/Channels/101", "/ISAPI/Streaming/Channels/102"),
+    ("Hikvision", "/h264/ch1/main/av_stream", "/h264/ch1/sub/av_stream"),
+    # Dahua / Amcrest
+    ("Dahua", "/cam/realmonitor?channel=1&subtype=0", "/cam/realmonitor?channel=1&subtype=1"),
+    # Reolink
+    ("Reolink", "/h264Preview_01_main", "/h264Preview_01_sub"),
+    ("Reolink", "/Preview_01_main", "/Preview_01_sub"),
+    # Tapo / TP-Link
+    ("Tapo", "/stream1", "/stream2"),
+    # Uniview
+    ("Uniview", "/unicast/c1/s0/live", "/unicast/c1/s1/live"),
+    # Axis
+    ("Axis", "/axis-media/media.amp", None),
+    # Hanwha (Samsung)
+    ("Hanwha", "/profile2/media.smp", "/profile3/media.smp"),
+    # Generic common paths
+    ("Generic", "/live/ch00_0", "/live/ch00_1"),
+    ("Generic", "/ch0_0.h264", "/ch0_1.h264"),
+    ("Generic", "/live0", "/live1"),
+    ("Generic", "/video1", "/video2"),
+    ("Generic", "/1", "/2"),
+    ("Generic", "/1/stream1", "/1/stream2"),
+    # HTMS
+    ("HTMS", "/Preview_01_main", "/Preview_01_sub"),
+]
+
+
+class RtspDiscoverRequest(BaseModel):
+    ip: str
+    username: str = ""
+    password: str = ""
+    port: int = 554
+
+
+class RtspDiscoverResult(BaseModel):
+    brand: str
+    main_url: str
+    sub_url: str | None = None
+    codec: str | None = None
+    resolution: str | None = None
+
+
+async def _probe_rtsp_url(url: str, timeout: float = 5.0) -> dict | None:
+    """Try to connect to an RTSP URL via ffprobe. Returns stream info or None."""
+    config = get_config()
+    cmd = [
+        config.ffmpeg.ffprobe_path,
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-rtsp_transport", "tcp",
+        "-stimeout", str(int(timeout * 1_000_000)),  # microseconds
+        url,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 3)
+        if proc.returncode != 0:
+            return None
+        data = json.loads(stdout.decode())
+        streams = data.get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                return {
+                    "codec": s.get("codec_name", "").lower(),
+                    "width": s.get("width"),
+                    "height": s.get("height"),
+                }
+        return None
+    except Exception:
+        return None
+
+
+@router.post("/discover", response_model=list[RtspDiscoverResult])
+async def discover_rtsp(req: RtspDiscoverRequest):
+    """Probe common RTSP URL patterns on a camera IP to find working streams.
+
+    Tests multiple brand-specific URL patterns concurrently and returns
+    all working main+sub stream combinations.
+    """
+    ip = req.ip.strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="IP address required")
+
+    creds = ""
+    if req.username:
+        creds = f"{req.username}:{req.password}@" if req.password else f"{req.username}@"
+
+    logger.info("RTSP discovery starting", extra={"ip": ip, "patterns": len(_RTSP_PATTERNS)})
+
+    # Build all URLs to probe
+    probe_tasks: list[tuple[str, str, str, str | None]] = []  # (brand, main_url, main_path, sub_path)
+    for brand, main_path, sub_path in _RTSP_PATTERNS:
+        main_url = f"rtsp://{creds}{ip}:{req.port}{main_path}"
+        probe_tasks.append((brand, main_url, main_path, sub_path))
+
+    # Probe all main URLs concurrently (with concurrency limit to avoid overwhelming)
+    sem = asyncio.Semaphore(8)
+
+    async def _limited_probe(url: str) -> dict | None:
+        async with sem:
+            return await _probe_rtsp_url(url, timeout=5.0)
+
+    main_results = await asyncio.gather(
+        *[_limited_probe(t[1]) for t in probe_tasks]
+    )
+
+    # Collect working results
+    results: list[RtspDiscoverResult] = []
+    seen_main_paths: set[str] = set()
+
+    for i, info in enumerate(main_results):
+        if info is None:
+            continue
+        brand, main_url, main_path, sub_path = probe_tasks[i]
+        # Deduplicate by main path (same URL might match multiple brands)
+        if main_path in seen_main_paths:
+            continue
+        seen_main_paths.add(main_path)
+
+        sub_url = None
+        if sub_path:
+            sub_url = f"rtsp://{creds}{ip}:{req.port}{sub_path}"
+
+        resolution = None
+        if info.get("width") and info.get("height"):
+            resolution = f"{info['width']}x{info['height']}"
+
+        results.append(RtspDiscoverResult(
+            brand=brand,
+            main_url=main_url,
+            sub_url=sub_url,
+            codec=info.get("codec"),
+            resolution=resolution,
+        ))
+
+    logger.info("RTSP discovery complete", extra={
+        "ip": ip, "found": len(results),
+        "brands": [r.brand for r in results],
+    })
+    return results
 
 
 @router.get("", response_model=list[CameraResponse])
