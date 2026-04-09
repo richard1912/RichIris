@@ -79,6 +79,31 @@ async def seed_defaults(session: AsyncSession, data_dir: str = "") -> None:
     inserted = 0
     for full_key, (value, category) in defaults.items():
         if full_key not in existing_keys:
+            # Auto-detect system timezone on first install
+            if full_key == "logging.timezone":
+                try:
+                    import tzlocal
+                    value = str(tzlocal.get_localzone())
+                    logger.info("Auto-detected timezone", extra={"timezone": value})
+                except Exception:
+                    try:
+                        from datetime import datetime, timezone
+                        import time
+                        utc_offset = time.timezone if time.daylight == 0 else time.altzone
+                        hours = -utc_offset // 3600
+                        # Map common UTC offsets to IANA timezone names
+                        offset_map = {
+                            10: "Australia/Sydney", 9.5: "Australia/Adelaide",
+                            8: "Australia/Perth", 9: "Asia/Tokyo",
+                            5.5: "Asia/Kolkata", 0: "UTC",
+                            -5: "America/New_York", -6: "America/Chicago",
+                            -7: "America/Denver", -8: "America/Los_Angeles",
+                            1: "Europe/London", 2: "Europe/Berlin",
+                        }
+                        value = offset_map.get(hours, f"Etc/GMT{-hours:+.0f}" if hours == int(hours) else "UTC")
+                        logger.info("Auto-detected timezone from UTC offset", extra={"timezone": value, "offset_hours": hours})
+                    except Exception:
+                        pass  # Fall back to UTC default
             session.add(Setting(key=full_key, value=value, category=category))
             inserted += 1
 

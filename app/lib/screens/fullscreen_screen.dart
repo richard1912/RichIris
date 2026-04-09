@@ -18,6 +18,7 @@ import '../utils/format_utils.dart';
 import '../models/playback_ref.dart';
 import '../widgets/live_player.dart';
 import '../widgets/quality_selector.dart';
+import '../widgets/zoomable_video.dart';
 import '../widgets/timeline/timeline_widget.dart';
 
 class FullscreenScreen extends StatefulWidget {
@@ -669,13 +670,15 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         );
       }
       final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param, cameraName: widget.camera.name);
-      return LivePlayer(
-        url: url,
-        player: widget.livePlayer,
-        controller: widget.liveController,
-        onPlayerCreated: (p) => _livePlayer = p,
-        rotation: rot,
-        fit: BoxFit.contain,
+      return ZoomableVideo(
+        child: LivePlayer(
+          url: url,
+          player: widget.livePlayer,
+          controller: widget.liveController,
+          onPlayerCreated: (p) => _livePlayer = p,
+          rotation: rot,
+          fit: BoxFit.contain,
+        ),
       );
     }
 
@@ -702,7 +705,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           ],
         );
       }
-      return video;
+      return ZoomableVideo(child: video);
     }
 
     return const SizedBox.shrink();

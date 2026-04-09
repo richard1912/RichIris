@@ -27,8 +27,10 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\app\{#MyAppGUIName}
 SetupIconFile=setup_icon.ico
+SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -47,6 +49,10 @@ Source: "download_deps.ps1"; DestDir: "{app}"; Flags: ignoreversion deleteafteri
 ; NSSM for service management (tiny, needed during install)
 Source: "..\dist\richiris\nssm.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; Visual C++ Runtime DLLs (required on clean Windows installs)
+Source: "..\installer\vcredist\*.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\installer\vcredist\*.dll"; DestDir: "{app}\app"; Flags: ignoreversion
+
 [Icons]
 Name: "{group}\RichIris"; Filename: "{app}\app\{#MyAppGUIName}"
 Name: "{group}\Uninstall RichIris"; Filename: "{uninstallexe}"
@@ -56,6 +62,9 @@ Name: "{commondesktop}\RichIris"; Filename: "{app}\app\{#MyAppGUIName}"; Tasks: 
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Run]
+; Remove any existing service first (handles upgrade from different install path)
+Filename: "{app}\nssm.exe"; Parameters: "stop RichIris"; Flags: runhidden waituntilterminated
+Filename: "{app}\nssm.exe"; Parameters: "remove RichIris confirm"; Flags: runhidden waituntilterminated
 ; Install and start the Windows service
 Filename: "{app}\nssm.exe"; Parameters: "install RichIris ""{app}\{#MyAppExeName}"""; StatusMsg: "Installing RichIris service..."; Flags: runhidden waituntilterminated
 Filename: "{app}\nssm.exe"; Parameters: "set RichIris AppDirectory ""{app}"""; Flags: runhidden waituntilterminated
@@ -235,6 +244,59 @@ begin
             'You can re-run the installer to retry, or download them manually into:' + #13#10 +
             AppDir + '\dependencies\', mbError, MB_OK);
         end;
+      end;
+    end;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  AppDir: String;
+  DataDir: String;
+  Lines: TArrayOfString;
+  I: Integer;
+  Line: String;
+  Value: String;
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    AppDir := ExpandConstant('{app}');
+
+    // Read data_dir from bootstrap.yaml before deleting install dir
+    DataDir := '';
+    if FileExists(AppDir + '\bootstrap.yaml') then
+    begin
+      if LoadStringsFromFile(AppDir + '\bootstrap.yaml', Lines) then
+      begin
+        for I := 0 to GetArrayLength(Lines) - 1 do
+        begin
+          Line := Trim(Lines[I]);
+          if Pos('data_dir:', Line) = 1 then
+          begin
+            Value := Trim(Copy(Line, Length('data_dir:') + 1, Length(Line)));
+            if (Length(Value) >= 2) and (Value[1] = '"') then
+              Value := Copy(Value, 2, Length(Value) - 2);
+            StringChangeEx(Value, '/', '\', True);
+            DataDir := Value;
+            Break;
+          end;
+        end;
+      end;
+    end;
+
+    // Delete install directory (contains app files, dependencies, configs)
+    if DirExists(AppDir) then
+      DelTree(AppDir, True, True, True);
+
+    // Prompt to delete data directory (recordings, database, logs)
+    if (DataDir <> '') and DirExists(DataDir) then
+    begin
+      if MsgBox('Do you want to delete all RichIris data files?' + #13#10 + #13#10 +
+        'Location: ' + DataDir + #13#10 + #13#10 +
+        'WARNING: This will permanently delete all recordings, database, thumbnails, and logs. This cannot be undone.',
+        mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      begin
+        DelTree(DataDir, True, True, True);
       end;
     end;
   end;

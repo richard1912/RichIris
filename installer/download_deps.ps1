@@ -7,8 +7,20 @@ param(
     [string]$InstallDir
 )
 
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"  # Speeds up Invoke-WebRequest significantly
+$ErrorActionPreference = "Continue"
+
+# Enable TLS 1.2 (required for GitHub HTTPS on older Windows/PowerShell)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Log file for debugging
+$LogFile = Join-Path $env:TEMP "richiris_deps.log"
+"" | Out-File $LogFile -Encoding utf8
+function Log { param([string]$msg) $ts = Get-Date -Format "HH:mm:ss"; "$ts $msg" | Out-File $LogFile -Append -Encoding utf8; Write-Host $msg }
+
+Log "Starting dependency download"
+Log "InstallDir: $InstallDir"
+Log "PowerShell: $($PSVersionTable.PSVersion)"
+Log "TLS: $([Net.ServicePointManager]::SecurityProtocol)"
 
 # Dependency versions
 $FFMPEG_VERSION = "7.1.1"
@@ -21,6 +33,24 @@ $YOLO_URL   = "https://github.com/richard1912/RichIris/releases/download/models/
 
 $DepsDir = Join-Path $InstallDir "dependencies"
 $TempDir = Join-Path $env:TEMP "richiris_setup"
+
+# Synchronous download with WebClient (reliable, follows redirects)
+function Download-File {
+    param([string]$Url, [string]$OutFile, [string]$Label)
+    Log "Downloading $Label from $Url"
+    $client = New-Object System.Net.WebClient
+    try {
+        $client.DownloadFile($Url, $OutFile)
+        $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+        Log "  Downloaded: $sizeMB MB"
+    } catch {
+        Log "  ERROR: $($_.Exception.Message)"
+        if ($_.Exception.InnerException) { Log "  Inner: $($_.Exception.InnerException.Message)" }
+        throw
+    } finally {
+        $client.Dispose()
+    }
+}
 
 # Clean temp
 if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force }
@@ -39,7 +69,8 @@ if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobePath)) {
     Write-Host "Downloading ffmpeg $FFMPEG_VERSION..."
     try {
         $zipPath = Join-Path $TempDir "ffmpeg.zip"
-        Invoke-WebRequest -Uri $FFMPEG_URL -OutFile $zipPath -UseBasicParsing
+        Download-File -Url $FFMPEG_URL -OutFile $zipPath -Label "ffmpeg"
+        Write-Host "  Extracting..."
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
         foreach ($entry in $zip.Entries) {
@@ -49,13 +80,13 @@ if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobePath)) {
             }
         }
         $zip.Dispose()
-        Write-Host "  OK"
+        Log "ffmpeg: OK"
     } catch {
-        Write-Host "  FAILED: $_"
+        Log "ffmpeg: FAILED - $_"
         $failed += "ffmpeg"
     }
 } else {
-    Write-Host "ffmpeg - already present, skipping"
+    Log "ffmpeg: already present, skipping"
 }
 
 # --- go2rtc ---
@@ -64,7 +95,8 @@ if (-not (Test-Path $go2rtcPath)) {
     Write-Host "Downloading go2rtc $GO2RTC_VERSION..."
     try {
         $zipPath = Join-Path $TempDir "go2rtc.zip"
-        Invoke-WebRequest -Uri $GO2RTC_URL -OutFile $zipPath -UseBasicParsing
+        Download-File -Url $GO2RTC_URL -OutFile $zipPath -Label "go2rtc"
+        Write-Host "  Extracting..."
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
         foreach ($entry in $zip.Entries) {
@@ -73,39 +105,75 @@ if (-not (Test-Path $go2rtcPath)) {
             }
         }
         $zip.Dispose()
-        Write-Host "  OK"
+        Log "go2rtc: OK"
     } catch {
-        Write-Host "  FAILED: $_"
+        Log "go2rtc: FAILED - $_"
         $failed += "go2rtc"
     }
 } else {
-    Write-Host "go2rtc - already present, skipping"
+    Log "go2rtc: already present, skipping"
 }
 
 # --- YOLO ONNX model ---
 $yoloPath = Join-Path $DepsDir "models\yolo11x.onnx"
 if (-not (Test-Path $yoloPath)) {
-    Write-Host "Downloading YOLO model (218 MB, this may take a minute)..."
+    Write-Host "Downloading YOLO model (218 MB, please wait)..."
     try {
-        Invoke-WebRequest -Uri $YOLO_URL -OutFile $yoloPath -UseBasicParsing
-        Write-Host "  OK"
+        Download-File -Url $YOLO_URL -OutFile $yoloPath -Label "YOLO model"
+        Log "YOLO: OK"
     } catch {
-        Write-Host "  FAILED: $_ (AI detection will not be available)"
+        Log "YOLO: FAILED - $_ (AI detection will not be available)"
         $failed += "yolo"
     }
 } else {
-    Write-Host "YOLO model - already present, skipping"
+    Log "YOLO: already present, skipping"
 }
 
-# Cleanup
+# Cleanup temp
 if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
 
+# Verify all files exist and have reasonable sizes
+Log ""
+Log "Verifying downloads..."
+$checks = @(
+    @{ Path = $ffmpegPath;  Name = "ffmpeg.exe";  MinMB = 50 },
+    @{ Path = $ffprobePath; Name = "ffprobe.exe"; MinMB = 50 },
+    @{ Path = $go2rtcPath;  Name = "go2rtc.exe";  MinMB = 5 }
+)
+
+foreach ($check in $checks) {
+    if (Test-Path $check.Path) {
+        $sizeMB = [math]::Round((Get-Item $check.Path).Length / 1MB, 1)
+        if ($sizeMB -lt $check.MinMB) {
+            Log "  WARN: $($check.Name) is only $sizeMB MB (expected >$($check.MinMB) MB)"
+            $failed += $check.Name
+        } else {
+            Log "  OK: $($check.Name) ($sizeMB MB)"
+        }
+    } else {
+        Log "  MISSING: $($check.Name)"
+        $failed += $check.Name
+    }
+}
+
+# YOLO is optional (AI detection only)
+if (Test-Path $yoloPath) {
+    $sizeMB = [math]::Round((Get-Item $yoloPath).Length / 1MB, 1)
+    Log "  OK: yolo11x.onnx ($sizeMB MB)"
+} else {
+    Log "  MISSING: yolo11x.onnx (AI detection disabled)"
+}
+
 if ($failed.Count -gt 0) {
-    Write-Host ""
-    Write-Host "WARNING: Failed to download: $($failed -join ', ')"
-    Write-Host "You can re-run this script or download them manually."
+    Log ""
+    Log "WARNING: Issues with: $($failed -join ', ')"
+    Log "Closing in 10 seconds..."
+    Start-Sleep -Seconds 10
     exit 1
 }
 
-Write-Host "All dependencies downloaded successfully."
+Log ""
+Log "All dependencies downloaded and verified."
+Log "Closing in 10 seconds..."
+Start-Sleep -Seconds 10
 exit 0
