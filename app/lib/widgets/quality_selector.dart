@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import '../config/constants.dart';
 
@@ -45,8 +43,6 @@ class QualitySelector extends StatelessWidget {
     required this.onChanged,
     this.isLive = true,
   });
-
-  static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
   List<Quality> get _availableQualities => Quality.values;
 

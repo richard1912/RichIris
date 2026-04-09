@@ -71,6 +71,10 @@ Filename: "{app}\app\{#MyAppGUIName}"; Description: "Launch RichIris"; Flags: po
 ; Stop and remove the service
 Filename: "{app}\nssm.exe"; Parameters: "stop RichIris"; Flags: runhidden waituntilterminated
 Filename: "{app}\nssm.exe"; Parameters: "remove RichIris confirm"; Flags: runhidden waituntilterminated
+; Remove firewall rules
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""RichIris Backend"""; Flags: runhidden waituntilterminated
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""RichIris go2rtc RTSP"""; Flags: runhidden waituntilterminated
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""RichIris go2rtc API"""; Flags: runhidden waituntilterminated
 
 [Code]
 var
@@ -190,6 +194,20 @@ begin
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(AppDir + '\nssm.exe',
       'set RichIris AppStderr "' + DataDir + '\logs\service-stderr.log"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Add firewall rules for backend API and go2rtc RTSP
+    Exec('netsh', 'advfirewall firewall delete rule name="RichIris Backend"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('netsh', 'advfirewall firewall add rule name="RichIris Backend" dir=in action=allow protocol=tcp localport=8700 profile=private,public',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('netsh', 'advfirewall firewall delete rule name="RichIris go2rtc RTSP"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('netsh', 'advfirewall firewall add rule name="RichIris go2rtc RTSP" dir=in action=allow protocol=tcp localport=8554 profile=private,public',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('netsh', 'advfirewall firewall delete rule name="RichIris go2rtc API"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('netsh', 'advfirewall firewall add rule name="RichIris go2rtc API" dir=in action=allow protocol=tcp localport=1984 profile=private,public',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     // Download dependencies if not already present

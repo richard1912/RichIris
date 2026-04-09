@@ -65,8 +65,14 @@ if (-not (Test-Path $go2rtcPath)) {
     try {
         $zipPath = Join-Path $TempDir "go2rtc.zip"
         Invoke-WebRequest -Uri $GO2RTC_URL -OutFile $zipPath -UseBasicParsing
-        Expand-Archive -Path $zipPath -DestinationPath (Join-Path $TempDir "go2rtc_tmp") -Force
-        Copy-Item (Join-Path $TempDir "go2rtc_tmp\go2rtc.exe") $go2rtcPath -Force
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        foreach ($entry in $zip.Entries) {
+            if ($entry.Name -eq "go2rtc.exe") {
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $go2rtcPath, $true)
+            }
+        }
+        $zip.Dispose()
         Write-Host "  OK"
     } catch {
         Write-Host "  FAILED: $_"

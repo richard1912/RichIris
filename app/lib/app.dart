@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -336,6 +337,7 @@ class _MainNavState extends State<_MainNav> {
   // Shared playback state for seamless grid <-> fullscreen transitions
   final PlaybackRef _gridRef = PlaybackRef();
   final PlaybackRef _fullscreenRef = PlaybackRef();
+  DateTime? _lastBackPress;
   String? _fullscreenInitialTime;
   Player? _handoffPlayer;
   VideoController? _handoffController;
@@ -420,19 +422,18 @@ class _MainNavState extends State<_MainNav> {
     if (_livePlayers.containsKey(cameraId)) return;
     final player = Player(
       configuration: PlayerConfiguration(
-        vo: 'gpu',
         logLevel: MPVLogLevel.warn,
       ),
     );
     final mpv = player.platform as NativePlayer;
-    mpv.setProperty('profile', 'low-latency');
-    mpv.setProperty('cache', 'no');
+    mpv.setProperty('cache', 'yes');
     mpv.setProperty('cache-pause', 'no');
-    mpv.setProperty('untimed', 'yes');
-    mpv.setProperty('demuxer-max-bytes', '524288');
-    mpv.setProperty('demuxer-readahead-secs', '0');
-    mpv.setProperty('demuxer-lavf-o', 'timeout=15000000');
+    mpv.setProperty('cache-secs', '5');
+    mpv.setProperty('demuxer-max-bytes', '16777216');
+    mpv.setProperty('demuxer-readahead-secs', '5');
+    mpv.setProperty('rtsp-transport', 'tcp');
     mpv.setProperty('hwdec', 'auto');
+    mpv.setProperty('network-timeout', '30');
     player.setVolume(0);
     _livePlayers[cameraId] = player;
     _liveControllers[cameraId] = VideoController(player);
@@ -490,13 +491,26 @@ class _MainNavState extends State<_MainNav> {
 
     // Stack keeps HomeScreen alive (Offstage) so grid feeds don't restart
     return PopScope(
-      canPop: _selectedCameraId == null && fullscreenCam == null,
+      canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) {
-          if (_fullscreenCameraId != null) {
-            _exitFullscreen();
-          } else if (_selectedCameraId != null) {
-            setState(() => _selectedCameraId = null);
+        if (didPop) return;
+        if (_fullscreenCameraId != null) {
+          _exitFullscreen();
+        } else if (_selectedCameraId != null) {
+          setState(() => _selectedCameraId = null);
+        } else if (Platform.isAndroid) {
+          final now = DateTime.now();
+          if (_lastBackPress != null &&
+              now.difference(_lastBackPress!) < const Duration(seconds: 2)) {
+            SystemNavigator.pop();
+          } else {
+            _lastBackPress = now;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Press back again to exit'),
+                duration: Duration(seconds: 2),
+              ),
+            );
           }
         }
       },
