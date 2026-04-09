@@ -20,14 +20,14 @@ class CameraCreate(BaseModel):
     sub_stream_url: str | None = None
     enabled: bool = True
     rotation: int = 0
-    motion_sensitivity: int = 0
+    motion_sensitivity: int = 100
     motion_script: str | None = None
     motion_script_off: str | None = None
     motion_scripts: list[MotionScriptConfig] | None = None
-    ai_detection: bool = False
+    ai_detection: bool = True
     ai_detect_persons: bool = True
-    ai_detect_vehicles: bool = False
-    ai_detect_animals: bool = False
+    ai_detect_vehicles: bool = True
+    ai_detect_animals: bool = True
     ai_confidence_threshold: int = 50
 
 

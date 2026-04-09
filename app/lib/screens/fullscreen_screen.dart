@@ -151,6 +151,11 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _seekSub?.cancel();
     _pbPositionSub?.cancel();
     _completedSub?.cancel();
+    _speedDurSub?.cancel();
+    for (final sub in _inlineSubs) {
+      sub.cancel();
+    }
+    _inlineSubs.clear();
     if (!_adoptedPlayer) {
       _pbPlayer?.dispose();
     }
@@ -166,6 +171,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
 
   StreamSubscription? _seekSub;
   StreamSubscription? _completedSub;
+  StreamSubscription? _speedDurSub; // speed re-apply after segment transition
+  final List<StreamSubscription> _inlineSubs = []; // reverse/speed duration listeners
 
   bool _pbVideoReady = false;
   StreamSubscription? _pbPositionSub;
@@ -192,12 +199,13 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _completedSub?.cancel();
     _completedSub = _pbPlayer!.stream.completed.listen((completed) {
       if (completed && mounted && _speedTimer == null && _hasMore && _windowEnd != null) {
-        _startPlayback(_windowEnd!);
+        final savedSpeed = _speed;
+        _startPlayback(_windowEnd!, resumeSpeed: savedSpeed);
       }
     });
   }
 
-  Future<void> _startPlayback(String start) async {
+  Future<void> _startPlayback(String start, {int resumeSpeed = 1}) async {
     // Release adopted player if any — we're creating our own session
     if (_adoptedPlayer) {
       _adoptedPlayer = false;
@@ -210,7 +218,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       _playbackStartTime = start;
     });
     _clearSpeedTimer();
-    _speed = 1;
+    _speed = resumeSpeed;
     _seekSub?.cancel();
 
     try {
@@ -235,6 +243,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         });
       }
 
+      final actualStartMs = DateTime.parse(session.segmentStart).millisecondsSinceEpoch;
       setState(() {
         _playbackUrl = fullUrl;
         _windowEnd = session.segmentEnd;
@@ -244,10 +253,21 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           widget.playbackRef.isLive = false;
           widget.onLiveStateChanged(false);
         }
-        _playbackStartTime = start;
-        _virtualTimeMs = DateTime.parse(start).millisecondsSinceEpoch;
+        _playbackStartTime = session.segmentStart;
+        _virtualTimeMs = actualStartMs + (session.seekSeconds * 1000).round();
         _playbackLoading = false;
       });
+
+      // Re-apply speed after segment transition
+      if (resumeSpeed != 1) {
+        _speedDurSub?.cancel();
+        _speedDurSub = _pbPlayer!.stream.duration.listen((dur) {
+          if (dur > Duration.zero && mounted) {
+            _applySpeedToPlayer(resumeSpeed);
+            _speedDurSub?.cancel();
+          }
+        });
+      }
     } catch (e) {
       setState(() {
         _playbackError = e.toString();
@@ -286,8 +306,6 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
 
     // If in live mode, start playback first
     if (_isLive || player == null) {
-      final startMs = DateTime.now().millisecondsSinceEpoch + _tzOffsetMs - 30 * 60 * 1000;
-      final startStr = formatLocalISOFromMs(startMs);
       final gen = _generation;
       setState(() {
         _playbackLoading = true;
@@ -295,40 +313,173 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         _paused = false;
       });
 
+      if (newSpeed < 0) {
+        // Reverse from live: need the full current segment (no ffmpeg seek)
+        () async {
+          try {
+            // Step 1: find which segment contains "now"
+            final nowMs = DateTime.now().millisecondsSinceEpoch + _tzOffsetMs;
+            final nowStr = formatLocalISOFromMs(nowMs);
+
+            final findSession = await widget.recordingApi
+                .startPlayback(widget.camera.id, nowStr, widget.quality.param,
+                    direction: 'backward');
+            if (_generation != gen || !mounted) return;
+
+            // Step 2: reload from segment start for full file
+            final session = await widget.recordingApi
+                .startPlayback(widget.camera.id, findSession.segmentStart, widget.quality.param);
+            if (_generation != gen || !mounted) return;
+
+            final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
+            final actualStartMs = DateTime.parse(session.segmentStart).millisecondsSinceEpoch;
+
+            _ensurePlayer();
+            _pbVideoReady = false;
+            _pbPlayer!.open(Media(fullUrl));
+
+            // Wait for duration, seek to end, then start reverse
+            _speedDurSub?.cancel();
+            bool gotRealDur = false;
+            _speedDurSub = _pbPlayer!.stream.duration.listen((dur) {
+              if (_generation != gen || dur == Duration.zero || !mounted) return;
+              if (dur.inMilliseconds <= 1500 && !gotRealDur) {
+                return;
+              }
+              gotRealDur = true;
+              final seekTarget = dur > const Duration(seconds: 2)
+                  ? dur - const Duration(seconds: 1)
+                  : dur;
+              _pbPlayer!.seek(seekTarget).then((_) {
+                if (_generation != gen || !mounted) return;
+                _pbPlayer?.pause();
+                _virtualTimeMs = actualStartMs + seekTarget.inMilliseconds;
+                setState(() {
+                  _playbackUrl = fullUrl;
+                  _windowEnd = session.segmentEnd;
+                  _hasMore = session.hasMore;
+                  _isLive = false;
+                  _playbackStartTime = session.segmentStart;
+                  _playbackLoading = false;
+                });
+                _startReverseInterval(newSpeed);
+              });
+              _speedDurSub?.cancel();
+            });
+          } catch (e) {
+            if (_generation != gen || !mounted) return;
+            setState(() {
+              _playbackError = e.toString();
+              _playbackLoading = false;
+            });
+          }
+        }();
+      } else {
+        // Forward speed from live
+        final startMs = DateTime.now().millisecondsSinceEpoch + _tzOffsetMs - 30 * 60 * 1000;
+        final startStr = formatLocalISOFromMs(startMs);
+
+        widget.recordingApi
+            .startPlayback(widget.camera.id, startStr, widget.quality.param)
+            .then((session) {
+          if (_generation != gen || !mounted) return;
+          final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
+
+          _ensurePlayer();
+          _pbVideoReady = false;
+          _pbPlayer!.open(Media(fullUrl));
+
+          if (session.seekSeconds > 1.0) {
+            _seekSub?.cancel();
+            _seekSub = _pbPlayer!.stream.duration.listen((dur) {
+              if (dur > Duration.zero) {
+                _pbPlayer!.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
+                _seekSub?.cancel();
+              }
+            });
+          }
+
+          final actualStartMs = DateTime.parse(session.segmentStart).millisecondsSinceEpoch;
+          setState(() {
+            _playbackUrl = fullUrl;
+            _windowEnd = session.segmentEnd;
+            _hasMore = session.hasMore;
+            _isLive = false;
+            _playbackStartTime = session.segmentStart;
+            _virtualTimeMs = actualStartMs + (session.seekSeconds * 1000).round();
+            _playbackLoading = false;
+          });
+
+          // Wait for player to be ready, then apply speed
+          _speedDurSub?.cancel();
+          _speedDurSub = _pbPlayer!.stream.duration.listen((duration) {
+            if (_generation != gen || duration == Duration.zero || !mounted) return;
+            _applySpeedToPlayer(newSpeed);
+            _speedDurSub?.cancel();
+          });
+        }).catchError((e) {
+          if (_generation != gen || !mounted) return;
+          setState(() {
+            _playbackError = e.toString();
+            _playbackLoading = false;
+          });
+        });
+      }
+      return;
+    }
+
+    // Sync virtual time
+    if (_playbackStartTime != null) {
+      final startMs = DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch;
+      _virtualTimeMs = startMs + player.state.position.inMilliseconds;
+    }
+
+    if (newSpeed < 0) {
+      // Switching to reverse during playback — reload current segment from its start
+      // so we have the full file to step backward through
+      final gen = _generation;
+      final segStart = _playbackStartTime;
+      if (segStart == null) {
+        return;
+      }
+      setState(() => _playbackLoading = true);
+
       widget.recordingApi
-          .startPlayback(widget.camera.id, startStr, widget.quality.param)
+          .startPlayback(widget.camera.id, segStart, widget.quality.param)
           .then((session) {
         if (_generation != gen || !mounted) return;
         final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
+        final actualStartMs = DateTime.parse(session.segmentStart).millisecondsSinceEpoch;
 
         _ensurePlayer();
         _pbVideoReady = false;
         _pbPlayer!.open(Media(fullUrl));
 
-        if (session.seekSeconds > 1.0) {
-          _seekSub?.cancel();
-          _seekSub = _pbPlayer!.stream.duration.listen((dur) {
-            if (dur > Duration.zero) {
-              _pbPlayer!.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
-              _seekSub?.cancel();
-            }
+        // Seek to where we were (relative to segment start)
+        final seekMs = _virtualTimeMs - actualStartMs;
+        _speedDurSub?.cancel();
+        bool gotRealDur2 = false;
+        _speedDurSub = _pbPlayer!.stream.duration.listen((dur) {
+          if (_generation != gen || dur == Duration.zero || !mounted) return;
+          if (dur.inMilliseconds <= 1500 && !gotRealDur2) {
+            return;
+          }
+          gotRealDur2 = true;
+          final seekTarget = seekMs.clamp(0, dur.inMilliseconds - 1000);
+          _pbPlayer!.seek(Duration(milliseconds: seekTarget)).then((_) {
+            if (_generation != gen || !mounted) return;
+            _pbPlayer?.pause();
+            _virtualTimeMs = actualStartMs + seekTarget;
+            setState(() {
+              _playbackUrl = fullUrl;
+              _windowEnd = session.segmentEnd;
+              _hasMore = session.hasMore;
+              _playbackStartTime = session.segmentStart;
+              _playbackLoading = false;
+            });
+            _startReverseInterval(newSpeed);
           });
-        }
-
-        setState(() {
-          _playbackUrl = fullUrl;
-          _windowEnd = session.segmentEnd;
-          _hasMore = session.hasMore;
-          _isLive = false;
-          _playbackStartTime = startStr;
-          _virtualTimeMs = startMs;
-          _playbackLoading = false;
-        });
-
-        // Wait for player to be ready, then apply speed
-        _pbPlayer!.stream.duration.listen((duration) {
-          if (_generation != gen || duration == Duration.zero) return;
-          _applySpeedToPlayer(newSpeed);
+          _speedDurSub?.cancel();
         });
       }).catchError((e) {
         if (_generation != gen || !mounted) return;
@@ -338,12 +489,6 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         });
       });
       return;
-    }
-
-    // Sync virtual time
-    if (_playbackStartTime != null) {
-      final startMs = DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch;
-      _virtualTimeMs = startMs + player.state.position.inMilliseconds;
     }
 
     _applySpeedToPlayer(newSpeed);
@@ -380,7 +525,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       final newPos = p.state.position + Duration(milliseconds: jumpMs);
       if (newPos >= p.state.duration - const Duration(seconds: 1)) {
         _clearSpeedTimer();
-        _startPlayback(formatLocalISOFromMs(_virtualTimeMs));
+        _startPlayback(formatLocalISOFromMs(_virtualTimeMs), resumeSpeed: speed);
       } else {
         p.seek(newPos);
       }
@@ -389,7 +534,9 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
 
   void _startReverseInterval(int reverseSpeed) {
     final player = _pbPlayer;
-    if (player == null) return;
+    if (player == null) {
+      return;
+    }
     player.pause();
 
     final gen = _generation;
@@ -402,49 +549,92 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       final proposed = p.state.position.inMilliseconds + jumpMs;
 
       if (proposed <= 500) {
-        // Load previous window
+        // Load previous segment — two API calls:
+        // 1) Find which segment comes before current one (direction=backward)
+        // 2) Request playback from that segment's START so we get the full file
+        //    (requesting from the end would cause ffmpeg to seek, giving only a tiny slice)
         _reverseLoading = true;
-        if (_playbackStartTime != null) {
-          _virtualTimeMs = DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch;
-        }
-        final windowMs = 30 * 60 * 1000;
-        final newStartMs = _virtualTimeMs - windowMs;
-        final newStart = formatLocalISOFromMs(newStartMs);
 
-        widget.recordingApi
-            .startPlayback(widget.camera.id, newStart, widget.quality.param)
-            .then((session) {
-          if (_generation != gen || !mounted) return;
-          final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
+        final segStartMs = _playbackStartTime != null
+            ? DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch
+            : _virtualTimeMs;
+        final prevMs = segStartMs - 1;
+        final prevStart = formatLocalISOFromMs(prevMs);
 
-          _ensurePlayer();
-          _pbVideoReady = false;
-          _pbPlayer!.open(Media(fullUrl));
+        () async {
+          try {
+            // Step 1: find previous segment
+            final findSession = await widget.recordingApi
+                .startPlayback(widget.camera.id, prevStart, widget.quality.param,
+                    direction: 'backward');
+            if (_generation != gen || !mounted) {
+              _reverseLoading = false;
+              return;
+            }
 
-          _pbPlayer!.stream.duration.listen((dur) {
-            if (_generation != gen || dur == Duration.zero) return;
-            final seekTarget = dur - const Duration(seconds: 1);
-            _pbPlayer!.seek(seekTarget);
-            _virtualTimeMs = newStartMs + seekTarget.inMilliseconds;
-            setState(() {
-              _playbackUrl = fullUrl;
-              _windowEnd = session.segmentEnd;
-              _hasMore = session.hasMore;
-              _playbackStartTime = newStart;
+            // Step 2: reload from segment start for full file
+            final session = await widget.recordingApi
+                .startPlayback(widget.camera.id, findSession.segmentStart, widget.quality.param);
+            if (_generation != gen || !mounted) {
+              _reverseLoading = false;
+              return;
+            }
+
+            final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
+            final actualSegStartMs = DateTime.parse(session.segmentStart).millisecondsSinceEpoch;
+
+            _ensurePlayer();
+            _pbVideoReady = false;
+            _pbPlayer!.open(Media(fullUrl));
+
+            late final StreamSubscription<Duration> reverseSub;
+            Duration? lastRevDur;
+            reverseSub = _pbPlayer!.stream.duration.listen((dur) {
+              if (_generation != gen || dur == Duration.zero || !mounted) {
+                return;
+              }
+              // Skip transient 1000ms placeholder from fMP4 loading — wait for stable duration
+              if (dur.inMilliseconds <= 1500 && lastRevDur == null) {
+                lastRevDur = dur;
+                return;
+              }
+              final seekTarget = dur > const Duration(seconds: 2)
+                  ? dur - const Duration(seconds: 1)
+                  : dur;
+              _pbPlayer!.seek(seekTarget).then((_) {
+                if (_generation != gen || !mounted) {
+                  _reverseLoading = false;
+                  return;
+                }
+                _pbPlayer?.pause();
+                _virtualTimeMs = actualSegStartMs + seekTarget.inMilliseconds;
+                setState(() {
+                  _playbackUrl = fullUrl;
+                  _windowEnd = session.segmentEnd;
+                  _hasMore = session.hasMore;
+                  _playbackStartTime = session.segmentStart;
+                });
+                _reverseLoading = false;
+              });
+              reverseSub.cancel();
+              _inlineSubs.remove(reverseSub);
             });
+            _inlineSubs.add(reverseSub);
+          } catch (e) {
+            if (_generation != gen) return;
             _reverseLoading = false;
-          });
-        }).catchError((_) {
-          if (_generation != gen) return;
-          _clearSpeedTimer();
-          setState(() {
-            _speed = 1;
-            _playbackError = 'No earlier recordings';
-          });
-          Future.delayed(const Duration(seconds: 3), () {
-            if (mounted) setState(() => _playbackError = null);
-          });
-        });
+            _clearSpeedTimer();
+            if (mounted) {
+              setState(() {
+                _speed = 1;
+                _playbackError = 'No earlier recordings';
+              });
+              Future.delayed(const Duration(seconds: 3), () {
+                if (mounted) setState(() => _playbackError = null);
+              });
+            }
+          }
+        }();
       } else {
         p.seek(Duration(milliseconds: proposed));
         _virtualTimeMs += jumpMs;

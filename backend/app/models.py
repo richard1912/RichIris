@@ -33,14 +33,14 @@ class Camera(Base):
         DateTime, server_default=func.now()
     )
 
-    motion_sensitivity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    motion_sensitivity: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
     motion_script: Mapped[str | None] = mapped_column(String(500), nullable=True)
     motion_script_off: Mapped[str | None] = mapped_column(String(500), nullable=True)
     motion_scripts: Mapped[str | None] = mapped_column(Text, nullable=True)
-    ai_detection: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    ai_detection: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     ai_detect_persons: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
-    ai_detect_vehicles: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    ai_detect_animals: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    ai_detect_vehicles: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    ai_detect_animals: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     ai_confidence_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
 
     recordings: Mapped[list["Recording"]] = relationship(back_populates="camera")

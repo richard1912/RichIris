@@ -190,7 +190,7 @@ class _RtspWizardDialogState extends State<RtspWizardDialog> {
                       controller: _ipCtrl,
                       decoration: const InputDecoration(
                         labelText: 'Camera IP',
-                        hintText: '192.168.1.100',
+                        hintText: '',
                         isDense: true,
                         contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
                       ),
@@ -220,7 +220,7 @@ class _RtspWizardDialogState extends State<RtspWizardDialog> {
                       controller: _userCtrl,
                       decoration: const InputDecoration(
                         labelText: 'Username',
-                        hintText: 'admin',
+                        hintText: '',
                         isDense: true,
                         contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
                       ),

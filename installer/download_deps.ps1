@@ -9,37 +9,38 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+Write-Host ""
+Write-Host "  *** Do NOT click this window - it will pause the download ***" -ForegroundColor Yellow
+Write-Host "  *** If it freezes, press Enter or right-click to resume ***" -ForegroundColor Yellow
+Write-Host ""
+
 # Enable TLS 1.2 (required for GitHub HTTPS on older Windows/PowerShell)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Log file for debugging
 $LogFile = Join-Path $env:TEMP "richiris_deps.log"
 "" | Out-File $LogFile -Encoding utf8
-function Log { param([string]$msg) $ts = Get-Date -Format "HH:mm:ss"; "$ts $msg" | Out-File $LogFile -Append -Encoding utf8; Write-Host $msg }
+function Log {
+    param([string]$msg)
+    $ts = Get-Date -Format "HH:mm:ss"
+    "$ts $msg" | Out-File $LogFile -Append -Encoding utf8
+    Write-Host $msg
+}
 
 Log "Starting dependency download"
 Log "InstallDir: $InstallDir"
-Log "PowerShell: $($PSVersionTable.PSVersion)"
-Log "TLS: $([Net.ServicePointManager]::SecurityProtocol)"
 
-# Dependency versions
-$FFMPEG_VERSION = "7.1.1"
-$GO2RTC_VERSION = "1.9.14"
-
-# Download URLs
-$FFMPEG_URL = "https://github.com/GyanD/codexffmpeg/releases/download/$FFMPEG_VERSION/ffmpeg-$FFMPEG_VERSION-essentials_build.zip"
-$GO2RTC_URL = "https://github.com/AlexxIT/go2rtc/releases/download/v$GO2RTC_VERSION/go2rtc_win64.zip"
-$RTDETR_URL = "https://github.com/richard1912/RichIris/releases/download/models/rtdetr-l.onnx"
+# All dependencies hosted on our own GitHub release
+$GITHUB_BASE = "https://github.com/richard1912/RichIris/releases/download/dependencies"
 
 $DepsDir = Join-Path $InstallDir "dependencies"
 $TempDir = Join-Path $env:TEMP "richiris_setup"
 
-# Synchronous download with WebClient (reliable, follows redirects)
 function Download-File {
     param([string]$Url, [string]$OutFile, [string]$Label)
-    Log "Downloading $Label from $Url"
+    Log "Downloading $Label ..."
 
-    # Get file size via HEAD request for progress calculation
+    # Get file size via HEAD request for progress
     $totalBytes = 0
     try {
         $req = [System.Net.HttpWebRequest]::Create($Url)
@@ -49,9 +50,9 @@ function Download-File {
         $totalBytes = $resp.ContentLength
         $resp.Close()
     } catch { }
-    $totalMB = [math]::Round($totalBytes / 1MB, 1)
+    $totalSize = [math]::Round($totalBytes / 1MB, 1)
 
-    # Start synchronous download in a background job
+    # Download in background job
     $job = Start-Job -ScriptBlock {
         param($u, $o)
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -60,16 +61,18 @@ function Download-File {
         $c.Dispose()
     } -ArgumentList $Url, $OutFile
 
-    # Poll file size for progress while job runs
+    # Poll file size for progress
     while ($job.State -eq 'Running') {
         Start-Sleep -Milliseconds 500
         if (Test-Path $OutFile) {
-            $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+            $cur = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
             if ($totalBytes -gt 0) {
-                $pct = [math]::Min(100, [math]::Round(($sizeMB / $totalMB) * 100))
-                Write-Host "`r  $Label : $sizeMB MB / $totalMB MB ($pct%)    " -NoNewline
+                $pct = [math]::Min(100, [math]::Round(($cur / $totalSize) * 100))
+                $msg = '  {0} : {1} / {2} ({3} pct)    ' -f $Label, $cur, $totalSize, $pct
+                Write-Host ("`r" + $msg) -NoNewline
             } else {
-                Write-Host "`r  $Label : $sizeMB MB downloaded    " -NoNewline
+                $msg = '  {0} : {1} downloaded    ' -f $Label, $cur
+                Write-Host ("`r" + $msg) -NoNewline
             }
         }
     }
@@ -85,8 +88,8 @@ function Download-File {
     }
     Remove-Job $job -Force
 
-    $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
-    Log "  Downloaded: $sizeMB MB"
+    $final = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+    Log ('  Downloaded: ' + $final + ' megabytes')
 }
 
 # Clean temp
@@ -99,24 +102,12 @@ New-Item -ItemType Directory -Path (Join-Path $DepsDir "models") -Force | Out-Nu
 
 $failed = @()
 
-# --- ffmpeg + ffprobe ---
+# --- ffmpeg ---
 $ffmpegPath = Join-Path $DepsDir "ffmpeg.exe"
-$ffprobePath = Join-Path $DepsDir "ffprobe.exe"
-if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobePath)) {
-    Write-Host "Downloading ffmpeg $FFMPEG_VERSION..."
+if (-not (Test-Path $ffmpegPath)) {
+    Write-Host "Downloading ffmpeg..."
     try {
-        $zipPath = Join-Path $TempDir "ffmpeg.zip"
-        Download-File -Url $FFMPEG_URL -OutFile $zipPath -Label "ffmpeg"
-        Write-Host "  Extracting..."
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-        foreach ($entry in $zip.Entries) {
-            if ($entry.Name -eq "ffmpeg.exe" -or $entry.Name -eq "ffprobe.exe") {
-                $dest = Join-Path $DepsDir $entry.Name
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $dest, $true)
-            }
-        }
-        $zip.Dispose()
+        Download-File -Url "$GITHUB_BASE/ffmpeg.exe" -OutFile $ffmpegPath -Label "ffmpeg"
         Log "ffmpeg: OK"
     } catch {
         Log "ffmpeg: FAILED - $_"
@@ -126,22 +117,27 @@ if (-not (Test-Path $ffmpegPath) -or -not (Test-Path $ffprobePath)) {
     Log "ffmpeg: already present, skipping"
 }
 
+# --- ffprobe ---
+$ffprobePath = Join-Path $DepsDir "ffprobe.exe"
+if (-not (Test-Path $ffprobePath)) {
+    Write-Host "Downloading ffprobe..."
+    try {
+        Download-File -Url "$GITHUB_BASE/ffprobe.exe" -OutFile $ffprobePath -Label "ffprobe"
+        Log "ffprobe: OK"
+    } catch {
+        Log "ffprobe: FAILED - $_"
+        $failed += "ffprobe"
+    }
+} else {
+    Log "ffprobe: already present, skipping"
+}
+
 # --- go2rtc ---
 $go2rtcPath = Join-Path $DepsDir "go2rtc\go2rtc.exe"
 if (-not (Test-Path $go2rtcPath)) {
-    Write-Host "Downloading go2rtc $GO2RTC_VERSION..."
+    Write-Host "Downloading go2rtc..."
     try {
-        $zipPath = Join-Path $TempDir "go2rtc.zip"
-        Download-File -Url $GO2RTC_URL -OutFile $zipPath -Label "go2rtc"
-        Write-Host "  Extracting..."
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-        foreach ($entry in $zip.Entries) {
-            if ($entry.Name -eq "go2rtc.exe") {
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $go2rtcPath, $true)
-            }
-        }
-        $zip.Dispose()
+        Download-File -Url "$GITHUB_BASE/go2rtc.exe" -OutFile $go2rtcPath -Label "go2rtc"
         Log "go2rtc: OK"
     } catch {
         Log "go2rtc: FAILED - $_"
@@ -154,12 +150,12 @@ if (-not (Test-Path $go2rtcPath)) {
 # --- RT-DETR ONNX model ---
 $rtdetrPath = Join-Path $DepsDir "models\rtdetr-l.onnx"
 if (-not (Test-Path $rtdetrPath)) {
-    Write-Host "Downloading RT-DETR model (126 MB, please wait)..."
+    Write-Host "Downloading RT-DETR model, please wait..."
     try {
-        Download-File -Url $RTDETR_URL -OutFile $rtdetrPath -Label "RT-DETR model"
+        Download-File -Url "$GITHUB_BASE/rtdetr-l.onnx" -OutFile $rtdetrPath -Label "RT-DETR model"
         Log "RT-DETR: OK"
     } catch {
-        Log "RT-DETR: FAILED - $_ (AI detection will not be available)"
+        Log "RT-DETR: FAILED - $_"
         $failed += "rtdetr"
     }
 } else {
@@ -173,37 +169,37 @@ if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force -ErrorAction Sile
 Log ""
 Log "Verifying downloads..."
 $checks = @(
-    @{ Path = $ffmpegPath;  Name = "ffmpeg.exe";  MinMB = 50 },
-    @{ Path = $ffprobePath; Name = "ffprobe.exe"; MinMB = 50 },
-    @{ Path = $go2rtcPath;  Name = "go2rtc.exe";  MinMB = 5 }
+    @{ Path = $ffmpegPath;  Name = "ffmpeg.exe";  MinSize = 50 },
+    @{ Path = $ffprobePath; Name = "ffprobe.exe"; MinSize = 50 },
+    @{ Path = $go2rtcPath;  Name = "go2rtc.exe";  MinSize = 5 }
 )
 
 foreach ($check in $checks) {
     if (Test-Path $check.Path) {
-        $sizeMB = [math]::Round((Get-Item $check.Path).Length / 1MB, 1)
-        if ($sizeMB -lt $check.MinMB) {
-            Log "  WARN: $($check.Name) is only $sizeMB MB (expected >$($check.MinMB) MB)"
+        $s = [math]::Round((Get-Item $check.Path).Length / 1MB, 1)
+        if ($s -lt $check.MinSize) {
+            Log ('  WARN: ' + $check.Name + ' is only ' + $s + ' megabytes')
             $failed += $check.Name
         } else {
-            Log "  OK: $($check.Name) ($sizeMB MB)"
+            Log ('  OK: ' + $check.Name + ' (' + $s + ' megabytes)')
         }
     } else {
-        Log "  MISSING: $($check.Name)"
+        Log ('  MISSING: ' + $check.Name)
         $failed += $check.Name
     }
 }
 
 # RT-DETR is optional (AI detection only)
 if (Test-Path $rtdetrPath) {
-    $sizeMB = [math]::Round((Get-Item $rtdetrPath).Length / 1MB, 1)
-    Log "  OK: rtdetr-l.onnx ($sizeMB MB)"
+    $s = [math]::Round((Get-Item $rtdetrPath).Length / 1MB, 1)
+    Log ('  OK: rtdetr-l.onnx (' + $s + ' megabytes)')
 } else {
     Log "  MISSING: rtdetr-l.onnx (AI detection disabled)"
 }
 
 if ($failed.Count -gt 0) {
     Log ""
-    Log "WARNING: Issues with: $($failed -join ', ')"
+    Log "WARNING: Some downloads failed"
     Log "Closing in 10 seconds..."
     Start-Sleep -Seconds 10
     exit 1

@@ -213,11 +213,11 @@ begin
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('netsh', 'advfirewall firewall delete rule name="RichIris go2rtc RTSP"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('netsh', 'advfirewall firewall add rule name="RichIris go2rtc RTSP" dir=in action=allow protocol=tcp localport=8554 profile=private,public',
+    Exec('netsh', 'advfirewall firewall add rule name="RichIris go2rtc RTSP" dir=in action=allow protocol=tcp localport=18554 profile=private,public',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('netsh', 'advfirewall firewall delete rule name="RichIris go2rtc API"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('netsh', 'advfirewall firewall add rule name="RichIris go2rtc API" dir=in action=allow protocol=tcp localport=1984 profile=private,public',
+    Exec('netsh', 'advfirewall firewall add rule name="RichIris go2rtc API" dir=in action=allow protocol=tcp localport=18700 profile=private,public',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     // Dependencies are now downloaded via [Run] section (before service start)

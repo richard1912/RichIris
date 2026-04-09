@@ -82,7 +82,7 @@ async def _probe_rtsp_url(url: str, timeout: float = 5.0) -> dict | None:
         "-print_format", "json",
         "-show_streams",
         "-rtsp_transport", "tcp",
-        "-stimeout", str(int(timeout * 1_000_000)),  # microseconds
+        "-timeout", str(int(timeout * 1_000_000)),  # microseconds
         url,
     ]
     try:
@@ -232,8 +232,7 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
             from app.services.thumbnail_capture import get_thumbnail_capture
             get_thumbnail_capture().add_camera(camera)
             # Start motion detection for the new camera
-            from app.services.motion_detector import get_detector
-            await get_detector().update_camera(camera)
+            await get_motion_detector().update_camera(camera)
         except Exception:
             logger.exception("Failed to start stream for new camera", extra={"camera_id": camera.id})
 

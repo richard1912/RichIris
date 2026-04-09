@@ -369,22 +369,9 @@ def reset_go2rtc_client() -> None:
     _client = None
 
 
-# Global semaphore to serialize go2rtc snapshot requests.
-# go2rtc has a concurrent map write bug — when multiple new streams start
-# simultaneously (e.g. after a crash restart), go2rtc panics. Limiting
-# concurrent snapshot requests to 1 ensures stream creation is serialized.
-_snapshot_semaphore: asyncio.Semaphore | None = None
-# Timestamp of last go2rtc restart — snapshot consumers wait until grace period expires
+# Timestamp of last go2rtc restart — keepalive consumers wait until grace period expires
 _go2rtc_restart_time: float = 0.0
-GO2RTC_RESTART_GRACE_SECONDS = 15  # Wait this long after restart before sending snapshots
-
-
-def get_snapshot_semaphore() -> asyncio.Semaphore:
-    """Return a global semaphore for serializing go2rtc snapshot requests."""
-    global _snapshot_semaphore
-    if _snapshot_semaphore is None:
-        _snapshot_semaphore = asyncio.Semaphore(1)
-    return _snapshot_semaphore
+GO2RTC_RESTART_GRACE_SECONDS = 15  # Wait this long after restart before connecting keepalives
 
 
 def notify_go2rtc_restart() -> None:

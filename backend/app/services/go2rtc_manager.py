@@ -3,7 +3,6 @@
 import asyncio
 import ctypes
 import logging
-import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -24,20 +23,19 @@ _api_port: int | None = None
 _rtsp_port: int | None = None
 
 
-def _find_free_port(preferred: int) -> int:
-    """Return preferred port if available, otherwise find a free one."""
+
+def _check_port_available(port: int, label: str) -> None:
+    """Check if a port is available. Logs a clear error if something else is using it."""
+    import socket
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", preferred))
-            return preferred
+            s.bind(("127.0.0.1", port))
     except OSError:
-        # Preferred port busy — let OS pick a free one
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-            logger.info("Preferred port busy, using free port",
-                        extra={"preferred": preferred, "assigned": port})
-            return port
+        logger.error(
+            "Port already in use — another process is blocking go2rtc",
+            extra={"port": port, "label": label,
+                   "hint": "Check for another go2rtc instance or conflicting service"},
+        )
 
 
 def get_api_port() -> int:
@@ -230,11 +228,11 @@ async def start_go2rtc(streams: dict | None = None) -> bool:
     _shutting_down = False
     config = get_config()
 
-    # Find free ports (prefers configured defaults, falls back to any free port)
-    _api_port = _find_free_port(config.go2rtc.port)
-    _rtsp_port = _find_free_port(config.go2rtc.rtsp_port)
-    logger.info("go2rtc ports assigned",
-                extra={"api_port": _api_port, "rtsp_port": _rtsp_port})
+    _api_port = config.go2rtc.port
+    _rtsp_port = config.go2rtc.rtsp_port
+    logger.info("go2rtc ports", extra={"api_port": _api_port, "rtsp_port": _rtsp_port})
+    _check_port_available(_api_port, "go2rtc API")
+    _check_port_available(_rtsp_port, "go2rtc RTSP")
 
     binary = _resolve_go2rtc_binary()
     if not binary:

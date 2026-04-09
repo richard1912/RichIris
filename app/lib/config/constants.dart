@@ -42,7 +42,7 @@ extension QualityExt on Quality {
   }
 }
 
-const List<int> kSpeeds = [-32, -16, -4, -2, -1, 1, 2, 4, 16, 32];
+const List<int> kSpeeds = [-4, -2, -1, 1, 2, 4, 16, 32];
 
 const double kMinZoom = 1.0;
 const double kMaxZoom = 24.0;

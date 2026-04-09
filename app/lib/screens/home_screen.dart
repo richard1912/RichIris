@@ -96,6 +96,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<int, Player> _pbPlayers = {};
   final Map<int, VideoController> _pbControllers = {};
   final Map<int, StreamSubscription> _completedSubs = {};
+  final Map<int, StreamSubscription> _seekSubs = {};
   final Set<int> _pbLoading = {};
   final Set<int> _pbFailed = {};
   int _generation = 0;
@@ -137,14 +138,10 @@ class _HomeScreenState extends State<HomeScreen> {
   void didUpdateWidget(covariant HomeScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     _setupRef();
-    // Cancel in-flight playback session creation when entering fullscreen
-    // (HomeScreen stays mounted via Offstage, so mounted check won't help)
-    if (widget.fullscreenCameraId != null && oldWidget.fullscreenCameraId == null) {
-      _generation++;
-    }
     if (widget.resumePlaybackGen != _lastResumePlaybackGen) {
       _lastResumePlaybackGen = widget.resumePlaybackGen;
       if (widget.resumePlaybackTime != null) {
+        print('HOME: resumePlaybackGen changed → _startPlayback(${widget.resumePlaybackTime})');
         _timelineDateOverride = widget.resumePlaybackTime!.substring(0, 10);
         _startPlayback(widget.resumePlaybackTime!);
       }
@@ -158,6 +155,9 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     for (final sub in _completedSubs.values) {
+      sub.cancel();
+    }
+    for (final sub in _seekSubs.values) {
       sub.cancel();
     }
     for (final p in _pbPlayers.values) {
@@ -199,6 +199,10 @@ class _HomeScreenState extends State<HomeScreen> {
       sub.cancel();
     }
     _completedSubs.clear();
+    for (final sub in _seekSubs.values) {
+      sub.cancel();
+    }
+    _seekSubs.clear();
     for (final p in _pbPlayers.values) {
       p.stop();
     }
@@ -226,11 +230,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Fetch sessions sequentially to avoid launching all ffmpeg transcode
     // processes simultaneously (which can freeze the GPU/system).
-    // Also checks _generation each iteration so entering fullscreen cancels
-    // remaining requests (HomeScreen stays mounted via Offstage).
+    // Check _generation and fullscreen state each iteration so entering
+    // fullscreen cancels remaining requests without breaking segment
+    // continuation for already-playing cameras.
     final sessions = <int, PlaybackSession>{};
     for (var i = 0; i < enabledCameras.length; i++) {
-      if (_generation != gen) return;
+      if (_generation != gen || widget.fullscreenCameraId != null) return;
       final cam = enabledCameras[i];
       try {
         final session = await widget.recordingApi.startPlayback(
@@ -243,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
     }
-    if (_generation != gen) return;
+    if (_generation != gen || widget.fullscreenCameraId != null) return;
 
     // Set wall clock for accurate master time tracking
     _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
@@ -263,11 +268,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Seek to offset within segment
     if (session.seekSeconds > 1.0) {
-      late StreamSubscription sub;
-      sub = player.stream.duration.listen((dur) {
-        if (dur > Duration.zero && _generation == gen) {
+      _seekSubs[cameraId]?.cancel();
+      _seekSubs[cameraId] = player.stream.duration.listen((dur) {
+        if (dur > Duration.zero && _generation == gen && mounted) {
           player.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
-          sub.cancel();
+          _seekSubs[cameraId]?.cancel();
+          _seekSubs.remove(cameraId);
         }
       });
     }
@@ -312,11 +318,12 @@ class _HomeScreenState extends State<HomeScreen> {
       player.open(Media(fullUrl));
 
       if (seekOverride > 1.0) {
-        late StreamSubscription sub;
-        sub = player.stream.duration.listen((dur) {
-          if (dur > Duration.zero && _generation == gen) {
+        _seekSubs[cameraId]?.cancel();
+        _seekSubs[cameraId] = player.stream.duration.listen((dur) {
+          if (dur > Duration.zero && _generation == gen && mounted) {
             player.seek(Duration(milliseconds: (seekOverride * 1000).round()));
-            sub.cancel();
+            _seekSubs[cameraId]?.cancel();
+            _seekSubs.remove(cameraId);
           }
         });
       }
@@ -340,6 +347,10 @@ class _HomeScreenState extends State<HomeScreen> {
       sub.cancel();
     }
     _completedSubs.clear();
+    for (final sub in _seekSubs.values) {
+      sub.cancel();
+    }
+    _seekSubs.clear();
     for (final p in _pbPlayers.values) {
       p.stop();
     }

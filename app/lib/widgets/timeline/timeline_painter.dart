@@ -66,8 +66,9 @@ class TimelinePainter extends CustomPainter {
         markerPaint,
       );
 
-      final hours = h.floor();
-      final minutes = ((h - hours) * 60).round();
+      final totalMinutes = (h * 60).round();
+      final hours = totalMinutes ~/ 60;
+      final minutes = totalMinutes % 60;
       final label = '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}';
       final tp = TextPainter(
         text: TextSpan(text: label, style: textStyle),

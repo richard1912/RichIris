@@ -1,6 +1,7 @@
 """Real-time thumbnail capture service.
 
-Captures JPEG snapshots from go2rtc's frame API at configurable intervals.
+Uses ffmpeg to grab JPEG snapshots from go2rtc's local RTSP relay.
+No new camera connections — piggybacks on existing go2rtc keepalives.
 Thumbnails are stored as individual files in
 {thumbnails_dir}/{camera_name}/{YYYY-MM-DD}/thumbs/thumb_HHMMSS.jpg
 """
@@ -10,8 +11,6 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-import httpx
-
 from app.config import get_config
 from app.services.ffmpeg import sanitize_camera_name
 from app.services.go2rtc_client import get_stream_name
@@ -20,12 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 class ThumbnailCapture:
-    """Captures periodic JPEG thumbnails from go2rtc live streams."""
+    """Captures periodic JPEG thumbnails via ffmpeg from go2rtc's local RTSP relay."""
 
     def __init__(self):
         self._tasks: list[asyncio.Task] = []
         self._running = False
-        self._client: httpx.AsyncClient | None = None
 
     def start(self, cameras: list) -> None:
         config = get_config()
@@ -33,8 +31,6 @@ class ThumbnailCapture:
             logger.info("Trickplay disabled, skipping thumbnail capture")
             return
         self._running = True
-        self._client = httpx.AsyncClient(timeout=15)
-        # Stagger camera starts to avoid concurrent go2rtc stream creation
         for i, cam in enumerate(cameras):
             task = asyncio.create_task(self._capture_loop(cam, startup_delay=i * 2))
             self._tasks.append(task)
@@ -44,9 +40,7 @@ class ThumbnailCapture:
         """Start thumbnail capture for a newly added camera."""
         if not self._running:
             return
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=15)
-        task = asyncio.create_task(self._capture_loop(camera, startup_delay=2))
+        task = asyncio.create_task(self._capture_loop(camera, startup_delay=5))
         self._tasks.append(task)
         logger.info("Thumbnail capture added camera", extra={"camera": camera.name})
 
@@ -61,10 +55,38 @@ class ThumbnailCapture:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
-        if self._client:
-            await self._client.aclose()
-            self._client = None
         logger.info("Thumbnail capture stopped")
+
+    async def _grab_frame(self, rtsp_url: str, out_path: Path, width: int, height: int) -> bool:
+        """Use ffmpeg to grab a single JPEG frame from go2rtc's local RTSP relay."""
+        config = get_config()
+        cmd = [
+            config.ffmpeg.path,
+            "-rtsp_transport", "tcp",
+            "-timeout", "5000000",  # 5s connection timeout
+            "-i", rtsp_url,
+            "-frames:v", "1",
+            "-vf", f"scale={width}:{height}",
+            "-q:v", "5",
+            "-y",
+            str(out_path),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=10)
+            return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
 
     async def _capture_loop(self, camera, startup_delay: float = 0) -> None:
         if startup_delay > 0:
@@ -73,14 +95,22 @@ class ThumbnailCapture:
         tp = config.trickplay
         safe_name = sanitize_camera_name(camera.name)
         stream_name = get_stream_name(camera.name)
-        from app.services.go2rtc_manager import get_api_port
-        go2rtc_base = f"http://{config.go2rtc.host}:{get_api_port()}"
-        # Use sub-stream direct for thumbnails — lightweight, no transcode
-        snapshot_url = (
-            f"{go2rtc_base}/api/frame.jpeg"
-            f"?src={stream_name}_s2_direct"
-            f"&width={tp.thumb_width}&height={tp.thumb_height}"
-        )
+
+        # Connect to go2rtc's local RTSP relay — reuses existing keepalive connection
+        # to the camera, no new RTSP connections made. Try sub-stream first (lighter).
+        from app.services.go2rtc_manager import get_rtsp_port
+        rtsp_port = get_rtsp_port()
+        relay_urls = [
+            f"rtsp://127.0.0.1:{rtsp_port}/{stream_name}_s2_direct",
+            f"rtsp://127.0.0.1:{rtsp_port}/{stream_name}_s1_direct",
+        ]
+        url_index = 0
+        consecutive_failures = 0
+        url_failures = 0
+
+        logger.info("Thumbnail capture loop started", extra={
+            "camera": camera.name, "relay": relay_urls[0],
+        })
 
         while self._running:
             try:
@@ -97,35 +127,33 @@ class ThumbnailCapture:
             out_path = thumbs_dir / f"thumb_{time_str}.jpg"
 
             try:
-                from app.services.go2rtc_client import get_snapshot_semaphore, wait_for_go2rtc_ready
-                await wait_for_go2rtc_ready()
-                async with get_snapshot_semaphore():
-                    resp = await self._client.get(snapshot_url)
-                if resp.status_code != 200:
-                    fail_count = getattr(self, f'_fail_{camera.id}', 0) + 1
-                    setattr(self, f'_fail_{camera.id}', fail_count)
-                    if fail_count == 1 or fail_count % 60 == 0:
-                        logger.debug("Snapshot request failed", extra={
-                            "camera": camera.name, "status": resp.status_code,
-                            "consecutive_failures": fail_count,
+                ok = await self._grab_frame(relay_urls[url_index], out_path, tp.thumb_width, tp.thumb_height)
+                if not ok:
+                    if out_path.exists():
+                        out_path.unlink(missing_ok=True)
+                    consecutive_failures += 1
+                    url_failures += 1
+                    # Fall back to main stream after 10 sub-stream failures
+                    if url_failures >= 10 and url_index == 0:
+                        url_index = 1
+                        url_failures = 0
+                        logger.info("Thumbnail falling back to main stream relay", extra={
+                            "camera": camera.name,
+                        })
+                    if consecutive_failures == 1 or consecutive_failures % 30 == 0:
+                        logger.debug("Thumbnail capture failed", extra={
+                            "camera": camera.name,
+                            "consecutive_failures": consecutive_failures,
+                            "stream": "s2" if url_index == 0 else "s1",
                         })
                     continue
-                # Reset failure counter on success
-                if getattr(self, f'_fail_{camera.id}', 0) > 0:
-                    setattr(self, f'_fail_{camera.id}', 0)
 
-                data = resp.content
-                if len(data) < 2000:
-                    logger.debug("Snapshot too small, skipping", extra={
-                        "camera": camera.name, "size": len(data),
-                    })
-                    continue
-
-                out_path.write_bytes(data)
+                consecutive_failures = 0
+                url_failures = 0
                 logger.debug("Captured thumbnail", extra={
                     "camera": camera.name,
                     "path": str(out_path),
-                    "size": len(data),
+                    "size": out_path.stat().st_size,
                 })
 
             except asyncio.CancelledError:
@@ -144,7 +172,6 @@ class ThumbnailCapture:
 
         thumbnails = []
         for f in sorted(thumbs_dir.glob("thumb_*.jpg")):
-            # Parse HHMMSS from filename
             name = f.stem  # thumb_HHMMSS
             time_part = name.replace("thumb_", "")
             if len(time_part) == 6:

@@ -75,6 +75,7 @@ async def start_playback_session(
     camera_id: int,
     start: datetime = Query(..., description="Start time ISO format"),
     quality: str = Query("direct", description="Quality tier: direct, high, low, ultralow"),
+    direction: str = Query("forward", description="Fallback direction: forward or backward"),
     db: AsyncSession = Depends(get_db),
 ):
     """Start a playback session for the recording segment at the requested time.
@@ -102,18 +103,32 @@ async def start_playback_session(
     )
     seg = result.scalars().first()
 
-    # If no segment contains start, find the next one after start
+    # If no segment contains start, find the nearest one
     if not seg:
-        result = await db.execute(
-            select(Recording)
-            .where(
-                Recording.camera_id == camera_id,
-                Recording.start_time > start,
+        if direction == "backward":
+            # For reverse playback: find the latest segment ending at or before start
+            result = await db.execute(
+                select(Recording)
+                .where(
+                    Recording.camera_id == camera_id,
+                    Recording.end_time <= start,
+                )
+                .order_by(Recording.end_time.desc())
+                .limit(1)
             )
-            .order_by(Recording.start_time)
-            .limit(1)
-        )
-        seg = result.scalars().first()
+            seg = result.scalars().first()
+        else:
+            # For forward playback: find the next segment after start
+            result = await db.execute(
+                select(Recording)
+                .where(
+                    Recording.camera_id == camera_id,
+                    Recording.start_time > start,
+                )
+                .order_by(Recording.start_time)
+                .limit(1)
+            )
+            seg = result.scalars().first()
 
     if not seg:
         raise HTTPException(status_code=404, detail="No recordings in range")

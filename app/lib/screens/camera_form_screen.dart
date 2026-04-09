@@ -92,7 +92,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     _passwordCtrl = TextEditingController(text: pass);
     _enabled = widget.camera?.enabled ?? true;
     _rotation = widget.camera?.rotation ?? 0;
-    _motionSensitivity = widget.camera?.motionSensitivity ?? 0;
+    _motionSensitivity = widget.camera?.motionSensitivity ?? 100;
     // Build script entries from motionScripts list
     final scripts = widget.camera?.motionScripts ?? [];
     _scriptEntries = scripts.map((s) => _ScriptEntry(
@@ -103,10 +103,10 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       animals: s.animals,
       motionOnly: s.motionOnly,
     )).toList();
-    _aiDetection = widget.camera?.aiDetection ?? false;
+    _aiDetection = widget.camera?.aiDetection ?? true;
     _aiDetectPersons = widget.camera?.aiDetectPersons ?? true;
-    _aiDetectVehicles = widget.camera?.aiDetectVehicles ?? false;
-    _aiDetectAnimals = widget.camera?.aiDetectAnimals ?? false;
+    _aiDetectVehicles = widget.camera?.aiDetectVehicles ?? true;
+    _aiDetectAnimals = widget.camera?.aiDetectAnimals ?? true;
     _aiConfidenceThreshold = widget.camera?.aiConfidenceThreshold ?? 50;
   }
 
@@ -341,7 +341,6 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               controller: entry.onCtrl,
               decoration: InputDecoration(
                 labelText: 'On Script',
-                hintText: r'C:\scripts\alert.bat',
                 isDense: true,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
               ),
@@ -352,7 +351,6 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
               controller: entry.offCtrl,
               decoration: InputDecoration(
                 labelText: 'Off Script',
-                hintText: r'C:\scripts\end.bat',
                 isDense: true,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
               ),
@@ -444,7 +442,6 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                       controller: _rtspCtrl,
                       decoration: const InputDecoration(
                         labelText: 'Main-Stream RTSP URL',
-                        hintText: 'rtsp://192.168.1.100/stream1',
                       ),
                       validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
                     ),
@@ -471,7 +468,6 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 controller: _subStreamCtrl,
                 decoration: const InputDecoration(
                   labelText: 'Sub-Stream RTSP URL (optional)',
-                  hintText: 'rtsp://192.168.1.100/stream2',
                 ),
               ),
               const SizedBox(height: 14),
@@ -482,7 +478,6 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                       controller: _usernameCtrl,
                       decoration: const InputDecoration(
                         labelText: 'Username (optional)',
-                        hintText: 'admin',
                       ),
                     ),
                   ),

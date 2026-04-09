@@ -8,14 +8,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
-import httpx
 import numpy as np
 
 from app.config import get_config
 from app.database import get_session_factory
 from app.models import MotionEvent
 from app.services.ffmpeg import sanitize_camera_name
-from app.services.go2rtc_client import get_stream_name
 from app.services.object_detector import get_object_detector
 
 _VEHICLE_LABELS = {"bicycle", "car", "motorcycle", "bus", "truck"}
@@ -42,7 +40,6 @@ MAX_CHANGE_PCT = 40       # Ignore frames where >40% changed (IR switch, exposur
 MOTION_ALPHA = 0.01       # Slow running-average adaptation (steady state)
 MOTION_ALPHA_STARTUP = 0.2
 BASELINE_STARTUP_FRAMES = 25
-FRAME_TIMEOUT = 10.0      # HTTP timeout for snapshot fetch
 HEARTBEAT_INTERVAL = 300   # Log heartbeat every 5 minutes (seconds)
 # Min fraction of a detection bbox that must overlap the motion mask to count as "moving".
 # Filters out static objects (e.g. parked cars) that are detected but aren't actually moving.
@@ -53,11 +50,13 @@ AI_CONFIRM_WINDOW = 3     # sliding window size (frames)
 AI_MIN_MOVE_PCT = 1.5     # min bbox center movement as % of frame diagonal
 
 
-def _snapshot_url(camera_name: str) -> str:
-    """Return go2rtc snapshot URL for a camera's sub-stream."""
-    from app.services.go2rtc_manager import get_api_port
-    stream_name = get_stream_name(camera_name) + "_s2_direct"
-    return f"http://localhost:{get_api_port()}/api/frame.jpeg?src={stream_name}"
+def _get_relay_rtsp_url(camera) -> str:
+    """Return go2rtc local RTSP relay URL for snapshots (no new camera connections)."""
+    from app.services.go2rtc_manager import get_rtsp_port
+    from app.services.go2rtc_client import get_stream_name
+    stream_name = get_stream_name(camera.name)
+    # Use sub-stream relay (lighter decode) — go2rtc chains to main if no sub configured
+    return f"rtsp://127.0.0.1:{get_rtsp_port()}/{stream_name}_s2_direct"
 
 
 class MotionDetector:
@@ -71,7 +70,6 @@ class MotionDetector:
         self._script_off: dict[tuple[int, str], list[str]] = {}
         self._avg_baseline: dict[int, np.ndarray | None] = {}
         self._baseline_frames: dict[int, int] = {}
-        self._client: httpx.AsyncClient | None = None
         # Multi-frame AI confirmation buffers
         self._detection_history: dict[tuple[int, str], list[bool]] = {}
         self._detection_positions: dict[tuple[int, str], list[tuple[float, float] | None]] = {}
@@ -96,18 +94,17 @@ class MotionDetector:
 
     async def start(self, cameras: list) -> None:
         self._running = True
-        self._client = httpx.AsyncClient(timeout=FRAME_TIMEOUT)
         # Close any orphaned events from previous runs (service restart / crash)
         await self._close_orphaned_events()
         # Stagger camera starts to avoid concurrent go2rtc stream creation
         stagger_delay = 0
         for cam in cameras:
             if cam.motion_sensitivity > 0 and (cam.sub_stream_url or cam.rtsp_url):
-                url = _snapshot_url(cam.name)
+                snapshot_url = _get_relay_rtsp_url(cam)
                 scripts = self._parse_motion_scripts(cam)
                 task = asyncio.create_task(
                     self._detect_loop(
-                        cam.id, cam.name, url,
+                        cam.id, cam.name, snapshot_url,
                         cam.motion_sensitivity, scripts,
                         ai_detection=cam.ai_detection,
                         ai_detect_persons=cam.ai_detect_persons,
@@ -149,9 +146,6 @@ class MotionDetector:
         # Finalize all active events before shutdown
         for key in list(self._active_events):
             await self._finalize_event(key)
-        if self._client:
-            await self._client.aclose()
-            self._client = None
         logger.info("Motion detector stopped")
 
     async def update_camera(self, camera) -> None:
@@ -170,16 +164,14 @@ class MotionDetector:
             self._clear_ai_history(cam_id)
 
         if self._running and camera.motion_sensitivity > 0 and camera.enabled:
-            url = _snapshot_url(camera.name)
+            snapshot_url = _get_relay_rtsp_url(camera)
             if camera.ai_detection:
                 detector = get_object_detector()
                 await detector.start()
-            if self._client is None:
-                self._client = httpx.AsyncClient(timeout=FRAME_TIMEOUT)
             scripts = self._parse_motion_scripts(camera)
             task = asyncio.create_task(
                 self._detect_loop(
-                    camera.id, camera.name, url,
+                    camera.id, camera.name, snapshot_url,
                     camera.motion_sensitivity, scripts,
                     ai_detection=camera.ai_detection,
                     ai_detect_persons=camera.ai_detect_persons,
@@ -230,21 +222,41 @@ class MotionDetector:
                     max_dist = d
         return max_dist >= self._move_threshold.get(cam_id, 0)
 
-    async def _fetch_frame(self, url: str) -> np.ndarray | None:
-        """Fetch a JPEG snapshot from go2rtc and decode it."""
-        from app.services.go2rtc_client import get_snapshot_semaphore, wait_for_go2rtc_ready
+    async def _fetch_frame(self, relay_url: str) -> np.ndarray | None:
+        """Grab a single frame from go2rtc's local RTSP relay via ffmpeg."""
+        config = get_config()
+        cmd = [
+            config.ffmpeg.path,
+            "-rtsp_transport", "tcp",
+            "-timeout", "5000000",
+            "-i", relay_url,
+            "-frames:v", "1",
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-q:v", "5",
+            "-",
+        ]
         try:
-            await wait_for_go2rtc_ready()
-            async with get_snapshot_semaphore():
-                resp = await self._client.get(url)
-            if resp.status_code != 200:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode != 0 or not stdout or len(stdout) < 1000:
                 return None
-            return cv2.imdecode(np.frombuffer(resp.content, np.uint8), cv2.IMREAD_COLOR)
-        except (httpx.TimeoutException, httpx.HTTPError):
+            return cv2.imdecode(np.frombuffer(stdout, np.uint8), cv2.IMREAD_COLOR)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None
+        except Exception:
             return None
 
     async def _detect_loop(
-        self, cam_id: int, cam_name: str, url: str,
+        self, cam_id: int, cam_name: str, rtsp_url: str,
         sensitivity: int, scripts: list[dict],
         ai_detection: bool = False,
         ai_detect_persons: bool = True, ai_detect_vehicles: bool = False,
@@ -270,10 +282,10 @@ class MotionDetector:
 
         while self._running:
             try:
-                frame = await self._fetch_frame(url)
+                frame = await self._fetch_frame(rtsp_url)
                 if frame is None:
                     consecutive_failures += 1
-                    if consecutive_failures == 1 or consecutive_failures % 60 == 0:
+                    if consecutive_failures == 1 or consecutive_failures % 30 == 0:
                         logger.warning(
                             "Failed to fetch snapshot",
                             extra={"camera": cam_name, "consecutive_failures": consecutive_failures},

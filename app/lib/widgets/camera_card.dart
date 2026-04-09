@@ -67,7 +67,15 @@ class _CameraCardState extends State<CameraCard> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (widget.playbackLoading)
+                  if (widget.isFullscreen)
+                    Container(
+                      color: const Color(0xFF0A0A0A),
+                      child: const Center(
+                        child: Icon(Icons.fullscreen,
+                            color: Color(0xFF525252), size: 32),
+                      ),
+                    )
+                  else if (widget.playbackLoading)
                     const Center(
                       child: SizedBox(
                         width: 24,
@@ -95,14 +103,6 @@ class _CameraCardState extends State<CameraCard> {
                   else if (widget.playbackController != null)
                     IgnorePointer(
                       child: _buildPlaybackVideo(),
-                    )
-                  else if (widget.camera.enabled && running && widget.isFullscreen)
-                    Container(
-                      color: const Color(0xFF0A0A0A),
-                      child: const Center(
-                        child: Icon(Icons.fullscreen,
-                            color: Color(0xFF525252), size: 32),
-                      ),
                     )
                   else if (showLive)
                     IgnorePointer(

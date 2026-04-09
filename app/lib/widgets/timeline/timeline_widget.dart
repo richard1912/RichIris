@@ -419,7 +419,6 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   // --- Clip export ---
 
   void _toggleClipsPanel() {
-    debugPrint('[EXPORT] _toggleClipsPanel: _showClips=$_showClips, exportMode=${_ctrl.exportMode}, cameras=${widget.cameras?.length}');
     if (_showClips) {
       // Close everything
       if (_ctrl.exportMode) _ctrl.toggleExportMode();
@@ -430,12 +429,10 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       if (_ctrl.exportMode) _ctrl.toggleExportMode();
       _fetchClips();
       setState(() => _showClips = true);
-      debugPrint('[EXPORT] Panel opened: _showClips=$_showClips, exportMode=${_ctrl.exportMode}');
     }
   }
 
   void _enterTimelineExportMode() {
-    debugPrint('[EXPORT] _enterTimelineExportMode: exportMode=${_ctrl.exportMode}');
     if (!_ctrl.exportMode) _ctrl.toggleExportMode();
   }
 
@@ -746,7 +743,22 @@ class _TimelineWidgetState extends State<TimelineWidget> {
             padding: const EdgeInsets.only(right: 8),
             child: Text(_hoverTime!, style: const TextStyle(fontSize: 11, color: Color(0xFF737373))),
           ),
-        // Export Clip / Cancel
+        // Export Clip controls
+        if (_showClips && !_ctrl.exportMode) ...[
+          if (widget.cameras != null)
+            _exportActionButton(
+              icon: Icons.auto_awesome,
+              label: 'Wizard',
+              onTap: _showExportWizard,
+            ),
+          if (widget.cameras != null) const SizedBox(width: 4),
+          _exportActionButton(
+            icon: Icons.timeline,
+            label: 'Timeline',
+            onTap: _enterTimelineExportMode,
+          ),
+          const SizedBox(width: 4),
+        ],
         SizedBox(
           height: 26,
           child: TextButton(
@@ -812,31 +824,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   }
 
   Widget _buildClipsPanel() {
-    debugPrint('[EXPORT] _buildClipsPanel: exportMode=${_ctrl.exportMode}, cameras=${widget.cameras?.length}, clips=${_clips.length}');
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Action buttons row (only when not in timeline selection mode)
-        if (!_ctrl.exportMode)
-          Padding(
-            padding: const EdgeInsets.only(top: 6, bottom: 4),
-            child: Row(
-              children: [
-                if (widget.cameras != null)
-                  _exportActionButton(
-                    icon: Icons.auto_awesome,
-                    label: 'Wizard',
-                    onTap: _showExportWizard,
-                  ),
-                if (widget.cameras != null) const SizedBox(width: 8),
-                _exportActionButton(
-                  icon: Icons.timeline,
-                  label: 'Timeline',
-                  onTap: _enterTimelineExportMode,
-                ),
-              ],
-            ),
-          ),
         // Clips list
         if (_clips.isNotEmpty)
           Container(
