@@ -75,8 +75,9 @@ Filename: "{app}\nssm.exe"; Parameters: "set RichIris Description ""RichIris Net
 Filename: "{app}\nssm.exe"; Parameters: "set RichIris Start SERVICE_AUTO_START"; Flags: runhidden waituntilterminated
 ; Note: AppStdout/AppStderr paths are set dynamically in CurStepChanged(ssPostInstall)
 Filename: "{app}\nssm.exe"; Parameters: "start RichIris"; StatusMsg: "Starting RichIris service..."; Flags: runhidden waituntilterminated
-; Launch the app after install
-Filename: "{app}\app\{#MyAppGUIName}"; Description: "Launch RichIris"; Flags: postinstall nowait skipifsilent
+; Launch the app after install (interactive install: checkbox; silent/update: always)
+Filename: "{app}\app\{#MyAppGUIName}"; Description: "Launch RichIris"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\app\{#MyAppGUIName}"; Flags: nowait skipifnotsilent runasoriginaluser
 
 [UninstallRun]
 ; Stop and remove the service

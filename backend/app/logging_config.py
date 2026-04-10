@@ -64,7 +64,7 @@ def _get_renderer(json_output: bool) -> structlog.types.Processor:
     """Return JSON or console renderer based on config."""
     if json_output:
         return structlog.processors.JSONRenderer()
-    return structlog.dev.ConsoleRenderer()
+    return structlog.dev.ConsoleRenderer(pad_level=False)
 
 
 def _configure_root_logger(formatter: logging.Formatter, level: int) -> None:
