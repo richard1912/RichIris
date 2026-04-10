@@ -65,9 +65,10 @@ class _CreateOutcome {
 class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
   int _step = 0;
 
-  // Step 0: credentials
+  // Step 0: credentials + optional subnet override
   final _userCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
+  final _subnetsCtrl = TextEditingController();
   bool _obscurePassword = true;
 
   // Step 1: scan
@@ -100,6 +101,7 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
   void dispose() {
     _userCtrl.dispose();
     _passCtrl.dispose();
+    _subnetsCtrl.dispose();
     for (final c in _manualMainCtrls.values) {
       c.dispose();
     }
@@ -125,7 +127,7 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
       _selectedIps.clear();
     });
     try {
-      final resp = await widget.cameraApi.scan();
+      final resp = await widget.cameraApi.scan(subnets: _parseSubnetOverrides());
       if (!mounted) return;
       setState(() {
         _scanResponse = resp;
@@ -199,6 +201,31 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
     } finally {
       if (mounted) setState(() => _discovering = false);
     }
+  }
+
+  /// Parse the comma/space/newline separated subnet override text into a
+  /// list of `"A.B.C"` /24 prefixes. Accepts either raw prefixes
+  /// (`192.168.8`) or full addresses with any octet (`192.168.8.42`,
+  /// `192.168.8.0/24`) — we just strip the 4th octet + mask. Returns `null`
+  /// when the field is empty so the backend falls back to auto-detection.
+  List<String>? _parseSubnetOverrides() {
+    final raw = _subnetsCtrl.text.trim();
+    if (raw.isEmpty) return null;
+    final out = <String>{};
+    for (final tok in raw.split(RegExp(r'[\s,]+'))) {
+      if (tok.isEmpty) continue;
+      final stripped = tok.split('/').first;
+      final parts = stripped.split('.');
+      if (parts.length < 3) continue;
+      final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+      // Basic sanity check: each octet is 0-255.
+      final ok = prefix.split('.').every((p) {
+        final n = int.tryParse(p);
+        return n != null && n >= 0 && n <= 255;
+      });
+      if (ok) out.add(prefix);
+    }
+    return out.isEmpty ? null : out.toList();
   }
 
   int _pixels(String? resolution) {
@@ -425,6 +452,18 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 18),
+                TextField(
+                  controller: _subnetsCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Subnets to scan (optional)',
+                    hintText: '192.168.8, 192.168.1',
+                    helperText:
+                        'Leave blank to auto-detect. Comma or space separated.',
+                    isDense: true,
+                  ),
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
               ],
             ),
           ),
@@ -440,9 +479,12 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            'The scan probes every IP on your server\'s local /24 subnets for an '
-            'open RTSP port (554). Cameras already added to RichIris are '
-            'automatically filtered out.',
+            'By default, the scan auto-detects every private /24 subnet reachable '
+            'from the RichIris server and probes port 554 on each host. Override '
+            'the subnet list above if your cameras live on a different network '
+            'from the server (useful when the backend runs in a NAT\'d VM or '
+            'container, or when cameras are on a dedicated VLAN). Cameras '
+            'already added to RichIris are automatically filtered out.',
             style: TextStyle(fontSize: 12, color: Colors.grey[500], height: 1.4),
           ),
         ],
