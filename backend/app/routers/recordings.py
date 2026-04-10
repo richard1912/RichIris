@@ -177,7 +177,7 @@ async def start_playback_session(
 
     return {
         "segment_url": f"/api/recordings/playback/{session_id}/playback.mp4",
-        "seek_seconds": 0.0,  # seek already applied by ffmpeg
+        "seek_seconds": seek_seconds,  # offset for playhead positioning (seek applied by ffmpeg, player starts at 0)
         "segment_start": seg.start_time.isoformat(),
         "segment_end": seg_end.isoformat(),
         "has_more": has_more,

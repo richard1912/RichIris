@@ -90,6 +90,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   String? _windowEnd;
   bool _hasMore = false;
   String? _playbackStartTime;
+  int _seekOffsetMs = 0; // seek offset applied by backend (player position starts from 0)
   int _virtualTimeMs = 0;
   int _generation = 0;
   bool _reverseLoading = false;
@@ -232,16 +233,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       _ensurePlayer();
       _pbVideoReady = false;
       _pbPlayer!.open(Media(fullUrl));
-
-      // Seek to offset within segment
-      if (session.seekSeconds > 1.0) {
-        _seekSub = _pbPlayer!.stream.duration.listen((dur) {
-          if (dur > Duration.zero) {
-            _pbPlayer!.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
-            _seekSub?.cancel();
-          }
-        });
-      }
+      // Backend already applied seek via ffmpeg — player starts at position 0
+      // which maps to segmentStart + seekSeconds in NVR time
 
       final actualStartMs = DateTime.parse(session.segmentStart).millisecondsSinceEpoch;
       setState(() {
@@ -254,7 +247,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           widget.onLiveStateChanged(false);
         }
         _playbackStartTime = session.segmentStart;
-        _virtualTimeMs = actualStartMs + (session.seekSeconds * 1000).round();
+        _seekOffsetMs = (session.seekSeconds * 1000).round();
+        _virtualTimeMs = actualStartMs + _seekOffsetMs;
         _playbackLoading = false;
       });
 
@@ -360,6 +354,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                   _hasMore = session.hasMore;
                   _isLive = false;
                   _playbackStartTime = session.segmentStart;
+                  _seekOffsetMs = 0;
                   _playbackLoading = false;
                 });
                 _startReverseInterval(newSpeed);
@@ -389,16 +384,6 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           _pbVideoReady = false;
           _pbPlayer!.open(Media(fullUrl));
 
-          if (session.seekSeconds > 1.0) {
-            _seekSub?.cancel();
-            _seekSub = _pbPlayer!.stream.duration.listen((dur) {
-              if (dur > Duration.zero) {
-                _pbPlayer!.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
-                _seekSub?.cancel();
-              }
-            });
-          }
-
           final actualStartMs = DateTime.parse(session.segmentStart).millisecondsSinceEpoch;
           setState(() {
             _playbackUrl = fullUrl;
@@ -406,7 +391,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
             _hasMore = session.hasMore;
             _isLive = false;
             _playbackStartTime = session.segmentStart;
-            _virtualTimeMs = actualStartMs + (session.seekSeconds * 1000).round();
+            _seekOffsetMs = (session.seekSeconds * 1000).round();
+            _virtualTimeMs = actualStartMs + _seekOffsetMs;
             _playbackLoading = false;
           });
 
@@ -431,7 +417,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     // Sync virtual time
     if (_playbackStartTime != null) {
       final startMs = DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch;
-      _virtualTimeMs = startMs + player.state.position.inMilliseconds;
+      _virtualTimeMs = startMs + _seekOffsetMs + player.state.position.inMilliseconds;
     }
 
     if (newSpeed < 0) {
@@ -475,6 +461,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               _windowEnd = session.segmentEnd;
               _hasMore = session.hasMore;
               _playbackStartTime = session.segmentStart;
+              _seekOffsetMs = 0;
               _playbackLoading = false;
             });
             _startReverseInterval(newSpeed);
@@ -613,6 +600,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                   _windowEnd = session.segmentEnd;
                   _hasMore = session.hasMore;
                   _playbackStartTime = session.segmentStart;
+                  _seekOffsetMs = 0;
                 });
                 _reverseLoading = false;
               });
@@ -653,7 +641,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     final p = _pbPlayer;
     if (p != null && _playbackStartTime != null) {
       final startMs = DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch;
-      return startMs + p.state.position.inMilliseconds + _tzOffsetMs;
+      return startMs + _seekOffsetMs + p.state.position.inMilliseconds + _tzOffsetMs;
     }
     return DateTime.now().millisecondsSinceEpoch + _tzOffsetMs;
   }
