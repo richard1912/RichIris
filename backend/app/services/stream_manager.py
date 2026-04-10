@@ -35,7 +35,6 @@ class StreamInfo:
     last_error: str | None = None
     _rec_monitor_task: asyncio.Task | None = field(default=None, repr=False)
     _watchdog_task: asyncio.Task | None = field(default=None, repr=False)
-    _sub_keepalive_task: asyncio.Task | None = field(default=None, repr=False)
     _main_keepalive_task: asyncio.Task | None = field(default=None, repr=False)
 
 
@@ -82,16 +81,12 @@ class StreamManager:
         info._watchdog_task = asyncio.create_task(
             self._watchdog(camera_id)
         )
-        # Keep go2rtc connections alive for instant live view via HTTP fMP4.
-        # Stagger startups by 1s each to avoid overwhelming go2rtc.
+        # Keep go2rtc's main-stream alive for instant main-quality live view.
+        # (Sub-stream is kept warm by the FrameBroker's persistent ffmpeg reader.)
         main_delay = 3 + self._keepalive_index
-        sub_delay = main_delay + 0.5
         self._keepalive_index += 1
         info._main_keepalive_task = asyncio.create_task(
             self._go2rtc_keepalive(camera_id, "s1_direct", startup_delay=main_delay)
-        )
-        info._sub_keepalive_task = asyncio.create_task(
-            self._go2rtc_keepalive(camera_id, "s2_direct", startup_delay=sub_delay)
         )
 
         logger.info("Recording stream started", extra={"camera_id": camera_id, "camera": camera_name})
@@ -109,9 +104,6 @@ class StreamManager:
         if info._watchdog_task:
             info._watchdog_task.cancel()
             info._watchdog_task = None
-        if info._sub_keepalive_task:
-            info._sub_keepalive_task.cancel()
-            info._sub_keepalive_task = None
         if info._main_keepalive_task:
             info._main_keepalive_task.cancel()
             info._main_keepalive_task = None

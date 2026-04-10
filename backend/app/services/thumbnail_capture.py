@@ -1,7 +1,9 @@
 """Real-time thumbnail capture service.
 
-Uses ffmpeg to grab JPEG snapshots from go2rtc's local RTSP relay.
-No new camera connections — piggybacks on existing go2rtc keepalives.
+Reads frames from the shared FrameBroker (persistent ffmpeg against go2rtc's
+sub-stream relay — no new camera connections) and writes scaled JPEG thumbnails
+at the configured interval.
+
 Thumbnails are stored as individual files in
 {thumbnails_dir}/{camera_name}/{YYYY-MM-DD}/thumbs/thumb_HHMMSS.jpg
 """
@@ -11,15 +13,17 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import cv2
+
 from app.config import get_config
 from app.services.ffmpeg import sanitize_camera_name
-from app.services.go2rtc_client import get_stream_name
+from app.services.frame_broker import get_frame_broker
 
 logger = logging.getLogger(__name__)
 
 
 class ThumbnailCapture:
-    """Captures periodic JPEG thumbnails via ffmpeg from go2rtc's local RTSP relay."""
+    """Periodically saves JPEG thumbnails from the shared frame broker."""
 
     def __init__(self):
         self._tasks: list[asyncio.Task] = []
@@ -37,7 +41,6 @@ class ThumbnailCapture:
         logger.info("Thumbnail capture started", extra={"cameras": len(cameras)})
 
     def add_camera(self, camera) -> None:
-        """Start thumbnail capture for a newly added camera."""
         if not self._running:
             return
         task = asyncio.create_task(self._capture_loop(camera, startup_delay=5))
@@ -45,7 +48,6 @@ class ThumbnailCapture:
         logger.info("Thumbnail capture added camera", extra={"camera": camera.name})
 
     def remove_camera(self, camera_name: str) -> None:
-        """Stop thumbnail capture for a removed camera (handled by task cancellation on next stop/restart)."""
         pass  # Tasks check self._running; full cleanup happens in stop()
 
     async def stop(self) -> None:
@@ -57,60 +59,16 @@ class ThumbnailCapture:
         self._tasks = []
         logger.info("Thumbnail capture stopped")
 
-    async def _grab_frame(self, rtsp_url: str, out_path: Path, width: int, height: int) -> bool:
-        """Use ffmpeg to grab a single JPEG frame from go2rtc's local RTSP relay."""
-        config = get_config()
-        cmd = [
-            config.ffmpeg.path,
-            "-rtsp_transport", "tcp",
-            "-timeout", "5000000",  # 5s connection timeout
-            "-i", rtsp_url,
-            "-frames:v", "1",
-            "-vf", f"scale={width}:{height}",
-            "-q:v", "5",
-            "-y",
-            str(out_path),
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.communicate(), timeout=10)
-            return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return False
-        except Exception:
-            return False
-
     async def _capture_loop(self, camera, startup_delay: float = 0) -> None:
         if startup_delay > 0:
             await asyncio.sleep(startup_delay)
         config = get_config()
         tp = config.trickplay
         safe_name = sanitize_camera_name(camera.name)
-        stream_name = get_stream_name(camera.name)
-
-        # Connect to go2rtc's local RTSP relay — reuses existing keepalive connection
-        # to the camera, no new RTSP connections made. Try sub-stream first (lighter).
-        from app.services.go2rtc_manager import get_rtsp_port
-        rtsp_port = get_rtsp_port()
-        relay_urls = [
-            f"rtsp://127.0.0.1:{rtsp_port}/{stream_name}_s2_direct",
-            f"rtsp://127.0.0.1:{rtsp_port}/{stream_name}_s1_direct",
-        ]
-        url_index = 0
+        broker = get_frame_broker()
         consecutive_failures = 0
-        url_failures = 0
 
-        logger.info("Thumbnail capture loop started", extra={
-            "camera": camera.name, "relay": relay_urls[0],
-        })
+        logger.info("Thumbnail capture loop started", extra={"camera": camera.name})
 
         while self._running:
             try:
@@ -121,35 +79,27 @@ class ThumbnailCapture:
             now = datetime.now()
             date_str = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H%M%S")
-
             thumbs_dir = Path(config.storage.thumbnails_dir) / safe_name / date_str / "thumbs"
-            thumbs_dir.mkdir(parents=True, exist_ok=True)
             out_path = thumbs_dir / f"thumb_{time_str}.jpg"
 
             try:
-                ok = await self._grab_frame(relay_urls[url_index], out_path, tp.thumb_width, tp.thumb_height)
-                if not ok:
-                    if out_path.exists():
-                        out_path.unlink(missing_ok=True)
+                frame = broker.get_latest(camera.id)
+                if frame is None:
                     consecutive_failures += 1
-                    url_failures += 1
-                    # Fall back to main stream after 10 sub-stream failures
-                    if url_failures >= 10 and url_index == 0:
-                        url_index = 1
-                        url_failures = 0
-                        logger.info("Thumbnail falling back to main stream relay", extra={
-                            "camera": camera.name,
-                        })
                     if consecutive_failures == 1 or consecutive_failures % 30 == 0:
                         logger.debug("Thumbnail capture failed", extra={
                             "camera": camera.name,
                             "consecutive_failures": consecutive_failures,
-                            "stream": "s2" if url_index == 0 else "s1",
                         })
                     continue
 
                 consecutive_failures = 0
-                url_failures = 0
+                thumbs_dir.mkdir(parents=True, exist_ok=True)
+                resized = cv2.resize(
+                    frame, (tp.thumb_width, tp.thumb_height), interpolation=cv2.INTER_AREA
+                )
+                cv2.imwrite(str(out_path), resized, [cv2.IMWRITE_JPEG_QUALITY, 75])
+
                 logger.debug("Captured thumbnail", extra={
                     "camera": camera.name,
                     "path": str(out_path),
@@ -172,7 +122,7 @@ class ThumbnailCapture:
 
         thumbnails = []
         for f in sorted(thumbs_dir.glob("thumb_*.jpg")):
-            name = f.stem  # thumb_HHMMSS
+            name = f.stem
             time_part = name.replace("thumb_", "")
             if len(time_part) == 6:
                 thumbnails.append({

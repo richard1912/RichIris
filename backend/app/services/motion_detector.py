@@ -14,6 +14,7 @@ from app.config import get_config
 from app.database import get_session_factory
 from app.models import MotionEvent
 from app.services.ffmpeg import sanitize_camera_name
+from app.services.frame_broker import get_frame_broker
 from app.services.object_detector import get_object_detector
 
 _VEHICLE_LABELS = {"bicycle", "car", "motorcycle", "bus", "truck"}
@@ -33,10 +34,9 @@ logger = logging.getLogger(__name__)
 
 COOLDOWN_SECONDS = 10
 MAX_EVENT_DURATION = 120  # Force-close events after 2 minutes to prevent false-positive stretching
-POLL_INTERVAL = 1.0       # Seconds between snapshot fetches
+POLL_INTERVAL = 0.5       # Seconds between frame checks (broker runs at 2 fps)
 BLUR_SIZE = (21, 21)
 DIFF_THRESHOLD = 25
-MAX_CHANGE_PCT = 40       # Ignore frames where >40% changed (IR switch, exposure shift)
 MOTION_ALPHA = 0.01       # Slow running-average adaptation (steady state)
 MOTION_ALPHA_STARTUP = 0.2
 BASELINE_STARTUP_FRAMES = 25
@@ -48,15 +48,6 @@ MIN_MOTION_OVERLAP = 0.10  # 10% of bbox area must have changed pixels
 AI_CONFIRM_REQUIRED = 2   # detections needed within the window
 AI_CONFIRM_WINDOW = 3     # sliding window size (frames)
 AI_MIN_MOVE_PCT = 1.5     # min bbox center movement as % of frame diagonal
-
-
-def _get_relay_rtsp_url(camera) -> str:
-    """Return go2rtc local RTSP relay URL for snapshots (no new camera connections)."""
-    from app.services.go2rtc_manager import get_rtsp_port
-    from app.services.go2rtc_client import get_stream_name
-    stream_name = get_stream_name(camera.name)
-    # Use sub-stream relay (lighter decode) — go2rtc chains to main if no sub configured
-    return f"rtsp://127.0.0.1:{get_rtsp_port()}/{stream_name}_s2_direct"
 
 
 class MotionDetector:
@@ -96,15 +87,13 @@ class MotionDetector:
         self._running = True
         # Close any orphaned events from previous runs (service restart / crash)
         await self._close_orphaned_events()
-        # Stagger camera starts to avoid concurrent go2rtc stream creation
         stagger_delay = 0
         for cam in cameras:
             if cam.motion_sensitivity > 0 and (cam.sub_stream_url or cam.rtsp_url):
-                snapshot_url = _get_relay_rtsp_url(cam)
                 scripts = self._parse_motion_scripts(cam)
                 task = asyncio.create_task(
                     self._detect_loop(
-                        cam.id, cam.name, snapshot_url,
+                        cam.id, cam.name,
                         cam.motion_sensitivity, scripts,
                         ai_detection=cam.ai_detection,
                         ai_detect_persons=cam.ai_detect_persons,
@@ -115,7 +104,7 @@ class MotionDetector:
                     )
                 )
                 self._tasks[cam.id] = task
-                stagger_delay += 2
+                stagger_delay += 1
         if self._tasks:
             logger.info("Motion detector started", extra={"cameras": len(self._tasks)})
 
@@ -164,14 +153,13 @@ class MotionDetector:
             self._clear_ai_history(cam_id)
 
         if self._running and camera.motion_sensitivity > 0 and camera.enabled:
-            snapshot_url = _get_relay_rtsp_url(camera)
             if camera.ai_detection:
                 detector = get_object_detector()
                 await detector.start()
             scripts = self._parse_motion_scripts(camera)
             task = asyncio.create_task(
                 self._detect_loop(
-                    camera.id, camera.name, snapshot_url,
+                    camera.id, camera.name,
                     camera.motion_sensitivity, scripts,
                     ai_detection=camera.ai_detection,
                     ai_detect_persons=camera.ai_detect_persons,
@@ -222,41 +210,8 @@ class MotionDetector:
                     max_dist = d
         return max_dist >= self._move_threshold.get(cam_id, 0)
 
-    async def _fetch_frame(self, relay_url: str) -> np.ndarray | None:
-        """Grab a single frame from go2rtc's local RTSP relay via ffmpeg."""
-        config = get_config()
-        cmd = [
-            config.ffmpeg.path,
-            "-rtsp_transport", "tcp",
-            "-timeout", "5000000",
-            "-i", relay_url,
-            "-frames:v", "1",
-            "-f", "image2pipe",
-            "-vcodec", "mjpeg",
-            "-q:v", "5",
-            "-",
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            if proc.returncode != 0 or not stdout or len(stdout) < 1000:
-                return None
-            return cv2.imdecode(np.frombuffer(stdout, np.uint8), cv2.IMREAD_COLOR)
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return None
-        except Exception:
-            return None
-
     async def _detect_loop(
-        self, cam_id: int, cam_name: str, rtsp_url: str,
+        self, cam_id: int, cam_name: str,
         sensitivity: int, scripts: list[dict],
         ai_detection: bool = False,
         ai_detect_persons: bool = True, ai_detect_vehicles: bool = False,
@@ -264,7 +219,7 @@ class MotionDetector:
         ai_threshold: float = 0.5,
         startup_delay: float = 0,
     ) -> None:
-        """Per-camera detection loop: snapshot → motion check → AI detection → event."""
+        """Per-camera detection loop: pull frame → motion check → AI detection → event."""
         if startup_delay > 0:
             await asyncio.sleep(startup_delay)
         threshold_pct = (101 - sensitivity) * 0.05
@@ -280,9 +235,11 @@ class MotionDetector:
                    "threshold_pct": round(threshold_pct, 2), "ai": ai_detection},
         )
 
+        broker = get_frame_broker()
+
         while self._running:
             try:
-                frame = await self._fetch_frame(rtsp_url)
+                frame = await broker.get_fresh(cam_id, max_wait=5.0)
                 if frame is None:
                     consecutive_failures += 1
                     if consecutive_failures == 1 or consecutive_failures % 30 == 0:
@@ -290,9 +247,7 @@ class MotionDetector:
                             "Failed to fetch snapshot",
                             extra={"camera": cam_name, "consecutive_failures": consecutive_failures},
                         )
-                    # Exponential backoff: 1s, 2s, 4s, 8s, max 15s
-                    backoff = min(POLL_INTERVAL * (2 ** min(consecutive_failures - 1, 4)), 15)
-                    await asyncio.sleep(backoff)
+                    await asyncio.sleep(1.0)
                     continue
 
                 consecutive_failures = 0
@@ -318,13 +273,7 @@ class MotionDetector:
                 _, thresh = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
                 changed_pct = (np.count_nonzero(thresh) / thresh.size) * 100
 
-                if changed_pct > MAX_CHANGE_PCT:
-                    # IR switch / exposure shift — reset baseline + AI history
-                    self._avg_baseline[cam_id] = gray.astype(np.float32)
-                    self._baseline_frames[cam_id] = 0
-                    self._clear_ai_history(cam_id)
-                    await self._check_cooldown(cam_id)
-                elif changed_pct >= threshold_pct:
+                if changed_pct >= threshold_pct:
                     # Motion detected — run AI detection if enabled, otherwise fire event
                     if ai_detection:
                         # Compute move threshold once from frame dimensions
@@ -406,7 +355,7 @@ class MotionDetector:
                     await self._check_cooldown(cam_id)
 
                 # Update running average baseline
-                if changed_pct <= MAX_CHANGE_PCT and self._avg_baseline.get(cam_id) is not None:
+                if self._avg_baseline.get(cam_id) is not None:
                     alpha = (
                         MOTION_ALPHA_STARTUP
                         if self._baseline_frames.get(cam_id, 0) <= BASELINE_STARTUP_FRAMES

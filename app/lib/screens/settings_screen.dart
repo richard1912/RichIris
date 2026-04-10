@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../config/api_config.dart';
 import '../services/api_client.dart';
+import '../services/backend_scanner.dart';
 
 class SettingsScreen extends StatefulWidget {
   final ValueChanged<String> onSaved;
@@ -81,6 +83,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
+  Future<void> _openScanSheet() async {
+    final picked = await showModalBottomSheet<DiscoveredBackend>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => const _ScanBackendsSheet(),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _controller.text = picked.url;
+      _error = null;
+      _success = false;
+    });
+    await _test();
+  }
+
   Future<void> _save() async {
     final url = _normalizeUrl(_controller.text);
     if (url.isEmpty) {
@@ -130,6 +148,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               keyboardType: TextInputType.url,
               onSubmitted: (_) => _test(),
             ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: _openScanSheet,
+                icon: const Icon(Icons.wifi_find, size: 18),
+                label: const Text('Scan network'),
+              ),
+            ),
             const SizedBox(height: 16),
             if (_error != null)
               Padding(
@@ -176,6 +203,156 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ScanBackendsSheet extends StatefulWidget {
+  const _ScanBackendsSheet();
+
+  @override
+  State<_ScanBackendsSheet> createState() => _ScanBackendsSheetState();
+}
+
+class _ScanBackendsSheetState extends State<_ScanBackendsSheet> {
+  final BackendScanner _scanner = BackendScanner();
+  final List<DiscoveredBackend> _results = [];
+  StreamSubscription<DiscoveredBackend>? _sub;
+  bool _scanning = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _startScan();
+  }
+
+  void _startScan() {
+    setState(() {
+      _scanning = true;
+      _results.clear();
+    });
+    _sub = _scanner.scan().listen(
+      (backend) {
+        if (!mounted) return;
+        // Dedupe by URL in case multiple interfaces reach the same host.
+        if (_results.any((r) => r.url == backend.url)) return;
+        setState(() => _results.add(backend));
+      },
+      onDone: () {
+        if (!mounted) return;
+        setState(() => _scanning = false);
+      },
+      onError: (_) {
+        if (!mounted) return;
+        setState(() => _scanning = false);
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _scanner.cancel();
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 4,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.wifi_find, size: 22),
+                const SizedBox(width: 8),
+                Text(
+                  'Scan for RichIris servers',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _scanning
+                  ? 'Scanning your network…'
+                  : _results.isEmpty
+                      ? 'No servers found'
+                      : 'Tap a server to connect',
+              style: TextStyle(color: Colors.grey[500], fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            if (_scanning) const LinearProgressIndicator(minHeight: 2),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.45,
+              ),
+              child: _results.isEmpty && !_scanning
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 24),
+                      child: Center(
+                        child: Column(
+                          children: [
+                            Icon(Icons.search_off,
+                                size: 40, color: Colors.grey[600]),
+                            const SizedBox(height: 8),
+                            Text(
+                              'No RichIris backends found.\nMake sure the server is running on the same network.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey[500]),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: _results.length,
+                      itemBuilder: (ctx, i) {
+                        final r = _results[i];
+                        return ListTile(
+                          leading: const Icon(Icons.videocam_outlined),
+                          title: Text(r.ip),
+                          subtitle: Text(
+                            r.version != null
+                                ? '${r.url}  ·  v${r.version}'
+                                : r.url,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => Navigator.of(context).pop(r),
+                        );
+                      },
+                    ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (!_scanning)
+                  TextButton.icon(
+                    onPressed: _startScan,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('Rescan'),
+                  ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Close'),
+                ),
+              ],
+            ),
           ],
         ),
       ),

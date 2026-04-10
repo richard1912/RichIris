@@ -12,7 +12,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-GITHUB_API_URL = "https://api.github.com/repos/richard1912/RichIris/releases/latest"
+GITHUB_API_URL = "https://api.github.com/repos/richard1912/RichIris/releases"
 CHECK_INTERVAL = 6 * 3600  # 6 hours
 INITIAL_DELAY = 60  # Let service finish starting
 
@@ -103,6 +103,7 @@ class UpdateChecker:
                 resp = await client.get(
                     GITHUB_API_URL,
                     headers={"Accept": "application/vnd.github+json"},
+                    params={"per_page": 50},
                 )
             self._last_check = datetime.now(timezone.utc)
 
@@ -116,21 +117,42 @@ class UpdateChecker:
                 )
                 return
 
-            data = resp.json()
-            tag = data.get("tag_name", "")
-            remote_version = tag.lstrip("v")
-
-            if _compare_versions(remote_version, self._current_version) <= 0:
+            releases = resp.json()
+            if not isinstance(releases, list) or not releases:
                 self._latest_release = None
+                return
+
+            # Filter to releases newer than current, sorted newest first
+            newer = []
+            for rel in releases:
+                if rel.get("draft") or rel.get("prerelease"):
+                    continue
+                tag = rel.get("tag_name", "")
+                ver = tag.lstrip("v")
+                if _compare_versions(ver, self._current_version) > 0:
+                    newer.append(rel)
+
+            if not newer:
+                self._latest_release = None
+                latest_tag = releases[0].get("tag_name", "").lstrip("v")
                 logger.debug(
                     "No update available",
-                    extra={"current": self._current_version, "latest": remote_version},
+                    extra={"current": self._current_version, "latest": latest_tag},
                 )
                 return
 
-            # Parse assets
+            # Latest release (newest) for version/assets/published_at
+            latest = newer[0]
+            latest_tag = latest.get("tag_name", "")
+            latest_version = latest_tag.lstrip("v")
+
+            # Parse assets from latest release. Two Windows installers ship
+            # in each release: the full NVR installer (RichIris-Setup.exe) and
+            # the client-only app installer (RichIris-Client-Setup.exe). They
+            # are stored under separate keys so the Flutter updater can pick
+            # the right one based on the install flavor.
             assets: dict[str, dict] = {}
-            for asset in data.get("assets", []):
+            for asset in latest.get("assets", []):
                 name = asset.get("name", "")
                 info = {
                     "name": name,
@@ -138,20 +160,32 @@ class UpdateChecker:
                     "size": asset.get("size", 0),
                 }
                 if name.endswith(".exe"):
-                    assets["windows"] = info
+                    if "Client-Setup" in name:
+                        assets["windows_client"] = info
+                    else:
+                        assets["windows"] = info
                 elif name.endswith(".apk"):
                     assets["android"] = info
 
+            # Combine changelogs from all newer releases (newest first)
+            changelog_parts = []
+            for rel in newer:
+                tag = rel.get("tag_name", "")
+                body = (rel.get("body") or "").strip()
+                if body:
+                    changelog_parts.append(f"# {tag}\n{body}")
+            combined_changelog = "\n\n".join(changelog_parts)
+
             self._latest_release = {
-                "version": remote_version,
-                "tag_name": tag,
-                "changelog": data.get("body", ""),
-                "published_at": data.get("published_at", ""),
+                "version": latest_version,
+                "tag_name": latest_tag,
+                "changelog": combined_changelog,
+                "published_at": latest.get("published_at", ""),
                 "assets": assets,
             }
             logger.info(
                 "Update available",
-                extra={"current": self._current_version, "latest": remote_version},
+                extra={"current": self._current_version, "latest": latest_version},
             )
 
         except httpx.TimeoutException:

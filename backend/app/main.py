@@ -18,6 +18,7 @@ from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
 from app.services.playback import get_playback_manager
+from app.services.frame_broker import get_frame_broker
 from app.services.stream_manager import get_stream_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
 from app.services.motion_detector import get_motion_detector
@@ -98,8 +99,11 @@ async def lifespan(app: FastAPI):
         "ms": round((time.monotonic() - t0) * 1000, 1),
     })
 
-    # No pre-warming needed: recording ffmpeg keeps s1_direct alive,
-    # motion detection + thumbnail capture keep s2_direct alive.
+    # Shared frame broker: one persistent ffmpeg per camera pulling MJPEG
+    # frames from the s2_direct relay. Keeps the sub-stream warm AND feeds
+    # both motion detection and thumbnail capture — so it must start first.
+    frame_broker = get_frame_broker()
+    await frame_broker.start(cameras_list)
 
     thumb_capture = get_thumbnail_capture()
     thumb_capture.start(cameras_list)
@@ -127,11 +131,12 @@ async def lifespan(app: FastAPI):
     await update_checker.stop()
     await motion_detector.stop()
     await obj_detector.stop()
+    await thumb_capture.stop()
+    await frame_broker.stop()
     mgr = get_stream_manager()
     await mgr.stop_all()
     pb = get_playback_manager()
     await pb.stop_all()
-    await thumb_capture.stop()
     from app.routers.streams import close_pool
     await close_pool()
     await stop_go2rtc()
@@ -238,7 +243,7 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="RichIris NVR",
-        version="0.0.6",
+        version="0.0.8",
         lifespan=lifespan,
     )
 
@@ -254,7 +259,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok"}
+        return {"status": "ok", "app": "richiris", "version": app.version}
 
     return app
 

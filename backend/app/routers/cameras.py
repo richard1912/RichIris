@@ -228,6 +228,10 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
             await restart_go2rtc()
             mgr = get_stream_manager()
             await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+            # Start the shared frame broker reader for the new camera first,
+            # so motion + thumbnail capture have frames available immediately.
+            from app.services.frame_broker import get_frame_broker
+            await get_frame_broker().add_camera(camera)
             # Start thumbnail capture for the new camera
             from app.services.thumbnail_capture import get_thumbnail_capture
             get_thumbnail_capture().add_camera(camera)
@@ -296,11 +300,16 @@ async def update_camera(
     if data.name is not None and data.name != old_name:
         await _rename_camera_folder(db, camera.id, old_name, data.name)
 
+    from app.services.frame_broker import get_frame_broker
+    broker = get_frame_broker()
     if not camera.enabled:
         await mgr.stop_stream(camera.id)
+        await broker.remove_camera(camera.id)
     elif needs_restart:
         await mgr.stop_stream(camera.id)
+        await broker.remove_camera(camera.id)
         await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+        await broker.add_camera(camera)
 
     # Update motion detection if settings changed
     detector = get_motion_detector()
@@ -318,6 +327,8 @@ async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
 
     mgr = get_stream_manager()
     await mgr.stop_stream(camera.id)
+    from app.services.frame_broker import get_frame_broker
+    await get_frame_broker().remove_camera(camera.id)
 
     # Remove DB metadata (recordings + clip exports) so FK constraints don't block delete.
     # Actual video files on disk are NOT deleted.

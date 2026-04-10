@@ -113,7 +113,10 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
 
   void _initApi(String url) {
     _apiClient = ApiClient(url);
-    _updateService = UpdateService(_apiClient!);
+    _updateService = UpdateService(
+      _apiClient!,
+      currentVersion: _appVersion.isEmpty ? '0.0.0' : _appVersion,
+    );
 
     if (widget.updateOnly) {
       // Minimal mode: only need the update service, skip everything else
