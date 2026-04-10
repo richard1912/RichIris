@@ -183,21 +183,31 @@ begin
   if CurStep = ssPostInstall then
   begin
     AppDir := ExpandConstant('{app}');
-    DataDir := DataDirPage.Values[0];
+    BootstrapPath := AppDir + '\bootstrap.yaml';
 
-    // Create data subdirectories
+    if FileExists(BootstrapPath) then
+    begin
+      // Upgrade: preserve existing bootstrap.yaml — read data_dir from it
+      DataDir := ReadExistingDataDir();
+      if DataDir = '' then
+        DataDir := ExpandConstant('{commonappdata}\RichIris');
+    end
+    else
+    begin
+      // Fresh install: write bootstrap.yaml with user's chosen data dir
+      DataDir := DataDirPage.Values[0];
+      YamlDir := DataDir;
+      StringChangeEx(YamlDir, '\', '/', True);
+      BootstrapContent := 'data_dir: "' + YamlDir + '"' + #13#10 + 'port: 8700' + #13#10;
+      SaveStringToFile(BootstrapPath, BootstrapContent, False);
+    end;
+
+    // Ensure data subdirectories exist
     ForceDirectories(DataDir + '\database');
     ForceDirectories(DataDir + '\logs');
     ForceDirectories(DataDir + '\recordings');
     ForceDirectories(DataDir + '\thumbnails');
     ForceDirectories(DataDir + '\playback');
-
-    // Always write bootstrap.yaml with user's chosen data dir
-    BootstrapPath := AppDir + '\bootstrap.yaml';
-    YamlDir := DataDir;
-    StringChangeEx(YamlDir, '\', '/', True);
-    BootstrapContent := 'data_dir: "' + YamlDir + '"' + #13#10 + 'port: 8700' + #13#10;
-    SaveStringToFile(BootstrapPath, BootstrapContent, False);
 
     // Set NSSM log paths to the chosen data directory
     Exec(AppDir + '\nssm.exe',

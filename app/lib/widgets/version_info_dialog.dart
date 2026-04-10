@@ -17,10 +17,10 @@ class VersionInfoDialog extends StatefulWidget {
   State<VersionInfoDialog> createState() => _VersionInfoDialogState();
 }
 
-enum _CheckState { idle, checking, upToDate, updateAvailable, error }
+enum _CheckState { checking, upToDate, error }
 
 class _VersionInfoDialogState extends State<VersionInfoDialog> {
-  _CheckState _state = _CheckState.idle;
+  _CheckState _state = _CheckState.checking;
   UpdateInfo? _update;
   String? _lastChecked;
   String? _error;
@@ -28,19 +28,8 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
   @override
   void initState() {
     super.initState();
-    _loadCached();
-  }
-
-  Future<void> _loadCached() async {
-    try {
-      final result = await widget.updateService.getUpdate();
-      if (mounted) {
-        setState(() {
-          _update = result.update;
-          _lastChecked = result.lastChecked;
-        });
-      }
-    } catch (_) {}
+    // Auto-check for updates when dialog opens
+    _checkForUpdates();
   }
 
   Future<void> _checkForUpdates() async {
@@ -52,10 +41,16 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
     try {
       final result = await widget.updateService.checkNow();
       if (!mounted) return;
-      setState(() {
+      if (result.update != null) {
+        // Update available — jump straight to the update dialog
         _update = result.update;
+        _showUpdateDialog();
+        return;
+      }
+      setState(() {
+        _update = null;
         _lastChecked = result.lastChecked;
-        _state = result.update != null ? _CheckState.updateAvailable : _CheckState.upToDate;
+        _state = _CheckState.upToDate;
       });
     } catch (e) {
       if (mounted) {
@@ -135,36 +130,6 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
                 const SizedBox(height: 8),
                 Text("You're running the latest version", style: TextStyle(color: Colors.green[400], fontSize: 13)),
                 const SizedBox(height: 20),
-              ] else if (_state == _CheckState.updateAvailable && _update != null) ...[
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.blue.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.blue.withValues(alpha: 0.3)),
-                  ),
-                  child: Column(
-                    children: [
-                      Text(
-                        'v${_update!.version} available',
-                        style: TextStyle(color: Colors.blue[300], fontWeight: FontWeight.w600, fontSize: 14),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Released ${_update!.publishedAt.split("T").first}',
-                        style: TextStyle(color: Colors.grey[500], fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: _showUpdateDialog,
-                  icon: const Icon(Icons.download, size: 18),
-                  label: const Text('View update details'),
-                ),
-                const SizedBox(height: 12),
               ] else if (_state == _CheckState.error) ...[
                 Icon(Icons.error_outline, color: Colors.red[400], size: 32),
                 const SizedBox(height: 8),
@@ -177,24 +142,16 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    if (_state != _CheckState.idle && _state != _CheckState.updateAvailable)
-                      TextButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: const Text('Close'),
-                      ),
-                    if (_state != _CheckState.updateAvailable) ...[
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed: _checkForUpdates,
-                        icon: const Icon(Icons.refresh, size: 18),
-                        label: Text(_state == _CheckState.idle ? 'Check for updates' : 'Check again'),
-                      ),
-                    ],
-                    if (_state == _CheckState.idle)
-                      TextButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: const Text('Close'),
-                      ),
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Close'),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed: _checkForUpdates,
+                      icon: const Icon(Icons.refresh, size: 18),
+                      label: const Text('Check again'),
+                    ),
                   ],
                 ),
             ],
