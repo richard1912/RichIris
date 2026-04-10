@@ -200,6 +200,20 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       return;
     }
 
+    // Don't show thumbnail for future times (use NVR timezone)
+    final nvrToday = todayDate(tzOffsetMs: widget.tzOffsetMs);
+    if (_ctrl.selectedDate == nvrToday) {
+      if (scrubHour > nowHour(tzOffsetMs: widget.tzOffsetMs)) {
+        _thumbOverlay?.remove();
+        _thumbOverlay = null;
+        return;
+      }
+    } else if (_ctrl.selectedDate.compareTo(nvrToday) > 0) {
+      _thumbOverlay?.remove();
+      _thumbOverlay = null;
+      return;
+    }
+
     // Use detection thumbnail if hovering over a detection event that has one
     String? thumbUrl;
     if (_hoverMotionEvent != null && _hoverMotionEvent!.hasThumbnail) {
@@ -398,13 +412,11 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       }
     }
 
-    // Ignore taps in the future
-    final now = DateTime.now();
-    final todayStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-    if (_ctrl.selectedDate == todayStr) {
-      final nowHour = now.hour + now.minute / 60.0 + now.second / 3600.0;
-      if (targetHour > nowHour) return;
-    } else if (_ctrl.selectedDate.compareTo(todayStr) > 0) {
+    // Ignore taps in the future (use NVR timezone)
+    final nvrToday = todayDate(tzOffsetMs: widget.tzOffsetMs);
+    if (_ctrl.selectedDate == nvrToday) {
+      if (targetHour > nowHour(tzOffsetMs: widget.tzOffsetMs)) return;
+    } else if (_ctrl.selectedDate.compareTo(nvrToday) > 0) {
       return;
     }
 
@@ -677,13 +689,11 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                 if (result == null) return;
                 final pickedDate = result['date'] as String;
                 final targetHour = (result['hour'] as int) + (result['minute'] as int) / 60.0 + (result['second'] as int) / 3600.0;
-                // Ignore future times on today
-                final now = DateTime.now();
-                final todayStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-                if (pickedDate == todayStr) {
-                  final nowHour = now.hour + now.minute / 60.0 + now.second / 3600.0;
-                  if (targetHour > nowHour) return;
-                } else if (pickedDate.compareTo(todayStr) > 0) {
+                // Ignore future times on today (use NVR timezone)
+                final nvrToday = todayDate(tzOffsetMs: widget.tzOffsetMs);
+                if (pickedDate == nvrToday) {
+                  if (targetHour > nowHour(tzOffsetMs: widget.tzOffsetMs)) return;
+                } else if (pickedDate.compareTo(nvrToday) > 0) {
                   return;
                 }
                 // Change date if different
@@ -750,12 +760,14 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               icon: Icons.auto_awesome,
               label: 'Wizard',
               onTap: _showExportWizard,
+              tooltip: 'Pick camera, date, and time range to export',
             ),
           if (widget.cameras != null) const SizedBox(width: 4),
           _exportActionButton(
             icon: Icons.timeline,
             label: 'Timeline',
             onTap: _enterTimelineExportMode,
+            tooltip: 'Tap start and end points on the timeline to export',
           ),
           const SizedBox(width: 4),
         ],
@@ -846,8 +858,12 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     required IconData icon,
     required String label,
     required VoidCallback onTap,
+    String? tooltip,
   }) {
-    return SizedBox(
+    return Tooltip(
+      message: tooltip ?? '',
+      waitDuration: const Duration(milliseconds: 400),
+      child: SizedBox(
       height: 26,
       child: TextButton.icon(
         onPressed: onTap,
@@ -863,7 +879,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
           ),
         ),
       ),
-    );
+    ));
   }
 
   Widget _buildClipRow(ClipExport clip) {
