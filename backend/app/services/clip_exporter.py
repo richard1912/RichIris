@@ -15,13 +15,12 @@ from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
 
-EXPORTS_DIR = Path("G:/RichIris/exports")
-
-
 def get_exports_dir() -> Path:
-    """Return and ensure the exports directory exists."""
-    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    return EXPORTS_DIR
+    """Return and ensure the exports directory exists under data_dir."""
+    from app.config import get_bootstrap
+    exports_dir = Path(get_bootstrap().data_dir) / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    return exports_dir
 
 
 async def find_overlapping_segments(
