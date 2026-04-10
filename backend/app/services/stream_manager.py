@@ -321,7 +321,7 @@ class StreamManager:
 async def _launch_recording(info: StreamInfo, config: AppConfig) -> None:
     """Launch the recording-only ffmpeg subprocess."""
     cmd = build_recording_command(info.camera_name, info.rtsp_url, config)
-    logger.debug("Launching recording ffmpeg", extra={"cmd": " ".join(cmd), "camera_id": info.camera_id})
+    logger.debug("Launching recording ffmpeg", extra={"cmd": _redact_rtsp(" ".join(cmd)), "camera_id": info.camera_id})
 
     info.rec_process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -340,6 +340,13 @@ _FFMPEG_ERROR_KEYWORDS = re.compile(
     r"error|warning|fatal|failed|dropping|disconnected|timeout|broken.pipe|killed|exceeded",
     re.IGNORECASE,
 )
+
+_RTSP_CREDS_RE = re.compile(r"(rtsp://)[^@]+@", re.IGNORECASE)
+
+
+def _redact_rtsp(text: str) -> str:
+    """Replace rtsp://user:pass@host with rtsp://***@host in log output."""
+    return _RTSP_CREDS_RE.sub(r"\1***@", text)
 
 
 async def _read_stderr(info: StreamInfo, label: str) -> None:
@@ -369,7 +376,7 @@ async def _read_stderr(info: StreamInfo, label: str) -> None:
                         continue
                     logger.info(
                         f"ffmpeg-{label} init",
-                        extra={"camera_id": info.camera_id, "output": line[:500]},
+                        extra={"camera_id": info.camera_id, "output": _redact_rtsp(line[:500])},
                     )
                     continue
 
@@ -377,7 +384,7 @@ async def _read_stderr(info: StreamInfo, label: str) -> None:
                 if _FFMPEG_ERROR_KEYWORDS.search(line):
                     logger.warning(
                         f"ffmpeg-{label}",
-                        extra={"camera_id": info.camera_id, "output": line[:500]},
+                        extra={"camera_id": info.camera_id, "output": _redact_rtsp(line[:500])},
                     )
     except Exception:
         logger.exception(f"ffmpeg-{label} stderr reader failed", extra={"camera_id": info.camera_id})

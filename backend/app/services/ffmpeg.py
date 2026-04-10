@@ -3,11 +3,19 @@
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 from app.config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+_RTSP_CREDS_RE = re.compile(r"(rtsp://)[^@]+@", re.IGNORECASE)
+
+
+def _redact_rtsp(text: str) -> str:
+    """Replace rtsp://user:pass@host with rtsp://***@host in log output."""
+    return _RTSP_CREDS_RE.sub(r"\1***@", text)
 
 
 def build_input_args(rtsp_url: str, config: AppConfig, hwaccel: bool = True) -> list[str]:
@@ -23,7 +31,7 @@ def build_input_args(rtsp_url: str, config: AppConfig, hwaccel: bool = True) -> 
         "-timeout", timeout,
         "-i", rtsp_url,
     ])
-    logger.debug("Built input args", extra={"rtsp_url": rtsp_url, "timeout_us": timeout})
+    logger.debug("Built input args", extra={"rtsp_url": _redact_rtsp(rtsp_url), "timeout_us": timeout})
     return args
 
 
@@ -83,7 +91,7 @@ def build_probe_command(rtsp_url: str, config: AppConfig) -> list[str]:
 async def probe_video_codec(rtsp_url: str, config: AppConfig) -> str | None:
     """Probe an RTSP URL and return the video codec name (e.g. 'h264', 'hevc')."""
     cmd = build_probe_command(rtsp_url, config)
-    logger.debug("Probing video codec", extra={"url": rtsp_url})
+    logger.debug("Probing video codec", extra={"url": _redact_rtsp(rtsp_url)})
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -95,10 +103,10 @@ async def probe_video_codec(rtsp_url: str, config: AppConfig) -> str | None:
         for stream in data.get("streams", []):
             if stream.get("codec_type") == "video":
                 codec = stream.get("codec_name", "").lower()
-                logger.info("Probed video codec", extra={"url": rtsp_url, "codec": codec})
+                logger.info("Probed video codec", extra={"url": _redact_rtsp(rtsp_url), "codec": codec})
                 return codec
     except Exception:
-        logger.exception("Failed to probe video codec", extra={"url": rtsp_url})
+        logger.exception("Failed to probe video codec", extra={"url": _redact_rtsp(rtsp_url)})
     return None
 
 
@@ -111,7 +119,7 @@ async def probe_video_bitrate(rtsp_url: str, config: AppConfig, sample_seconds: 
     import tempfile
     import os
 
-    logger.debug("Probing video bitrate via sampling", extra={"url": rtsp_url, "seconds": sample_seconds})
+    logger.debug("Probing video bitrate via sampling", extra={"url": _redact_rtsp(rtsp_url), "seconds": sample_seconds})
     tmp_path = None
     try:
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".ts")
@@ -135,10 +143,10 @@ async def probe_video_bitrate(rtsp_url: str, config: AppConfig, sample_seconds: 
         size_bytes = os.path.getsize(tmp_path)
         if size_bytes > 0:
             kbps = (size_bytes * 8) // (sample_seconds * 1000)
-            logger.info("Probed video bitrate", extra={"url": rtsp_url, "kbps": kbps})
+            logger.info("Probed video bitrate", extra={"url": _redact_rtsp(rtsp_url), "kbps": kbps})
             return kbps
     except Exception:
-        logger.exception("Failed to probe video bitrate", extra={"url": rtsp_url})
+        logger.exception("Failed to probe video bitrate", extra={"url": _redact_rtsp(rtsp_url)})
     finally:
         if tmp_path:
             try:
