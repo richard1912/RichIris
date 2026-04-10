@@ -378,7 +378,7 @@ class _MainNavState extends State<_MainNav> {
     Future.delayed(const Duration(seconds: 10), () async {
       if (!mounted) return;
       try {
-        final result = await widget.updateService.getUpdate();
+        final result = await widget.updateService.checkNow();
         if (result.update == null || !mounted) return;
         final update = result.update!;
         if (await widget.updateService.isVersionSkipped(update.version)) return;
