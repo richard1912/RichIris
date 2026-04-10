@@ -25,7 +25,7 @@ DefaultDirName={autopf}\RichIris Client
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=RichIris-Client-Setup-{#MyAppVersion}
+OutputBaseFilename=RichIris-Client-Only-Setup-{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -47,7 +47,7 @@ Source: "..\dist\richiris\app\*"; DestDir: "{app}"; Flags: ignoreversion recurse
 Source: "..\installer\vcredist\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Install-flavor marker — tells the Flutter updater this is a client-only install
-; so it fetches RichIris-Client-Setup.exe from GitHub instead of the full installer
+; so it fetches RichIris-Client-Only-Setup.exe from GitHub instead of the full installer
 Source: "client_only.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

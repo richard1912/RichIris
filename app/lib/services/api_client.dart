@@ -32,7 +32,16 @@ class ApiClient {
   Future<bool> testConnection() async {
     try {
       final resp = await dio.get('/api/health');
-      return resp.statusCode == 200;
+      if (resp.statusCode != 200) return false;
+      // Verify this is actually a RichIris backend — `/api/health` returns
+      // `{"status":"ok","app":"richiris","version":"..."}`. Older backends
+      // without the `app` field are still accepted (return true on 200) so
+      // users on older versions can still connect after upgrading the client.
+      final data = resp.data;
+      if (data is Map && data['app'] != null) {
+        return data['app'] == 'richiris';
+      }
+      return true;
     } catch (_) {
       return false;
     }

@@ -16,6 +16,7 @@ import 'screens/home_screen.dart';
 import 'screens/fullscreen_screen.dart';
 import 'screens/system_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/add_cameras_wizard_screen.dart';
 import 'screens/camera_form_screen.dart';
 import 'screens/system_settings_screen.dart';
 import 'services/api_client.dart';
@@ -600,9 +601,77 @@ class _MainNavState extends State<_MainNav> {
               ));
             },
             onAddCamera: () async {
-              await Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient),
-              ));
+              final choice = await showDialog<String>(
+                context: context,
+                builder: (ctx) => SimpleDialog(
+                  title: const Text('Add Camera'),
+                  children: [
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, 'scan'),
+                      child: const Row(
+                        children: [
+                          Icon(Icons.radar, size: 20),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Scan network',
+                                    style: TextStyle(fontWeight: FontWeight.w600)),
+                                SizedBox(height: 2),
+                                Text(
+                                  'Auto-discover cameras on your LAN and add multiple at once.',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SimpleDialogOption(
+                      onPressed: () => Navigator.pop(ctx, 'manual'),
+                      child: const Row(
+                        children: [
+                          Icon(Icons.edit, size: 20),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Enter manually',
+                                    style: TextStyle(fontWeight: FontWeight.w600)),
+                                SizedBox(height: 2),
+                                Text(
+                                  'Type in a single camera\'s details and RTSP URL.',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+              if (!context.mounted) return;
+              if (choice == 'scan') {
+                await Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => AddCamerasWizardScreen(
+                    cameraApi: widget.cameraApi,
+                    apiClient: widget.apiClient,
+                    existingCameraCount: widget.cameras.length,
+                  ),
+                ));
+              } else if (choice == 'manual') {
+                await Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => CameraFormScreen(
+                      cameraApi: widget.cameraApi, apiClient: widget.apiClient),
+                ));
+              } else {
+                return;
+              }
               await widget.onRefreshCameras();
             },
             onEditCamera: (cam) async {

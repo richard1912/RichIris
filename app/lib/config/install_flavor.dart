@@ -9,14 +9,21 @@ import 'dart:io';
 ///
 /// Android always returns false — the Android APK has no flavor split
 /// (there's only one APK per release) and always picks `assets.android`.
+///
+/// Result is memoized since callers hit this on every prefs read/write and
+/// the answer can't change at runtime.
+bool? _cached;
+
 bool isClientOnlyInstall() {
-  if (!Platform.isWindows) return false;
+  final cached = _cached;
+  if (cached != null) return cached;
+  if (!Platform.isWindows) return _cached = false;
   try {
     final exeDir = File(Platform.resolvedExecutable).parent;
     final marker =
         File('${exeDir.path}${Platform.pathSeparator}client_only.txt');
-    return marker.existsSync();
+    return _cached = marker.existsSync();
   } catch (_) {
-    return false;
+    return _cached = false;
   }
 }

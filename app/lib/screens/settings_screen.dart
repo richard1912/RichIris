@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../config/api_config.dart';
+import '../config/install_flavor.dart';
 import '../services/api_client.dart';
 import '../services/backend_scanner.dart';
 
@@ -27,7 +28,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _controller = TextEditingController(text: widget.initialUrl ?? '');
     if (widget.initialUrl == null) {
-      _tryLocalBackend();
+      if (isClientOnlyInstall()) {
+        // Client-only install: no local backend possible. Pop the scan sheet
+        // automatically so the user immediately sees discovered backends
+        // without having to hunt for the button.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _openScanSheet();
+        });
+      } else {
+        _tryLocalBackend();
+      }
     }
   }
 
@@ -135,7 +145,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Enter the URL of your RichIris server',
+              isClientOnlyInstall() && widget.initialUrl == null
+                  ? 'This is the RichIris client app. Scan your network to find your RichIris server, or enter its URL manually.'
+                  : 'Enter the URL of your RichIris server',
               style: TextStyle(color: Colors.grey[500], fontSize: 14),
             ),
             const SizedBox(height: 20),

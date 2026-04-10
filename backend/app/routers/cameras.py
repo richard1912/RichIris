@@ -3,7 +3,10 @@
 import asyncio
 import json
 import logging
+import socket
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -176,6 +179,294 @@ async def discover_rtsp(req: RtspDiscoverRequest):
         "brands": [r.brand for r in results],
     })
     return results
+
+
+# --- LAN camera scan ---------------------------------------------------------
+# Scans private /24 subnets for hosts with port 554 open, sends an RTSP OPTIONS
+# request, and parses the Server header for a brand hint. Zero-dep, cross-platform.
+
+_BRAND_HINTS: list[tuple[str, str]] = [
+    # (substring to match in Server header lowercase, normalized brand)
+    ("hikvision", "Hikvision"),
+    ("dahua", "Dahua"),
+    ("reolink", "Reolink"),
+    ("axis", "Axis"),
+    ("hipcam", "Generic"),
+    ("gstreamer", "Generic"),
+    ("live555", "Generic"),
+    ("onvif", "ONVIF"),
+    ("htms", "HTMS"),
+    ("tapo", "Tapo"),
+    ("tp-link", "Tapo"),
+    ("hanwha", "Hanwha"),
+    ("samsung", "Hanwha"),
+    ("uniview", "Uniview"),
+]
+
+
+class CameraScanRequest(BaseModel):
+    subnets: list[str] | None = None   # e.g. ["192.168.8"]; default = auto-detect
+    port: int = 554
+    timeout_ms: int = 300
+    concurrency: int = 64
+
+
+class CameraScanHit(BaseModel):
+    ip: str
+    port: int
+    server_header: str | None = None
+    brand_hint: str | None = None
+
+
+class CameraScanResponse(BaseModel):
+    subnets_scanned: list[str]
+    hosts_probed: int
+    hits: list[CameraScanHit]
+    elapsed_ms: int
+
+
+def _detect_private_subnets() -> list[tuple[str, int]]:
+    """Return list of (prefix, self_host) tuples for each unique private /24
+    reachable via a local IPv4 interface. `prefix` is e.g. "192.168.8" and
+    `self_host` is the server's own octet on that subnet (used to skip probing
+    ourselves). Zero-dep — uses socket.getaddrinfo on the hostname.
+    """
+    seen: dict[str, int] = {}
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except socket.gaierror:
+        infos = []
+    for family, _type, _proto, _canon, sockaddr in infos:
+        if family != socket.AF_INET:
+            continue
+        ip = sockaddr[0]
+        parts = ip.split(".")
+        if len(parts) != 4:
+            continue
+        try:
+            a, b, _c, d = (int(p) for p in parts)
+        except ValueError:
+            continue
+        # RFC1918 filter
+        if not (
+            a == 10
+            or (a == 172 and 16 <= b <= 31)
+            or (a == 192 and b == 168)
+        ):
+            continue
+        prefix = f"{parts[0]}.{parts[1]}.{parts[2]}"
+        seen.setdefault(prefix, d)
+    return [(prefix, host) for prefix, host in seen.items()]
+
+
+def _classify_server_header(header: str | None) -> str | None:
+    if not header:
+        return None
+    low = header.lower()
+    for needle, brand in _BRAND_HINTS:
+        if needle in low:
+            return brand
+    return None
+
+
+async def _probe_host(ip: str, port: int, connect_timeout: float) -> CameraScanHit | None:
+    """TCP-connect to ip:port. If open, send RTSP OPTIONS and parse Server header.
+    Returns a CameraScanHit if the port is reachable, None otherwise.
+
+    The TCP connect uses `connect_timeout` (short — this dominates scan latency).
+    The OPTIONS reply gets a longer read budget so slower cameras still hint a brand.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout=connect_timeout
+        )
+    except (asyncio.TimeoutError, OSError):
+        return None
+
+    read_timeout = max(1.0, connect_timeout * 4)
+    server_header: str | None = None
+    try:
+        request = (
+            f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
+            f"CSeq: 1\r\n"
+            f"User-Agent: RichIris-Scan/1.0\r\n"
+            f"\r\n"
+        )
+        writer.write(request.encode("ascii"))
+        await writer.drain()
+        try:
+            data = await asyncio.wait_for(reader.read(2048), timeout=read_timeout)
+        except asyncio.TimeoutError:
+            data = b""
+        if data:
+            try:
+                text = data.decode("ascii", errors="replace")
+                for line in text.splitlines():
+                    if line.lower().startswith("server:"):
+                        server_header = line.split(":", 1)[1].strip()
+                        break
+            except Exception:
+                pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+    return CameraScanHit(
+        ip=ip,
+        port=port,
+        server_header=server_header,
+        brand_hint=_classify_server_header(server_header),
+    )
+
+
+def _hosts_from_existing_cameras(cameras: list[Camera]) -> set[str]:
+    """Extract host strings from existing camera rtsp_url values so we can
+    exclude them from scan results.
+    """
+    hosts: set[str] = set()
+    for cam in cameras:
+        for url in (cam.rtsp_url, cam.sub_stream_url):
+            if not url:
+                continue
+            try:
+                parsed = urlparse(url)
+                if parsed.hostname:
+                    hosts.add(parsed.hostname)
+            except Exception:
+                continue
+    return hosts
+
+
+@router.post("/scan", response_model=CameraScanResponse)
+async def scan_cameras(
+    req: CameraScanRequest, db: AsyncSession = Depends(get_db)
+):
+    """LAN-scan for IP cameras.
+
+    Enumerates private /24 subnets (auto-detected or provided), TCP-probes
+    `port` on each host, and for reachable hosts issues an RTSP OPTIONS to
+    sniff the Server header for a brand hint. Excludes IPs that are already
+    attached to an existing camera.
+    """
+    t0 = time.monotonic()
+
+    # Determine subnets + self hosts
+    if req.subnets:
+        subnets: list[tuple[str, int]] = [(s.strip().rstrip("."), -1) for s in req.subnets if s.strip()]
+    else:
+        subnets = _detect_private_subnets()
+
+    # Exclude already-added camera hosts
+    result = await db.execute(select(Camera))
+    existing_hosts = _hosts_from_existing_cameras(list(result.scalars().all()))
+
+    # Build candidate list
+    candidates: list[str] = []
+    for prefix, self_host in subnets:
+        for host in range(1, 255):
+            if host == self_host:
+                continue
+            ip = f"{prefix}.{host}"
+            if ip in existing_hosts:
+                continue
+            candidates.append(ip)
+
+    logger.info(
+        "Camera LAN scan starting",
+        extra={
+            "subnets": [s[0] for s in subnets],
+            "candidates": len(candidates),
+            "port": req.port,
+            "timeout_ms": req.timeout_ms,
+            "concurrency": req.concurrency,
+        },
+    )
+
+    timeout = max(0.05, req.timeout_ms / 1000.0)
+    sem = asyncio.Semaphore(max(1, req.concurrency))
+
+    async def _limited(ip: str) -> CameraScanHit | None:
+        async with sem:
+            return await _probe_host(ip, req.port, timeout)
+
+    results = await asyncio.gather(*[_limited(ip) for ip in candidates])
+    hits = [r for r in results if r is not None]
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    logger.info(
+        "Camera LAN scan complete",
+        extra={
+            "subnets": [s[0] for s in subnets],
+            "hosts_probed": len(candidates),
+            "hits": len(hits),
+            "elapsed_ms": elapsed_ms,
+        },
+    )
+
+    return CameraScanResponse(
+        subnets_scanned=[s[0] for s in subnets],
+        hosts_probed=len(candidates),
+        hits=hits,
+        elapsed_ms=elapsed_ms,
+    )
+
+
+# --- Batch RTSP discovery ---------------------------------------------------
+
+class DiscoverBatchRequest(BaseModel):
+    targets: list[RtspDiscoverRequest]
+    host_concurrency: int = 4   # how many hosts to probe in parallel
+
+
+class DiscoverBatchResponse(BaseModel):
+    results: dict[str, list[RtspDiscoverResult]]
+
+
+@router.post("/discover_batch", response_model=DiscoverBatchResponse)
+async def discover_rtsp_batch(req: DiscoverBatchRequest):
+    """Run RTSP URL discovery for multiple hosts in parallel.
+
+    Reuses the same pattern list + ffprobe helper as `/discover` but fans out
+    across multiple hosts. Bounded host-level concurrency avoids spawning
+    hundreds of concurrent ffprobe processes (each host already runs up to 8
+    patterns in parallel internally, so 4 hosts × 8 = 32 ffprobes max).
+    """
+    if not req.targets:
+        return DiscoverBatchResponse(results={})
+
+    logger.info(
+        "Batch RTSP discovery starting",
+        extra={"targets": len(req.targets), "host_concurrency": req.host_concurrency},
+    )
+
+    host_sem = asyncio.Semaphore(max(1, req.host_concurrency))
+
+    async def _one(target: RtspDiscoverRequest) -> tuple[str, list[RtspDiscoverResult]]:
+        async with host_sem:
+            try:
+                found = await discover_rtsp(target)
+            except HTTPException:
+                found = []
+            except Exception:
+                logger.exception("Discover failed for host", extra={"ip": target.ip})
+                found = []
+            return target.ip, found
+
+    pairs = await asyncio.gather(*[_one(t) for t in req.targets])
+
+    results: dict[str, list[RtspDiscoverResult]] = {}
+    for ip, found in pairs:
+        # If the same IP appears twice in the request, merge (last wins).
+        results[ip] = found
+
+    logger.info(
+        "Batch RTSP discovery complete",
+        extra={"targets": len(req.targets), "hosts_with_hits": sum(1 for v in results.values() if v)},
+    )
+    return DiscoverBatchResponse(results=results)
 
 
 @router.get("", response_model=list[CameraResponse])

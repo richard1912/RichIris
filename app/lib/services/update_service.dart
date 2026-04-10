@@ -151,7 +151,7 @@ class UpdateService {
           'size': a['size'] as int? ?? 0,
         };
         if (name.endsWith('.exe')) {
-          if (name.contains('Client-Setup')) {
+          if (name.contains('Client-Only')) {
             assets['windows_client'] = info;
           } else {
             assets['windows'] = info;

@@ -148,9 +148,9 @@ class UpdateChecker:
 
             # Parse assets from latest release. Two Windows installers ship
             # in each release: the full NVR installer (RichIris-Setup.exe) and
-            # the client-only app installer (RichIris-Client-Setup.exe). They
-            # are stored under separate keys so the Flutter updater can pick
-            # the right one based on the install flavor.
+            # the client-only app installer (RichIris-Client-Only-Setup.exe).
+            # They are stored under separate keys so the Flutter updater can
+            # pick the right one based on the install flavor.
             assets: dict[str, dict] = {}
             for asset in latest.get("assets", []):
                 name = asset.get("name", "")
@@ -160,7 +160,7 @@ class UpdateChecker:
                     "size": asset.get("size", 0),
                 }
                 if name.endswith(".exe"):
-                    if "Client-Setup" in name:
+                    if "Client-Only" in name:
                         assets["windows_client"] = info
                     else:
                         assets["windows"] = info
