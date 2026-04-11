@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 
@@ -41,6 +43,11 @@ class _PendingCamera {
   String? codec;
   bool include = true;
   bool manual; // user entered URLs themselves
+
+  // Thumbnail preview state (populated async on step 3 entry).
+  Uint8List? thumbnailBytes;
+  bool thumbnailLoading = false;
+  String? thumbnailError;
 
   _PendingCamera({
     required this.ip,
@@ -296,6 +303,56 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
       _pending = pending;
       _step = 3;
     });
+    _fetchAllThumbnails();
+  }
+
+  /// Kick off a snapshot request for every pending camera. Each completes
+  /// independently and the tile re-renders as its bytes arrive. A small pool
+  /// of workers caps concurrency so we don't spawn 10+ simultaneous ffmpeg
+  /// snapshot processes on the backend.
+  Future<void> _fetchAllThumbnails() async {
+    const maxConcurrent = 3;
+    int nextIdx = 0;
+
+    Future<void> runOne(_PendingCamera p) async {
+      if (!mounted) return;
+      setState(() {
+        p.thumbnailLoading = true;
+        p.thumbnailError = null;
+      });
+      try {
+        final bytes = await widget.cameraApi.snapshot(rtspUrl: p.mainUrl, width: 320);
+        if (!mounted) return;
+        setState(() {
+          p.thumbnailBytes = bytes;
+          p.thumbnailLoading = false;
+        });
+      } on DioException catch (e) {
+        if (!mounted) return;
+        final msg = e.response?.data is Map
+            ? (e.response!.data['detail']?.toString() ?? 'Failed')
+            : e.message ?? 'Failed';
+        setState(() {
+          p.thumbnailError = msg;
+          p.thumbnailLoading = false;
+        });
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          p.thumbnailError = e.toString();
+          p.thumbnailLoading = false;
+        });
+      }
+    }
+
+    Future<void> worker() async {
+      while (mounted && nextIdx < _pending.length) {
+        final idx = nextIdx++;
+        await runOne(_pending[idx]);
+      }
+    }
+
+    await Future.wait(List.generate(maxConcurrent, (_) => worker()));
   }
 
   // --- Step 3 → 4: create cameras -----------------------------------------
@@ -834,6 +891,59 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
 
   // Step 3: name + confirm --------------------------------------------------
 
+  Widget _buildThumbnailPreview(_PendingCamera p) {
+    const width = 160.0;
+    const height = 90.0;
+    Widget child;
+    if (p.thumbnailBytes != null) {
+      child = Image.memory(
+        p.thumbnailBytes!,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+      );
+    } else if (p.thumbnailLoading) {
+      child = const Center(
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    } else if (p.thumbnailError != null) {
+      child = Tooltip(
+        message: p.thumbnailError!,
+        child: const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.broken_image_outlined, size: 22, color: Colors.orange),
+              SizedBox(height: 2),
+              Text('no preview',
+                  style: TextStyle(fontSize: 10, color: Colors.orange)),
+            ],
+          ),
+        ),
+      );
+    } else {
+      child = Center(
+        child: Icon(Icons.videocam_outlined, size: 22, color: Colors.grey[600]),
+      );
+    }
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: const Color(0xFF0B0B0F),
+        border: Border.all(color: const Color(0xFF2A2A2E)),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: child,
+    );
+  }
+
   Widget _buildStep3Confirm() {
     final includedCount = _pending.where((p) => p.include).length;
     return Column(
@@ -862,6 +972,8 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
                         value: p.include,
                         onChanged: (v) => setState(() => p.include = v ?? false),
                       ),
+                      _buildThumbnailPreview(p),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,

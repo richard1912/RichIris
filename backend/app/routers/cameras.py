@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -467,6 +467,81 @@ async def discover_rtsp_batch(req: DiscoverBatchRequest):
         extra={"targets": len(req.targets), "hosts_with_hits": sum(1 for v in results.values() if v)},
     )
     return DiscoverBatchResponse(results=results)
+
+
+# --- One-shot snapshot ------------------------------------------------------
+# Used by the Scan & Add wizard to show a preview frame next to each camera
+# name field, so users can identify cameras visually before choosing a name.
+
+class SnapshotRequest(BaseModel):
+    rtsp_url: str
+    width: int = 320   # downscale for quick transfer; 320 keeps it small
+    timeout_s: float = 8.0
+
+
+@router.post("/snapshot")
+async def camera_snapshot(req: SnapshotRequest):
+    """Grab a single JPEG frame from an arbitrary RTSP URL.
+
+    Used by the Scan & Add wizard's preview step. Not tied to a stored
+    camera — the caller passes the full RTSP URL (credentials embedded) so
+    we can snapshot cameras before they're added to the DB.
+
+    Returns `image/jpeg` bytes on success, 504 on timeout, 502 on ffmpeg
+    failure. Downscaled to `width` for fast transfer.
+    """
+    url = req.rtsp_url.strip()
+    if not url.lower().startswith("rtsp://"):
+        raise HTTPException(status_code=400, detail="rtsp_url must be an rtsp:// URL")
+
+    config = get_config()
+    width = max(64, min(req.width, 1280))
+    timeout = max(2.0, min(req.timeout_s, 20.0))
+
+    cmd = [
+        config.ffmpeg.path,
+        "-nostdin",
+        "-loglevel", "error",
+        "-rtsp_transport", "tcp",
+        "-timeout", str(int(timeout * 1_000_000)),  # microseconds (socket I/O)
+        "-i", url,
+        "-vf", f"scale={width}:-2",
+        "-frames:v", "1",
+        "-f", "image2",
+        "-vcodec", "mjpeg",
+        "-q:v", "5",
+        "-",
+    ]
+
+    logger.info("Camera snapshot starting", extra={"url_host": urlparse(url).hostname, "width": width})
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout + 3)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            logger.warning("Camera snapshot timed out", extra={"url_host": urlparse(url).hostname})
+            raise HTTPException(status_code=504, detail="Snapshot timed out")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ffmpeg not available")
+
+    if proc.returncode != 0 or not stdout:
+        err = (stderr or b"").decode("utf-8", errors="replace")[:500]
+        logger.warning(
+            "Camera snapshot failed",
+            extra={"url_host": urlparse(url).hostname, "returncode": proc.returncode, "stderr": err},
+        )
+        raise HTTPException(status_code=502, detail=f"Snapshot failed: {err.strip() or 'no output'}")
+
+    logger.info("Camera snapshot captured", extra={"url_host": urlparse(url).hostname, "bytes": len(stdout)})
+    return Response(content=stdout, media_type="image/jpeg")
 
 
 @router.get("", response_model=list[CameraResponse])

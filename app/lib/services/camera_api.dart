@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 
 import '../models/camera.dart';
@@ -63,6 +65,32 @@ class CameraApi {
       ),
     );
     return CameraScanResponse.fromJson(resp.data as Map<String, dynamic>);
+  }
+
+  /// Grab a one-shot JPEG snapshot from an arbitrary RTSP URL (used by the
+  /// Scan & Add wizard's name step to show a preview of each camera). Returns
+  /// the raw JPEG bytes on success, or throws on failure (504/502/etc).
+  Future<Uint8List> snapshot({
+    required String rtspUrl,
+    int width = 320,
+    double timeoutS = 8.0,
+  }) async {
+    final resp = await _client.dio.post(
+      '/api/cameras/snapshot',
+      data: {
+        'rtsp_url': rtspUrl,
+        'width': width,
+        'timeout_s': timeoutS,
+      },
+      options: Options(
+        responseType: ResponseType.bytes,
+        // The backend caps ffmpeg at timeoutS + 3 — allow double that for
+        // slow network hops.
+        receiveTimeout: Duration(milliseconds: ((timeoutS + 3) * 2 * 1000).toInt()),
+        sendTimeout: const Duration(seconds: 10),
+      ),
+    );
+    return Uint8List.fromList(resp.data as List<int>);
   }
 
   /// Run RTSP URL discovery for many hosts in parallel. Returns a map keyed
