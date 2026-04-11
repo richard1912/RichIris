@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/update_service.dart';
 
@@ -41,6 +42,14 @@ class _UpdateDialogState extends State<UpdateDialog> {
   }
 
   Future<void> _startDownload() async {
+    // On Android, Flutter apps can't shell out to `am` or open `file://`
+    // intents, so we hand the APK URL to the system browser. Chrome downloads
+    // the file and Android's package installer opens it from the notification.
+    if (Platform.isAndroid) {
+      await _openAndroidDownload();
+      return;
+    }
+
     setState(() {
       _step = _Step.downloading;
       _received = 0;
@@ -62,10 +71,6 @@ class _UpdateDialogState extends State<UpdateDialog> {
 
       if (Platform.isWindows) {
         await widget.updateService.installUpdate(path);
-      } else if (Platform.isAndroid) {
-        // On Android, open the APK via intent
-        // The install intent is handled by the OS
-        await _installApkAndroid(path);
       }
     } on DioException catch (e) {
       if (e.type == DioExceptionType.cancel) {
@@ -88,24 +93,27 @@ class _UpdateDialogState extends State<UpdateDialog> {
     }
   }
 
-  Future<void> _installApkAndroid(String path) async {
+  Future<void> _openAndroidDownload() async {
+    final url = widget.update.androidUrl;
+    if (url == null || url.isEmpty) {
+      setState(() {
+        _step = _Step.error;
+        _error = 'No Android download available for this release.';
+      });
+      return;
+    }
     try {
-      // Use Android intent to install APK
-      final result = await Process.run('am', [
-        'start',
-        '-a', 'android.intent.action.VIEW',
-        '-t', 'application/vnd.android.package-archive',
-        '-d', 'file://$path',
-        '--grant-read-uri-permission',
-      ]);
-      if (result.exitCode != 0) {
-        throw Exception('Failed to open APK installer');
-      }
+      final ok = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!ok) throw Exception('Browser refused to open the link');
+      if (mounted) _dismiss();
     } catch (e) {
       if (mounted) {
         setState(() {
           _step = _Step.error;
-          _error = 'Could not open APK: $e\n\nThe file was downloaded to:\n$path';
+          _error = 'Could not open browser: $e\n\nDownload the APK manually:\n$url';
         });
       }
     }
@@ -232,8 +240,13 @@ class _UpdateDialogState extends State<UpdateDialog> {
             const SizedBox(width: 8),
             FilledButton.icon(
               onPressed: _startDownload,
-              icon: const Icon(Icons.download, size: 18),
-              label: const Text('Update now'),
+              icon: Icon(
+                Platform.isAndroid ? Icons.open_in_browser : Icons.download,
+                size: 18,
+              ),
+              label: Text(
+                Platform.isAndroid ? 'Download in browser' : 'Update now',
+              ),
             ),
           ],
         ),

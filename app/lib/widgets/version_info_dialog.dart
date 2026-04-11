@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/update_service.dart';
 import 'update_dialog.dart';
+
+const _releasesPageUrl = 'https://github.com/richard1912/RichIris/releases';
 
 class VersionInfoDialog extends StatefulWidget {
   final String currentVersion;
@@ -138,7 +141,7 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
               ],
 
               // Actions
-              if (_state != _CheckState.checking)
+              if (_state != _CheckState.checking) ...[
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -154,6 +157,19 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: () => launchUrl(
+                    Uri.parse(_releasesPageUrl),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                  icon: Icon(Icons.open_in_new, size: 14, color: Colors.grey[500]),
+                  label: Text(
+                    'View all releases on GitHub',
+                    style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                  ),
+                ),
+              ],
             ],
           ),
         ),

@@ -214,21 +214,18 @@ class UpdateService {
     return 0;
   }
 
-  /// Download the appropriate installer asset for the current platform and
-  /// install flavor. Client-only Windows installs pull `windowsClientUrl`;
-  /// full Windows installs pull `windowsUrl`; Android always pulls `androidUrl`.
+  /// Download the Windows installer asset for the current install flavor.
+  /// Client-only installs pull `windowsClientUrl`; full installs pull
+  /// `windowsUrl`. Android is handled out-of-band — the update dialog opens
+  /// the APK URL in the system browser rather than downloading in-app,
+  /// because sandboxed Flutter apps can't launch Android's package installer.
   Future<String> downloadUpdate(
     UpdateInfo info,
     void Function(int received, int total)? onProgress, {
     CancelToken? cancelToken,
   }) async {
     final isClient = isClientOnlyInstall();
-    String? url;
-    if (Platform.isAndroid) {
-      url = info.androidUrl;
-    } else if (Platform.isWindows) {
-      url = isClient ? info.windowsClientUrl : info.windowsUrl;
-    }
+    final url = isClient ? info.windowsClientUrl : info.windowsUrl;
     if (url == null) {
       throw Exception(
         isClient
@@ -237,11 +234,10 @@ class UpdateService {
       );
     }
 
-    final ext = Platform.isWindows ? '.exe' : '.apk';
     final suffix = isClient ? '-Client' : '';
     final dir = await getTemporaryDirectory();
     final path =
-        '${dir.path}${Platform.pathSeparator}RichIris$suffix-${info.version}$ext';
+        '${dir.path}${Platform.pathSeparator}RichIris$suffix-${info.version}.exe';
 
     // Use a separate Dio instance for GitHub download (not through ApiClient)
     final downloader = Dio(BaseOptions(
@@ -263,21 +259,16 @@ class UpdateService {
     return path;
   }
 
-  /// Launch the downloaded installer (Windows) or open APK (Android).
+  /// Launch the downloaded Windows installer and exit the app.
   Future<void> installUpdate(String filePath) async {
-    if (Platform.isWindows) {
-      await Process.start(
-        filePath,
-        ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-'],
-        mode: ProcessStartMode.detached,
-      );
-      // Give the installer a moment to start before we exit
-      await Future.delayed(const Duration(seconds: 1));
-      exit(0);
-    } else if (Platform.isAndroid) {
-      // Android APK install handled by the dialog via platform intent
-      throw UnimplementedError('Use installApk() from the dialog');
-    }
+    await Process.start(
+      filePath,
+      ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-'],
+      mode: ProcessStartMode.detached,
+    );
+    // Give the installer a moment to start before we exit
+    await Future.delayed(const Duration(seconds: 1));
+    exit(0);
   }
 
   Future<bool> isVersionSkipped(String version) async {

@@ -43,12 +43,41 @@ Go to **Settings** and add your cameras with their RTSP URLs. Cameras start reco
 
 Download `RichIris-Android.apk` from [Releases](https://github.com/richard1912/RichIris/releases) and install it on your Android device. Enter your server's IP address (e.g., `http://192.168.1.100:8700`) to connect.
 
-## Requirements
+## Min Requirements
 
-- **Windows 10/11** (64-bit)
-- RTSP-capable IP cameras
-- Sufficient storage for recordings (varies by camera count and retention settings)
-- **Optional**: NVIDIA GPU for AI object detection acceleration (falls back to CPU via DirectML)
+RichIris records via HEVC passthrough (no transcode), so per-camera CPU load is low. The heavier workloads are **AI object detection** (ONNX inference via DirectML on any DX12 GPU) and **on-the-fly transcoding** for non-Direct quality tiers (NVENC on NVIDIA GPUs). Sizing below assumes ~4K HEVC cameras at 4-8 Mbps on the main stream.
+
+### Minimum (up to 4 cameras, AI enabled)
+
+| Component | Minimum |
+|---|---|
+| **OS** | Windows 10/11 64-bit |
+| **CPU** | 4 cores / 8 threads — Intel 8th gen Core i5 / AMD Ryzen 5 2600 or newer |
+| **RAM** | 8 GB |
+| **GPU** | Any DirectX 12 GPU with 2 GB VRAM (integrated Intel UHD 630 / AMD Vega / NVIDIA GTX 1050 all work for RT-DETR via DirectML). NVIDIA required **only** if you want NVENC transcoded quality tiers. |
+| **System drive** | 256 GB SSD (OS, backend, database) |
+| **Recording drive** | Dedicated HDD or SSD — plan ~60 GB/day per 4K HEVC camera @ 6 Mbps (≈1.7 TB per camera for 30-day retention) |
+| **Network** | Gigabit Ethernet, cameras on the same LAN |
+| **Cameras** | RTSP H.264 or HEVC with sub-stream support (motion/AI read the sub-stream at 2 fps) |
+
+### Recommended (6-12 cameras, smooth AI + transcoded playback)
+
+| Component | Recommended |
+|---|---|
+| **CPU** | 6+ cores — Intel 12th gen Core i5 / AMD Ryzen 5 5600 or newer |
+| **RAM** | 16 GB |
+| **GPU** | NVIDIA RTX 3050 or better (6 GB+ VRAM) — fast RT-DETR inference and NVENC for Low/Ultra Low live and playback tiers across all cameras |
+| **System drive** | 500 GB NVMe SSD |
+| **Recording drive** | 8+ TB HDD (CMR preferred; SMR is fine for single-writer NVR workloads). Per-camera budget: ~60 GB/day @ 4K HEVC 6 Mbps; scale linearly with resolution, bitrate, and retention. |
+| **Network** | Gigabit LAN, wired cameras (PoE switch recommended) |
+
+### Notes on sizing
+
+- **Recording CPU cost** is near-zero per camera (copy-mode FFmpeg). 10+ cameras on a modern quad-core is realistic.
+- **AI detection** runs only when motion is detected, and inference is ~11 ms per frame on a modern GPU. The bottleneck for many cameras is the persistent sub-stream decoders (one FFmpeg per camera at 2 fps), not the neural net.
+- **Transcoded live/playback** (High when source is non-HEVC, Low, Ultra Low) use NVENC on NVIDIA GPUs. Without an NVIDIA GPU, stick to **Direct** quality — Direct is raw passthrough and costs nothing.
+- **Storage** is the usual dominant cost. Use the retention controls in **System Settings** (max age + max storage) to bound disk usage.
+- **Memory** is mostly FFmpeg + go2rtc + ONNX runtime. Budget ~300-500 MB per camera as a rough ceiling.
 
 ## Configuration
 
