@@ -112,8 +112,12 @@ class _LivePlayerState extends State<LivePlayer> {
     // External players that already have media loaded are mid-stream
     // (e.g. grid→fullscreen transition) — don't re-open.
     // Fresh external players (no media yet) still need to be opened.
+    // Deferred to post-frame so onStatusChanged's setState doesn't fire
+    // during the parent CameraCard's build pass.
     if (!_isExternal || _player.state.playlist.medias.isEmpty) {
-      _open(widget.url);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _open(widget.url);
+      });
     }
   }
 

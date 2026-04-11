@@ -8,6 +8,7 @@ import '../../models/camera.dart';
 import '../../services/recording_api.dart';
 import '../../services/clip_api.dart';
 import '../../services/motion_api.dart';
+import '../../services/timeline_cache.dart';
 import '../../utils/time_utils.dart';
 import '../../config/constants.dart';
 import '../datetime_picker_dialog.dart';
@@ -24,6 +25,7 @@ class TimelineWidget extends StatefulWidget {
   final RecordingApi recordingApi;
   final ClipApi clipApi;
   final MotionApi motionApi;
+  final TimelineCache timelineCache;
   final int tzOffsetMs;
   final bool isLive;
   final bool isPaused;
@@ -46,6 +48,7 @@ class TimelineWidget extends StatefulWidget {
     required this.recordingApi,
     required this.clipApi,
     required this.motionApi,
+    required this.timelineCache,
     required this.tzOffsetMs,
     required this.isLive,
     this.isPaused = false,
@@ -98,9 +101,41 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     super.initState();
     _ctrl = TimelineController(selectedDate: widget.initialDate ?? todayDate(tzOffsetMs: widget.tzOffsetMs));
     _ctrl.addListener(_onCtrlChange);
+    _hydrateFromCache();
     _fetchSegments();
     _startPlayheadTimer();
     _startSegmentPolling();
+  }
+
+  /// Synchronously populate the controller + local state from the timeline
+  /// cache if a prewarm entry exists for this (cameraId, date). Runs before
+  /// the first frame so the timeline appears populated immediately.
+  void _hydrateFromCache() {
+    // Piggyback a midnight-rollover sweep on every hydrate — cheap, and the
+    // widget is the only caller that reliably knows the NVR-local "today".
+    widget.timelineCache
+        .observeToday(todayDate(tzOffsetMs: widget.tzOffsetMs));
+    final cached =
+        widget.timelineCache.get(widget.cameraId, _ctrl.selectedDate);
+    if (cached == null) {
+      debugPrint(
+          '[TLCACHE] hydrate MISS cam=${widget.cameraId} date=${_ctrl.selectedDate}');
+      return;
+    }
+    final segCount = cached.segments?.length;
+    final motionCount = cached.motionEvents?.length;
+    final thumbCount = cached.thumbnails?.length;
+    debugPrint(
+        '[TLCACHE] hydrate HIT  cam=${widget.cameraId} date=${_ctrl.selectedDate} segs=$segCount motion=$motionCount thumbs=$thumbCount');
+    if (cached.segments != null) {
+      _ctrl.setSegments(cached.segments!);
+    }
+    if (cached.motionEvents != null) {
+      _ctrl.setMotionEvents(cached.motionEvents!);
+    }
+    if (cached.thumbnails != null) {
+      _thumbnails = cached.thumbnails!;
+    }
   }
 
   @override
@@ -108,6 +143,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.cameraId != widget.cameraId) {
       _ctrl.setDate(todayDate(tzOffsetMs: widget.tzOffsetMs));
+      _thumbnails = [];
+      _hydrateFromCache();
       _fetchSegments();
       _clips = [];
       _showClips = false;
@@ -115,6 +152,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     }
     if (widget.initialDate != null && widget.initialDate != oldWidget.initialDate) {
       _ctrl.setDate(widget.initialDate!);
+      _thumbnails = [];
+      _hydrateFromCache();
       _fetchSegments();
     }
     if (widget.isLive && !oldWidget.isLive) {
@@ -141,33 +180,63 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   }
 
   Future<void> _fetchSegments() async {
+    final t0 = DateTime.now();
+    final date = _ctrl.selectedDate;
     try {
       final segs = await widget.recordingApi.fetchSegments(
         widget.cameraId,
-        _ctrl.selectedDate,
+        date,
       );
+      if (!mounted || date != _ctrl.selectedDate) return;
       _ctrl.setSegments(segs);
-    } catch (_) {}
+      widget.timelineCache.putSegments(widget.cameraId, date, segs);
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      debugPrint(
+          '[TLCACHE] widget fetch segments cam=${widget.cameraId} date=$date ${ms}ms count=${segs.length}');
+    } catch (e) {
+      debugPrint(
+          '[TLCACHE] widget fetch segments FAIL cam=${widget.cameraId} date=$date $e');
+    }
     _fetchThumbnails();
     _fetchMotionEvents();
   }
 
   Future<void> _fetchMotionEvents() async {
+    final t0 = DateTime.now();
+    final date = _ctrl.selectedDate;
     try {
       final events = await widget.motionApi.fetchEvents(
         widget.cameraId,
-        _ctrl.selectedDate,
+        date,
       );
+      if (!mounted || date != _ctrl.selectedDate) return;
       _ctrl.setMotionEvents(events);
-    } catch (_) {}
+      widget.timelineCache.putMotionEvents(widget.cameraId, date, events);
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      debugPrint(
+          '[TLCACHE] widget fetch motion   cam=${widget.cameraId} date=$date ${ms}ms count=${events.length}');
+    } catch (e) {
+      debugPrint(
+          '[TLCACHE] widget fetch motion   FAIL cam=${widget.cameraId} date=$date $e');
+    }
   }
 
   Future<void> _fetchThumbnails() async {
+    final t0 = DateTime.now();
+    final date = _ctrl.selectedDate;
     try {
       final thumbs = await widget.recordingApi.fetchThumbnails(
-        widget.cameraId, _ctrl.selectedDate);
-      if (mounted) setState(() => _thumbnails = thumbs);
-    } catch (_) {}
+        widget.cameraId, date);
+      if (!mounted || date != _ctrl.selectedDate) return;
+      setState(() => _thumbnails = thumbs);
+      widget.timelineCache.putThumbnails(widget.cameraId, date, thumbs);
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      debugPrint(
+          '[TLCACHE] widget fetch thumbs   cam=${widget.cameraId} date=$date ${ms}ms count=${thumbs.length}');
+    } catch (e) {
+      debugPrint(
+          '[TLCACHE] widget fetch thumbs   FAIL cam=${widget.cameraId} date=$date $e');
+    }
   }
 
   String? _findNearestThumbUrl(double hour) {

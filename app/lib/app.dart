@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -28,6 +29,7 @@ import 'services/backup_api.dart';
 import 'services/settings_api.dart';
 import 'services/system_api.dart';
 import 'services/stream_api.dart';
+import 'services/timeline_cache.dart';
 import 'services/update_service.dart';
 import 'widgets/update_dialog.dart';
 import 'theme.dart';
@@ -51,6 +53,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   SettingsApi? _settingsApi;
   BackupApi? _backupApi;
   UpdateService? _updateService;
+  TimelineCache? _timelineCache;
 
   String? _serverUrl;
   String _appVersion = '';
@@ -133,6 +136,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     _streamApi = StreamApi(_apiClient!);
     _settingsApi = SettingsApi(_apiClient!);
     _backupApi = BackupApi(_apiClient!);
+    _timelineCache = TimelineCache(_recordingApi!, _motionApi!);
     _fetchInitialData();
   }
 
@@ -184,6 +188,14 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
             _cameras = results[1] as List<Camera>;
             _systemStatus = status;
           });
+          // Fire-and-forget: pre-warm timeline data for every enabled camera
+          // so the first click into any camera has instant segments + motion
+          // + thumbnails from cache. See services/timeline_cache.dart.
+          final today = todayDate(tzOffsetMs: _tzOffsetMs);
+          final enabled = _cameras.where((c) => c.enabled).toList();
+          debugPrint(
+              '[TLCACHE] kicking off prewarm after _fetchInitialData cameras=${enabled.length} date=$today');
+          unawaited(_timelineCache!.prewarmAll(enabled, today));
         }
         return;
       } catch (_) {
@@ -261,6 +273,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   backupApi: _backupApi!,
                   apiClient: _apiClient!,
                   updateService: _updateService!,
+                  timelineCache: _timelineCache!,
                   appVersion: _appVersion,
                   cameras: _cameras,
                   systemStatus: _systemStatus,
@@ -291,6 +304,7 @@ class _MainNav extends StatefulWidget {
   final BackupApi backupApi;
   final ApiClient apiClient;
   final UpdateService updateService;
+  final TimelineCache timelineCache;
   final String appVersion;
   final List<Camera> cameras;
   final SystemStatus? systemStatus;
@@ -317,6 +331,7 @@ class _MainNav extends StatefulWidget {
     required this.backupApi,
     required this.apiClient,
     required this.updateService,
+    required this.timelineCache,
     required this.appVersion,
     required this.cameras,
     required this.systemStatus,
@@ -357,11 +372,47 @@ class _MainNavState extends State<_MainNav> {
   int _resumePlaybackGen = 0;
   int _resumeLiveGen = 0;
 
+  bool _thumbsPrecached = false;
+
   @override
   void initState() {
     super.initState();
     _startPolling();
     _scheduleUpdateCheck();
+    _schedulePrecacheThumbs();
+  }
+
+  /// After the startup prewarm finishes, warm Flutter's image cache with the
+  /// most recent trickplay thumbnails for each camera so the first hover on
+  /// the timeline is instant instead of triggering a network fetch.
+  void _schedulePrecacheThumbs() {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final cache = widget.timelineCache;
+      // Wait for _fetchInitialData to kick off prewarmAll — _MainNav mounts
+      // before that API call completes.
+      await cache.prewarmKickedOff;
+      try {
+        await cache.prewarmFuture;
+      } catch (_) {}
+      if (!mounted || _thumbsPrecached) return;
+      _thumbsPrecached = true;
+      final urls = cache.buildPrecacheThumbUrls(perCamera: 5);
+      debugPrint('[TLCACHE] precache thumbs START count=${urls.length}');
+      final t0 = DateTime.now();
+      var ok = 0;
+      var fail = 0;
+      for (final url in urls) {
+        if (!mounted) return;
+        try {
+          await precacheImage(NetworkImage(url), context);
+          ok++;
+        } catch (_) {
+          fail++;
+        }
+      }
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      debugPrint('[TLCACHE] precache thumbs DONE ok=$ok fail=$fail ${ms}ms');
+    });
   }
 
   @override
@@ -489,11 +540,12 @@ class _MainNavState extends State<_MainNav> {
         _ensureLivePlayer(cam.id);
       }
     }
-    // Prune players for removed cameras
+    // Prune players + timeline cache entries for removed cameras
     final cameraIds = widget.cameras.map((c) => c.id).toSet();
     _livePlayers.keys.where((id) => !cameraIds.contains(id)).toList().forEach((id) {
       _livePlayers.remove(id)?.dispose();
       _liveControllers.remove(id);
+      widget.timelineCache.dropCamera(id);
     });
 
     // Freeze grid quality while fullscreen is active so grid streams
@@ -555,6 +607,7 @@ class _MainNavState extends State<_MainNav> {
             motionApi: widget.motionApi,
             cameraApi: widget.cameraApi,
             systemApi: widget.systemApi,
+            timelineCache: widget.timelineCache,
             updateService: widget.updateService,
             appVersion: widget.appVersion,
             tzOffsetMs: widget.tzOffsetMs,
@@ -704,6 +757,7 @@ class _MainNavState extends State<_MainNav> {
             clipApi: widget.clipApi,
             motionApi: widget.motionApi,
             systemApi: widget.systemApi,
+            timelineCache: widget.timelineCache,
             tzOffsetMs: widget.tzOffsetMs,
             livePlayer: _livePlayers[_fullscreenCameraId],
             liveController: _liveControllers[_fullscreenCameraId],
