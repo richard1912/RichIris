@@ -778,6 +778,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                     onChanged: widget.onQualityChanged,
                     isLive: _isLive,
                   ),
+                  IconButton(
+                    icon: const Icon(Icons.refresh, size: 20),
+                    tooltip: 'Refresh feed',
+                    onPressed: _refreshFeed,
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 36, minHeight: 32),
+                  ),
                 ],
               ],
             ),
@@ -812,6 +820,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                       value: widget.quality,
                       onChanged: widget.onQualityChanged,
                       isLive: _isLive,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.refresh, size: 20),
+                      tooltip: 'Refresh feed',
+                      onPressed: _refreshFeed,
+                      padding: EdgeInsets.zero,
+                      constraints:
+                          const BoxConstraints(minWidth: 36, minHeight: 32),
                     ),
                   ],
                 ),
@@ -980,6 +996,30 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
 
   Future<void> _showBugReportDialog(BuildContext context) =>
       showBugReportDialog(context, systemApi: widget.systemApi);
+
+  /// Refresh the current camera's feed — fully tears down the current stream
+  /// and re-opens it from scratch. Live: stop + reopen the go2rtc RTSP pull.
+  /// Playback: restart the transcode session at the current scrub position.
+  Future<void> _refreshFeed() async {
+    if (_isLive) {
+      final player = widget.livePlayer;
+      if (player == null) return;
+      final url = widget.streamApi.liveUrl(
+        widget.camera.id,
+        widget.streamSource.param,
+        widget.quality.param,
+        cameraName: widget.camera.name,
+      );
+      debugPrint('[REFRESH] fullscreen live cam=${widget.camera.id} url=$url');
+      await player.stop();
+      await player.open(Media(url));
+    } else {
+      final currentMs = _getNvrTime() - _tzOffsetMs;
+      final iso = formatLocalISOFromMs(currentMs);
+      debugPrint('[REFRESH] fullscreen playback iso=$iso');
+      await _startPlayback(iso);
+    }
+  }
 
   void _handleKey(KeyEvent event) {
     if (event is! KeyDownEvent) return;

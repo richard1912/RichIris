@@ -17,6 +17,7 @@ import '../models/playback_session.dart';
 import '../models/playback_ref.dart';
 import '../services/camera_api.dart';
 import '../services/update_service.dart';
+import '../utils/time_utils.dart';
 import '../widgets/bug_report_dialog.dart';
 import '../widgets/camera_grid.dart';
 import '../widgets/version_info_dialog.dart';
@@ -388,6 +389,38 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _showBugReportDialog(BuildContext context) =>
       showBugReportDialog(context, systemApi: widget.systemApi);
 
+  /// Refresh the selected camera's feed — fully tears down the current
+  /// stream and re-opens it from scratch. For live, this stops and reopens
+  /// the go2rtc RTSP pull; for playback, it restarts the transcode session
+  /// at the current scrub position. Grid playback is multi-camera, so in
+  /// playback mode every camera's session is restarted.
+  Future<void> _refreshFeed() async {
+    final id = widget.selectedCameraId;
+    if (id == null) return;
+    if (_isLive) {
+      final player = widget.livePlayers[id];
+      if (player == null) return;
+      final cam = widget.cameras.firstWhere(
+        (c) => c.id == id,
+        orElse: () => widget.cameras.first,
+      );
+      final url = widget.streamApi.liveUrl(
+        cam.id,
+        widget.streamSource.param,
+        widget.quality.param,
+        cameraName: cam.name,
+      );
+      debugPrint('[REFRESH] grid live cam=$id url=$url');
+      await player.stop();
+      await player.open(Media(url));
+    } else {
+      final currentMs = _getNvrTime() - widget.tzOffsetMs;
+      final iso = formatLocalISOFromMs(currentMs);
+      debugPrint('[REFRESH] grid playback iso=$iso');
+      await _startPlayback(iso);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final activeCount = widget.systemStatus?.activeStreams ?? 0;
@@ -469,6 +502,14 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(width: 4),
             ],
             QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged, isLive: _isLive),
+            const SizedBox(width: 4),
+            IconButton(
+              icon: const Icon(Icons.refresh, size: 20),
+              tooltip: widget.selectedCameraId == null
+                  ? 'Refresh feed (select a camera first)'
+                  : 'Refresh feed',
+              onPressed: widget.selectedCameraId == null ? null : _refreshFeed,
+            ),
             const SizedBox(width: 8),
           ],
           IconButton(
@@ -502,6 +543,16 @@ class _HomeScreenState extends State<HomeScreen> {
                         const SizedBox(width: 4),
                       ],
                       QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged, isLive: _isLive),
+                      IconButton(
+                        icon: const Icon(Icons.refresh, size: 20),
+                        tooltip: widget.selectedCameraId == null
+                            ? 'Refresh feed (select a camera first)'
+                            : 'Refresh feed',
+                        onPressed:
+                            widget.selectedCameraId == null ? null : _refreshFeed,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 36, minHeight: 32),
+                      ),
                     ],
                   ),
                 ),
