@@ -685,11 +685,22 @@ async def update_camera(
 
 
 @router.delete("/{camera_id}", status_code=204)
-async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
-    """Delete a camera and stop its stream. Video files on disk are preserved."""
+async def delete_camera(
+    camera_id: int,
+    purge_data: bool = Query(False, description="Also delete recording and thumbnail files from disk"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a camera and stop its stream.
+
+    With ``purge_data=true`` the camera's recording files, thumbnails, and
+    all related DB rows (recordings, motion events, clip exports) are
+    permanently deleted from disk. Without it the files are preserved.
+    """
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
+
+    camera_name = camera.name  # capture before delete
 
     mgr = get_stream_manager()
     await mgr.stop_stream(camera.id)
@@ -697,7 +708,6 @@ async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
     await get_frame_broker().remove_camera(camera.id)
 
     # Remove DB metadata (recordings + clip exports) so FK constraints don't block delete.
-    # Actual video files on disk are NOT deleted.
     for model in (ClipExport, MotionEvent, Recording):
         result = await db.execute(select(model).where(model.camera_id == camera_id))
         for row in result.scalars().all():
@@ -705,7 +715,27 @@ async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
 
     await db.delete(camera)
     await db.commit()
-    logger.info("Camera deleted", extra={"camera_id": camera_id})
+    logger.info("Camera deleted", extra={
+        "camera_id": camera_id, "purge_data": purge_data,
+    })
+
+    # Purge on-disk data if requested.
+    if purge_data:
+        from app.services.ffmpeg import sanitize_camera_name
+        config = get_config()
+        safe_name = sanitize_camera_name(camera_name)
+        for base, label in [
+            (config.storage.recordings_dir, "recordings"),
+            (config.storage.thumbnails_dir, "thumbnails"),
+        ]:
+            cam_dir = Path(base) / safe_name
+            if cam_dir.is_dir():
+                import shutil as _shutil
+                _shutil.rmtree(cam_dir, ignore_errors=True)
+                logger.info(
+                    "Purged camera data directory",
+                    extra={"camera_id": camera_id, "type": label, "path": str(cam_dir)},
+                )
 
     # Restart go2rtc to remove deleted camera's streams
     try:

@@ -221,24 +221,14 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   }
 
   Future<void> _delete() async {
-    final confirm = await showDialog<bool>(
+    final result = await showDialog<Map<String, bool>>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Camera?'),
-        content: Text('Delete "${widget.camera!.name}"? Recording files will be preserved.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+      builder: (ctx) => _DeleteCameraDialog(cameraName: widget.camera!.name),
     );
-    if (confirm != true) return;
+    if (result == null) return;
+    final purge = result['purge'] ?? false;
     try {
-      await widget.cameraApi.delete(widget.camera!.id);
+      await widget.cameraApi.delete(widget.camera!.id, purgeData: purge);
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       setState(() => _error = e.toString());
@@ -630,6 +620,67 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Confirmation dialog for camera deletion with optional data purge.
+class _DeleteCameraDialog extends StatefulWidget {
+  final String cameraName;
+  const _DeleteCameraDialog({required this.cameraName});
+
+  @override
+  State<_DeleteCameraDialog> createState() => _DeleteCameraDialogState();
+}
+
+class _DeleteCameraDialogState extends State<_DeleteCameraDialog> {
+  bool _purge = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Delete Camera?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Delete "${widget.cameraName}"?'),
+          const SizedBox(height: 12),
+          CheckboxListTile(
+            value: _purge,
+            onChanged: (v) => setState(() => _purge = v ?? false),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: const Text(
+              'Also delete all recordings, thumbnails, and detection data',
+              style: TextStyle(fontSize: 13),
+            ),
+            subtitle: _purge
+                ? const Text(
+                    'This cannot be undone.',
+                    style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                  )
+                : const Text(
+                    'Files on disk will be preserved.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () =>
+              Navigator.pop(context, {'purge': _purge}),
+          style: TextButton.styleFrom(
+            foregroundColor: _purge ? Colors.red : null,
+          ),
+          child: Text(_purge ? 'Delete Everything' : 'Delete'),
+        ),
+      ],
     );
   }
 }

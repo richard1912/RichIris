@@ -196,6 +196,9 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
           debugPrint(
               '[TLCACHE] kicking off prewarm after _fetchInitialData cameras=${enabled.length} date=$today');
           unawaited(_timelineCache!.prewarmAll(enabled, today));
+          // Also pre-warm settings + data-dir info so the Settings screen
+          // renders instantly on first open.
+          unawaited(_settingsApi!.prewarm());
         }
         return;
       } catch (_) {

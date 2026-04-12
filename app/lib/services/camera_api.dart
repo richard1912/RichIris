@@ -144,7 +144,10 @@ class CameraApi {
     return Camera.fromJson(resp.data as Map<String, dynamic>);
   }
 
-  Future<void> delete(int id) async {
-    await _client.dio.delete('/api/cameras/$id');
+  Future<void> delete(int id, {bool purgeData = false}) async {
+    await _client.dio.delete(
+      '/api/cameras/$id',
+      queryParameters: {if (purgeData) 'purge_data': 'true'},
+    );
   }
 }

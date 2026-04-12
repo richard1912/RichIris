@@ -1,8 +1,30 @@
+import 'package:flutter/foundation.dart';
 import 'api_client.dart';
 
 class SettingsApi {
   final ApiClient _client;
   SettingsApi(this._client);
+
+  /// Cached settings from the last fetch or prewarm. Populated at app
+  /// startup via [prewarm] so the Settings screen can render instantly.
+  Map<String, Map<String, dynamic>>? cachedSettings;
+
+  /// Cached data-dir info from the last fetch or prewarm.
+  Map<String, dynamic>? cachedDataDir;
+
+  /// Pre-warm both caches at app startup (fire-and-forget).
+  Future<void> prewarm() async {
+    final t0 = DateTime.now();
+    try {
+      cachedSettings = await fetchSettings();
+    } catch (_) {}
+    try {
+      cachedDataDir = await fetchDataDir();
+    } catch (_) {}
+    final ms = DateTime.now().difference(t0).inMilliseconds;
+    debugPrint('[TLCACHE] settings prewarm DONE ${ms}ms '
+        'settings=${cachedSettings != null} dataDir=${cachedDataDir != null}');
+  }
 
   /// Fetch all settings grouped by category.
   /// Returns: {category: {key: {value: str, requires_restart: bool}}}
@@ -15,15 +37,18 @@ class SettingsApi {
         result[entry.key] = Map<String, dynamic>.from(entry.value as Map);
       }
     }
+    cachedSettings = result;
     return result;
   }
 
   /// Update settings. Keys are 'category.key' format.
   /// Returns {settings: ..., restart_required: bool}
+  /// Invalidates the settings cache so the next screen open refreshes.
   Future<Map<String, dynamic>> updateSettings(Map<String, String> updates) async {
     final resp = await _client.dio.put('/api/settings', data: {
       'settings': updates,
     });
+    cachedSettings = null; // Invalidate — next open will re-fetch.
     return resp.data as Map<String, dynamic>;
   }
 
@@ -82,10 +107,12 @@ class SettingsApi {
 
   // --- Data directory API ---
 
-  /// Get the current data directory info.
+  /// Get the current data directory info. Also updates [cachedDataDir].
   Future<Map<String, dynamic>> fetchDataDir() async {
     final resp = await _client.dio.get('/api/system/data-dir');
-    return resp.data as Map<String, dynamic>;
+    final data = resp.data as Map<String, dynamic>;
+    cachedDataDir = data;
+    return data;
   }
 
   /// Validate a target path for data directory migration.

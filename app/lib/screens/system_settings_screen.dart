@@ -59,15 +59,24 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
   }
 
   Future<void> _load() async {
+    // If the cache was pre-warmed at app startup, hydrate immediately so the
+    // user never sees a loading spinner on first open.
+    final api = widget.settingsApi;
+    if (_settings == null && api.cachedSettings != null) {
+      _settings = api.cachedSettings;
+      _dataDirInfo = api.cachedDataDir;
+      _backendLoading = false;
+    }
     setState(() {
-      _backendLoading = true;
+      _backendLoading = _settings == null;
       _backendError = null;
     });
+    // Always refresh from the backend so the data is authoritative.
     try {
-      final settings = await widget.settingsApi.fetchSettings();
+      final settings = await api.fetchSettings();
       Map<String, dynamic>? dataDirInfo;
       try {
-        dataDirInfo = await widget.settingsApi.fetchDataDir();
+        dataDirInfo = await api.fetchDataDir();
       } catch (_) {}
       if (mounted) {
         setState(() {
@@ -81,7 +90,10 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
       if (mounted) {
         setState(() {
           _backendLoading = false;
-          _backendError = 'Failed to load settings: $e';
+          // Only show error if we have no cached fallback at all.
+          if (_settings == null) {
+            _backendError = 'Failed to load settings: $e';
+          }
         });
       }
     }
@@ -423,10 +435,9 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             'Pacific/Auckland',
           ]),
         ]),
-        if (_dataDirInfo != null)
-          _buildBackendSection('Storage', Icons.storage, () => [
-            _dataDirField(),
-          ]),
+        _buildBackendSection('Storage', Icons.storage, () => [
+          _dataDirField(),
+        ]),
         _buildBackendSection('Retention', Icons.auto_delete, () => [
           _numberField('retention', 'max_age_days', 'Max Age (days)'),
           _numberField('retention', 'max_storage_gb', 'Max Storage (GB)'),
