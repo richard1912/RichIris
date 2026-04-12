@@ -389,30 +389,34 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _showBugReportDialog(BuildContext context) =>
       showBugReportDialog(context, systemApi: widget.systemApi);
 
-  /// Refresh the selected camera's feed — fully tears down the current
-  /// stream and re-opens it from scratch. For live, this stops and reopens
-  /// the go2rtc RTSP pull; for playback, it restarts the transcode session
-  /// at the current scrub position. Grid playback is multi-camera, so in
-  /// playback mode every camera's session is restarted.
+  /// Refresh every camera's feed in the grid — fully tears down the current
+  /// streams and re-opens them from scratch. Live: iterates every enabled
+  /// camera and does stop+reopen on its live player. Playback: delegates to
+  /// `_startPlayback(currentIso)` which already restarts every enabled
+  /// camera's transcode session at the current scrub position.
   Future<void> _refreshFeed() async {
-    final id = widget.selectedCameraId;
-    if (id == null) return;
+    // Log to backend so users can verify the refresh in the Report a Bug
+    // log viewer (debugPrint only writes to client-side stdout).
+    unawaited(widget.systemApi.logClientEvent(
+      event: 'refresh_feed',
+      details: {'screen': 'grid', 'mode': _isLive ? 'live' : 'playback'},
+    ));
     if (_isLive) {
-      final player = widget.livePlayers[id];
-      if (player == null) return;
-      final cam = widget.cameras.firstWhere(
-        (c) => c.id == id,
-        orElse: () => widget.cameras.first,
-      );
-      final url = widget.streamApi.liveUrl(
-        cam.id,
-        widget.streamSource.param,
-        widget.quality.param,
-        cameraName: cam.name,
-      );
-      debugPrint('[REFRESH] grid live cam=$id url=$url');
-      await player.stop();
-      await player.open(Media(url));
+      final enabled = widget.cameras.where((c) => c.enabled).toList();
+      debugPrint('[REFRESH] grid live cameras=${enabled.length}');
+      for (final cam in enabled) {
+        final player = widget.livePlayers[cam.id];
+        if (player == null) continue;
+        final url = widget.streamApi.liveUrl(
+          cam.id,
+          widget.streamSource.param,
+          widget.quality.param,
+          cameraName: cam.name,
+        );
+        debugPrint('[REFRESH] grid live cam=${cam.id} url=$url');
+        await player.stop();
+        await player.open(Media(url));
+      }
     } else {
       final currentMs = _getNvrTime() - widget.tzOffsetMs;
       final iso = formatLocalISOFromMs(currentMs);
@@ -505,10 +509,8 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(width: 4),
             IconButton(
               icon: const Icon(Icons.refresh, size: 20),
-              tooltip: widget.selectedCameraId == null
-                  ? 'Refresh feed (select a camera first)'
-                  : 'Refresh feed',
-              onPressed: widget.selectedCameraId == null ? null : _refreshFeed,
+              tooltip: 'Refresh all feeds',
+              onPressed: _refreshFeed,
             ),
             const SizedBox(width: 8),
           ],
@@ -545,11 +547,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       QualitySelector(value: widget.quality, onChanged: widget.onQualityChanged, isLive: _isLive),
                       IconButton(
                         icon: const Icon(Icons.refresh, size: 20),
-                        tooltip: widget.selectedCameraId == null
-                            ? 'Refresh feed (select a camera first)'
-                            : 'Refresh feed',
-                        onPressed:
-                            widget.selectedCameraId == null ? null : _refreshFeed,
+                        tooltip: 'Refresh all feeds',
+                        onPressed: _refreshFeed,
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 36, minHeight: 32),
                       ),

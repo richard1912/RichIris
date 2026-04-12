@@ -33,6 +33,25 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 _startup_time: float = time.time()
 
 
+class ClientEvent(BaseModel):
+    event: str
+    details: dict | None = None
+
+
+@router.post("/client-event")
+async def log_client_event(payload: ClientEvent):
+    """Record a client-side event in the backend log so it shows up in the
+    Report a Bug log viewer. Used by the Flutter app to leave breadcrumbs
+    for actions that never otherwise hit the backend (e.g. the Refresh
+    feed button, which only calls go2rtc via media_kit).
+    """
+    logger.info(
+        "Client event",
+        extra={"event": payload.event, "details": payload.details or {}},
+    )
+    return {"ok": True}
+
+
 @router.get("/time")
 async def get_server_time():
     """Return server local time and UTC offset for client timezone alignment."""

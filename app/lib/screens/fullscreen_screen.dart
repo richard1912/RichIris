@@ -86,6 +86,11 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   bool _showStats = true;
   Player? _livePlayer;
   Timer? _statsTimer;
+  // Persistent focus node for the keyboard-shortcut listener. Must live in
+  // state (not be re-created inside build()) — otherwise every rebuild from
+  // the stats timer steals focus from any active TextField in the app.
+  final FocusNode _keyboardFocus =
+      FocusNode(debugLabel: 'fullscreen-keyboard');
   int _speed = 1;
   String? _playbackUrl;
   bool _playbackLoading = false;
@@ -111,6 +116,12 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     super.initState();
     _tzOffsetMs = widget.tzOffsetMs;
     widget.playbackRef.getNvrTime = _getNvrTime;
+    // Give the keyboard listener initial focus exactly once, after the tree
+    // is built. Never again — callers of TextField (e.g. bug report dialog)
+    // need to be able to hold focus without us stealing it back.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _keyboardFocus.requestFocus();
+    });
     // Stats shown by default — start refresh timer
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
@@ -163,6 +174,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     if (!_adoptedPlayer) {
       _pbPlayer?.dispose();
     }
+    _keyboardFocus.dispose();
     super.dispose();
   }
 
@@ -657,7 +669,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: KeyboardListener(
-        focusNode: FocusNode()..requestFocus(),
+        focusNode: _keyboardFocus,
         onKeyEvent: _handleKey,
         child: Column(
           children: [
@@ -1001,6 +1013,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   /// and re-opens it from scratch. Live: stop + reopen the go2rtc RTSP pull.
   /// Playback: restart the transcode session at the current scrub position.
   Future<void> _refreshFeed() async {
+    unawaited(widget.systemApi.logClientEvent(
+      event: 'refresh_feed',
+      details: {
+        'screen': 'fullscreen',
+        'mode': _isLive ? 'live' : 'playback',
+        'camera_id': widget.camera.id,
+      },
+    ));
     if (_isLive) {
       final player = widget.livePlayer;
       if (player == null) return;

@@ -40,4 +40,19 @@ class SystemApi {
     );
     return resp.data as String;
   }
+
+  /// Record a client-side event in the backend log so the Report a Bug
+  /// dialog can surface it. Fire-and-forget — errors are swallowed.
+  Future<void> logClientEvent({
+    required String event,
+    Map<String, dynamic>? details,
+  }) async {
+    try {
+      final body = <String, dynamic>{'event': event};
+      if (details != null) body['details'] = details;
+      await _client.dio.post('/api/system/client-event', data: body);
+    } catch (_) {
+      // Best-effort — never break the caller.
+    }
+  }
 }
