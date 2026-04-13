@@ -136,40 +136,58 @@ async def run_retention(db: AsyncSession = Depends(get_db)):
 
 @router.get("/logs", response_class=PlainTextResponse)
 async def get_recent_logs(minutes: int = Query(default=10, ge=1, le=60)):
-    """Return log lines from the last N minutes."""
+    """Return log lines from the last N minutes.
+
+    Reads only the tail of the log file (last 2 MB) so the response is fast
+    even when the log file is large. Runs the I/O in a thread pool to avoid
+    blocking the async event loop.
+    """
+    import asyncio
+    return await asyncio.to_thread(_read_recent_logs, minutes)
+
+
+def _read_recent_logs(minutes: int) -> PlainTextResponse:
     from app.config import get_bootstrap
     log_file = Path(get_bootstrap().data_dir) / "logs" / "richiris.log"
     if not log_file.exists():
         return PlainTextResponse("No log file found.", status_code=404)
 
     cutoff = datetime.now(get_tz()) - timedelta(minutes=minutes)
-    lines: list[str] = []
-    # Match ISO timestamp, possibly wrapped in ANSI escape codes
-    ts_pattern = re.compile(r"(?:\x1b\[\d+m)*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*[+-]\d{2}:\d{2})")
+    ts_pattern = re.compile(
+        r"(?:\x1b\[\d+m)*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*[+-]\d{2}:\d{2})"
+    )
 
+    # Read only the last 2 MB of the file — more than enough for 10 minutes
+    # of logs, and avoids parsing the entire (potentially 10 MB) file.
+    tail_bytes = 2 * 1024 * 1024
+    file_size = log_file.stat().st_size
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            m = ts_pattern.match(line)
-            if m:
-                try:
-                    ts = datetime.fromisoformat(m.group(1))
-                    if ts >= cutoff:
-                        lines.append(line)
-                    elif lines:
-                        # Past cutoff window — stop if we already started collecting
-                        # (shouldn't happen with chronological logs, but be safe)
-                        pass
-                except ValueError:
-                    if lines:
-                        lines.append(line)
-            elif lines:
-                lines.append(line)
+        if file_size > tail_bytes:
+            f.seek(file_size - tail_bytes)
+            f.readline()  # skip partial first line after seek
+        tail_lines = f.readlines()
 
-    # Strip ANSI codes from output for clean display, newest first
+    lines: list[str] = []
+    for line in tail_lines:
+        m = ts_pattern.match(line)
+        if m:
+            try:
+                ts = datetime.fromisoformat(m.group(1))
+                if ts >= cutoff:
+                    lines.append(line)
+            except ValueError:
+                if lines:
+                    lines.append(line)
+        elif lines:
+            lines.append(line)
+
+    # Strip ANSI codes for clean display, newest first
     ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
     cleaned = [ansi_escape.sub("", line) for line in reversed(lines)]
 
-    return PlainTextResponse("".join(cleaned) if cleaned else f"No logs in the last {minutes} minutes.")
+    return PlainTextResponse(
+        "".join(cleaned) if cleaned else f"No logs in the last {minutes} minutes."
+    )
 
 
 # ---------------------------------------------------------------------------
