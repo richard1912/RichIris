@@ -123,9 +123,13 @@ def build_streams_config(
                 # Transcoded: chain off the direct stream within go2rtc
                 source_url = f"ffmpeg:{chain_sources[source_key]}{params}"
             elif source_key == "sub" and not has_sub:
-                # No sub-stream configured: s2_direct chains off s1_direct
-                # (one RTSP connection instead of two to the same URL)
-                source_url = f"{stream_name}_s1_direct"
+                # No sub-stream configured: use main RTSP URL directly for
+                # s2_direct.  go2rtc internal chain references (bare stream
+                # names) aren't served via the RTSP listener, so the
+                # FrameBroker's ffmpeg gets 404.  Using the real URL means a
+                # second RTSP connection to the camera, but it actually works.
+                raw_url = sources["main"]
+                source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
             else:
                 # Direct: point to camera RTSP URL
                 raw_url = sources[source_key]
@@ -209,8 +213,10 @@ class Go2rtcClient:
                 if source_key in chain_sources:
                     source_url = f"ffmpeg:{chain_sources[source_key]}{params}"
                 elif source_key == "sub" and not has_sub:
-                    # No sub-stream: s2_direct chains off s1_direct
-                    source_url = f"{stream_name}_s1_direct"
+                    # No sub-stream: use main RTSP URL directly (go2rtc
+                    # internal chain refs aren't served via RTSP listener)
+                    raw_url = sources["main"]
+                    source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
                 else:
                     raw_url = sources[source_key]
                     source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
