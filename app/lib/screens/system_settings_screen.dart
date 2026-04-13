@@ -81,7 +81,9 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
       if (mounted) {
         setState(() {
           _settings = settings;
-          _dataDirInfo = dataDirInfo;
+          // Only update data dir if the fetch actually succeeded — don't
+          // overwrite a previously cached value with null on failure.
+          if (dataDirInfo != null) _dataDirInfo = dataDirInfo;
           _backendLoading = false;
           _backendError = null;
         });
@@ -720,8 +722,8 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
 
   Widget _dataDirField() {
     final dataDir = _dataDirInfo?['data_dir'] as String? ?? '';
-    final freeGb = _dataDirInfo?['free_space_gb'] ?? 0.0;
-    final totalGb = _dataDirInfo?['total_size_gb'] ?? 0.0;
+    final freeGb = _dataDirInfo?['free_space_gb'];
+    final totalGb = _dataDirInfo?['total_size_gb'];
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
@@ -747,11 +749,15 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
           const SizedBox(height: 6),
           Row(
             children: [
-              Text('Data size: $totalGb GB',
-                  style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+              Text(
+                totalGb != null ? 'Data size: $totalGb GB' : 'Data size: calculating...',
+                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+              ),
               const SizedBox(width: 16),
-              Text('Free space: $freeGb GB',
-                  style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+              Text(
+                freeGb != null ? 'Free space: $freeGb GB' : 'Free space: ...',
+                style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+              ),
             ],
           ),
           const SizedBox(height: 4),

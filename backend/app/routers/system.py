@@ -313,21 +313,28 @@ class DataDirUpdateRequest(BaseModel):
     mode: str = "path_only"  # "move", "copy", or "path_only"
 
 
+_cached_data_dir_size: dict | None = None  # {"gb": float, "computed_at": float}
+
+
 @router.get("/data-dir")
 async def get_data_dir():
-    """Return the current data directory path and subdirectory info."""
+    """Return the current data directory path, free space, and subdirectory info.
+
+    The total data size is computed in a background thread and cached (it can
+    take 10–20 s to walk millions of recording/thumbnail files). The first
+    call returns ``total_size_gb: null``; subsequent calls return the cached
+    value until it's refreshed.
+    """
+    import asyncio
     bootstrap = get_bootstrap()
     data_dir = Path(bootstrap.data_dir)
 
     subdirs = {}
     for name in ("database", "logs", "recordings", "thumbnails", "playback"):
         sub = data_dir / name
-        subdirs[name] = {
-            "path": str(sub),
-            "exists": sub.exists(),
-        }
+        subdirs[name] = {"path": str(sub), "exists": sub.exists()}
 
-    # Disk usage
+    # Disk free space — single syscall, instant.
     free_gb = 0.0
     try:
         usage = shutil.disk_usage(str(data_dir))
@@ -335,22 +342,43 @@ async def get_data_dir():
     except Exception:
         pass
 
-    # Total data size
-    total_bytes = 0
-    if data_dir.exists():
-        try:
-            for entry in data_dir.rglob("*"):
-                if entry.is_file():
-                    total_bytes += entry.stat().st_size
-        except Exception:
-            pass
+    # Return cached total size if available; kick off a background recompute
+    # if stale or missing (>10 min old).
+    global _cached_data_dir_size
+    total_gb = _cached_data_dir_size["gb"] if _cached_data_dir_size else None
+    if _cached_data_dir_size is None or (time.time() - _cached_data_dir_size["computed_at"]) > 600:
+        asyncio.get_event_loop().run_in_executor(None, _recompute_data_dir_size, str(data_dir))
 
     return {
         "data_dir": str(data_dir),
         "free_space_gb": free_gb,
-        "total_size_gb": round(total_bytes / (1024 ** 3), 2),
+        "total_size_gb": total_gb,
         "subdirs": subdirs,
     }
+
+
+def _recompute_data_dir_size(data_dir_str: str):
+    """Walk known subdirectories and cache the total size. Runs in a thread."""
+    global _cached_data_dir_size
+    data_dir = Path(data_dir_str)
+    total_bytes = 0
+    for name in ("database", "logs", "recordings", "thumbnails", "playback"):
+        sub = data_dir / name
+        if sub.is_dir():
+            try:
+                for dirpath, _dirnames, filenames in os.walk(sub):
+                    for f in filenames:
+                        try:
+                            total_bytes += os.path.getsize(os.path.join(dirpath, f))
+                        except OSError:
+                            pass
+            except Exception:
+                pass
+    _cached_data_dir_size = {
+        "gb": round(total_bytes / (1024 ** 3), 2),
+        "computed_at": time.time(),
+    }
+    logger.info("Data dir size computed", extra={"total_gb": _cached_data_dir_size["gb"]})
 
 
 @router.post("/data-dir/validate")

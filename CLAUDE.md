@@ -202,7 +202,7 @@ RichIris/
 - `GET /api/system/logs?minutes=10` - Recent log lines (plain text, last N minutes)
 - `POST /api/system/client-event` - Record a client-side event in the backend log. Body: `{event: string, details?: object}`. Used by Flutter app to leave breadcrumbs for actions that never hit the backend (e.g., refresh button).
 - `POST /api/system/retention/run` - Manually trigger retention cleanup
-- `GET /api/system/data-dir` - Current data directory path, size, free space, subdirectory info
+- `GET /api/system/data-dir` - Current data directory path, free space, and subdirectory info. Returns `total_size_gb: null` on first call (computation runs in background, takes 10-20s to walk millions of files); subsequent calls return cached value until it refreshes (10+ min old). `free_space_gb` is instant (single syscall).
 - `POST /api/system/data-dir/validate` - Validate target path for data directory migration
 - `POST /api/system/data-dir` - Change data directory `{path, mode: "move"|"copy"|"path_only"}`, returns restart_required
 - `GET /api/settings` - All system settings grouped by category (with requires_restart flags)
