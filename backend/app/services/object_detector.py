@@ -257,11 +257,13 @@ class ObjectDetector:
         if not self._started or self._session is None:
             return []
 
+        from app.services._onnx_lock import get_onnx_lock
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self._executor,
-            self._run_inference, frame, confidence_threshold, classes,
-        )
+        async with get_onnx_lock():
+            return await loop.run_in_executor(
+                self._executor,
+                self._run_inference, frame, confidence_threshold, classes,
+            )
 
     def _run_inference(
         self, frame: np.ndarray, threshold: float, classes: list[int] | None,

@@ -2,7 +2,17 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -55,6 +65,8 @@ class Camera(Base):
     ai_detect_vehicles: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     ai_detect_animals: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     ai_confidence_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
+    face_recognition: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    face_match_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
 
     group: Mapped["CameraGroup | None"] = relationship(back_populates="cameras")
     recordings: Mapped[list["Recording"]] = relationship(back_populates="camera")
@@ -104,5 +116,36 @@ class MotionEvent(Base):
     detection_label: Mapped[str | None] = mapped_column(String(50), nullable=True)
     detection_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    face_matches: Mapped[str | None] = mapped_column(Text, nullable=True)
+    face_unknown: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    face_detected: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     camera: Mapped["Camera"] = relationship(back_populates="motion_events")
+
+
+class Face(Base):
+    __tablename__ = "faces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    embeddings: Mapped[list["FaceEmbedding"]] = relationship(
+        back_populates="face", cascade="all, delete-orphan"
+    )
+
+
+class FaceEmbedding(Base):
+    __tablename__ = "face_embeddings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    face_id: Mapped[int] = mapped_column(
+        ForeignKey("faces.id", ondelete="CASCADE"), nullable=False
+    )
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    source_thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    face_crop_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    face: Mapped["Face"] = relationship(back_populates="embeddings")

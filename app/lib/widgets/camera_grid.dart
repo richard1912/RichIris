@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../models/camera.dart';
+import '../models/grid_layout.dart';
 import '../models/system_status.dart';
 import '../services/stream_api.dart';
 import 'camera_card.dart';
@@ -13,10 +14,11 @@ class CameraGrid extends StatefulWidget {
   final StreamApi streamApi;
   final String streamSource;
   final String quality;
+  final GridLayout layout;
   final int? selectedCameraId;
   final ValueChanged<int> onCameraSelected;
   final ValueChanged<Camera> onEditCamera;
-  final VoidCallback onAddCamera;
+  final ValueChanged<Camera>? onAddToGroup;
   final Future<void> Function(List<int>) onReorder;
   final ValueChanged<bool> onDragStateChanged;
   final Map<int, Player> livePlayers;
@@ -34,10 +36,11 @@ class CameraGrid extends StatefulWidget {
     required this.streamApi,
     required this.streamSource,
     required this.quality,
+    required this.layout,
     this.selectedCameraId,
     required this.onCameraSelected,
     required this.onEditCamera,
-    required this.onAddCamera,
+    this.onAddToGroup,
     required this.onReorder,
     required this.onDragStateChanged,
     this.livePlayers = const {},
@@ -56,6 +59,7 @@ class _CameraGridState extends State<CameraGrid> {
   List<Camera>? _localOrder;
   int? _draggingId;
   int? _hoverIndex;
+  int _pageIdx = 0;
 
   List<Camera> get _cameras => _localOrder ?? widget.cameras;
 
@@ -71,6 +75,23 @@ class _CameraGridState extends State<CameraGrid> {
     if (_draggingId == null && _localOrder != null) {
       _localOrder = null;
     }
+    // Reset page on layout change so users see page 1 of the new layout.
+    if (oldWidget.layout.id != widget.layout.id) {
+      _pageIdx = 0;
+    }
+    // Clamp pageIdx if camera count dropped.
+    final totalPages = _totalPages();
+    if (_pageIdx >= totalPages) {
+      _pageIdx = (totalPages - 1).clamp(0, totalPages);
+    }
+  }
+
+  int _totalPages() {
+    final slotsPerPage = widget.layout.slotCount;
+    if (slotsPerPage <= 0) return 1;
+    final count = _cameras.length;
+    if (count == 0) return 1;
+    return ((count + slotsPerPage - 1) ~/ slotsPerPage);
   }
 
   void _onDragStarted(int cameraId) {
@@ -126,119 +147,265 @@ class _CameraGridState extends State<CameraGrid> {
 
   @override
   Widget build(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    final columns = width > 900 ? 3 : (width > 500 ? 2 : 1);
+    final layout = widget.layout;
+    final slotsPerPage = layout.slotCount;
     final cameras = _cameras;
+    final totalPages = _totalPages();
+    final pageIdx = _pageIdx.clamp(0, totalPages - 1);
+    final pageStart = pageIdx * slotsPerPage;
+    final showPager = totalPages > 1;
+    const gap = 4.0;
+    const pagerHeight = 28.0;
 
-    final gridWidth = width - 16;
-    final cardWidth = (gridWidth - (columns - 1) * 8) / columns;
-    final cardHeight = cardWidth / (16 / 9);
-
-    return GridView.builder(
+    return Padding(
       padding: const EdgeInsets.all(8),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: columns,
-        crossAxisSpacing: 8,
-        mainAxisSpacing: 8,
-        childAspectRatio: 16 / 9,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final gridW = constraints.maxWidth;
+          final gridH = (constraints.maxHeight - (showPager ? pagerHeight : 0))
+              .clamp(0.0, double.infinity);
+          final feedbackSize = _feedbackSize(layout, gridW, gridH);
+
+          return Column(
+            children: [
+              SizedBox(
+                width: gridW,
+                height: gridH,
+                child: Stack(
+                  children: [
+                    for (var i = 0; i < slotsPerPage; i++)
+                      _buildSlot(
+                        slotIdx: i,
+                        globalIdx: pageStart + i,
+                        slot: layout.slots[i],
+                        gridW: gridW,
+                        gridH: gridH,
+                        gap: gap,
+                        cameras: cameras,
+                        feedbackSize: feedbackSize,
+                      ),
+                  ],
+                ),
+              ),
+              if (showPager)
+                SizedBox(
+                  height: pagerHeight,
+                  child: _PagerBar(
+                    pageIdx: pageIdx,
+                    totalPages: totalPages,
+                    onChanged: (i) => setState(() => _pageIdx = i),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
-      itemCount: cameras.length + 1,
-      itemBuilder: (context, index) {
-        if (index == cameras.length) {
-          return _AddCameraCard(onTap: widget.onAddCamera);
-        }
-        final cam = cameras[index];
-        final url = widget.streamApi.liveUrl(cam.id, widget.streamSource, widget.quality, cameraName: cam.name);
-        final isFullscreen = cam.id == widget.fullscreenCameraId;
-        final isDragged = cam.id == _draggingId;
-        final isHoverTarget = _hoverIndex == index && _draggingId != null && _draggingId != cam.id;
+    );
+  }
 
-        final card = CameraCard(
-          camera: cam,
-          stream: _streamFor(cam.id),
-          streamUrl: url,
-          selected: widget.selectedCameraId == cam.id,
-          onTap: () => widget.onCameraSelected(cam.id),
-          onEdit: () => widget.onEditCamera(cam),
-          livePlayer: widget.livePlayers[cam.id],
-          liveController: widget.liveControllers[cam.id],
-          isFullscreen: isFullscreen,
-          playbackController: widget.playbackControllers[cam.id],
-          playbackLoading: widget.playbackLoading.contains(cam.id),
-          playbackFailed: widget.playbackFailed.contains(cam.id),
-          showDragHint: widget.selectedCameraId == cam.id,
-          dragFeedbackSize: Size(cardWidth, cardHeight),
-          onDragStarted: () => _onDragStarted(cam.id),
-          onDragEnd: _onDragEnd,
-        );
+  Size _feedbackSize(GridLayout layout, double gridW, double gridH) {
+    // Use the smallest slot as the drag-feedback size so the preview looks
+    // reasonable regardless of which tile the user picked up.
+    var w = gridW;
+    var h = gridH;
+    for (final s in layout.slots) {
+      final sw = s.w * gridW;
+      final sh = s.h * gridH;
+      if (sw < w) w = sw;
+      if (sh < h) h = sh;
+    }
+    return Size(w, h);
+  }
 
-        return DragTarget<int>(
-          key: ValueKey(cam.id),
-          onWillAcceptWithDetails: (details) => details.data != cam.id,
-          onAcceptWithDetails: (details) {
-            _applyReorder(details.data, index);
-            // Clear drag state immediately — Draggable.onDragEnd may not fire
-            // reliably after a reorder rebuilds the widget tree
-            setState(() {
-              _draggingId = null;
-              _hoverIndex = null;
-            });
-            widget.onDragStateChanged(false);
-          },
-          onMove: (_) {
-            if (_hoverIndex != index) {
-              setState(() => _hoverIndex = index);
-            }
-          },
-          onLeave: (_) {
-            if (_hoverIndex == index) {
-              setState(() => _hoverIndex = null);
-            }
-          },
-          builder: (context, candidateData, rejectedData) {
-            return AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              decoration: isHoverTarget
-                  ? BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: const Color(0xFF3B82F6).withValues(alpha: 0.5), width: 2),
-                    )
-                  : null,
-              child: isDragged ? Opacity(opacity: 0.3, child: card) : card,
-            );
-          },
-        );
-      },
+  Widget _buildSlot({
+    required int slotIdx,
+    required int globalIdx,
+    required GridSlot slot,
+    required double gridW,
+    required double gridH,
+    required double gap,
+    required List<Camera> cameras,
+    required Size feedbackSize,
+  }) {
+    final left = slot.x * gridW + gap / 2;
+    final top = slot.y * gridH + gap / 2;
+    final width = (slot.w * gridW - gap).clamp(0.0, double.infinity);
+    final height = (slot.h * gridH - gap).clamp(0.0, double.infinity);
+
+    Widget child;
+    if (globalIdx < cameras.length) {
+      final cam = cameras[globalIdx];
+      final url = widget.streamApi.liveUrl(
+        cam.id,
+        widget.streamSource,
+        widget.quality,
+        cameraName: cam.name,
+      );
+      final isFullscreen = cam.id == widget.fullscreenCameraId;
+      final isDragged = cam.id == _draggingId;
+      final isHoverTarget = _hoverIndex == globalIdx &&
+          _draggingId != null &&
+          _draggingId != cam.id;
+
+      final card = CameraCard(
+        camera: cam,
+        stream: _streamFor(cam.id),
+        streamUrl: url,
+        selected: widget.selectedCameraId == cam.id,
+        onTap: () => widget.onCameraSelected(cam.id),
+        onEdit: () => widget.onEditCamera(cam),
+        onAddToGroup:
+            widget.onAddToGroup != null ? () => widget.onAddToGroup!(cam) : null,
+        livePlayer: widget.livePlayers[cam.id],
+        liveController: widget.liveControllers[cam.id],
+        isFullscreen: isFullscreen,
+        playbackController: widget.playbackControllers[cam.id],
+        playbackLoading: widget.playbackLoading.contains(cam.id),
+        playbackFailed: widget.playbackFailed.contains(cam.id),
+        showDragHint: widget.selectedCameraId == cam.id,
+        dragFeedbackSize: feedbackSize,
+        onDragStarted: () => _onDragStarted(cam.id),
+        onDragEnd: _onDragEnd,
+      );
+
+      child = DragTarget<int>(
+        key: ValueKey(cam.id),
+        onWillAcceptWithDetails: (details) => details.data != cam.id,
+        onAcceptWithDetails: (details) {
+          _applyReorder(details.data, globalIdx);
+          setState(() {
+            _draggingId = null;
+            _hoverIndex = null;
+          });
+          widget.onDragStateChanged(false);
+        },
+        onMove: (_) {
+          if (_hoverIndex != globalIdx) {
+            setState(() => _hoverIndex = globalIdx);
+          }
+        },
+        onLeave: (_) {
+          if (_hoverIndex == globalIdx) {
+            setState(() => _hoverIndex = null);
+          }
+        },
+        builder: (context, candidateData, rejectedData) {
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            decoration: isHoverTarget
+                ? BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: const Color(0xFF3B82F6).withValues(alpha: 0.5),
+                      width: 2,
+                    ),
+                  )
+                : null,
+            child: isDragged ? Opacity(opacity: 0.3, child: card) : card,
+          );
+        },
+      );
+    } else {
+      // Empty slot — accepts drags so users can drop a camera into an
+      // unfilled slot (list reorders, camera lands at this index).
+      final isHoverTarget = _hoverIndex == globalIdx && _draggingId != null;
+      child = DragTarget<int>(
+        onWillAcceptWithDetails: (_) => true,
+        onAcceptWithDetails: (details) {
+          _applyReorder(details.data, globalIdx);
+          setState(() {
+            _draggingId = null;
+            _hoverIndex = null;
+          });
+          widget.onDragStateChanged(false);
+        },
+        onMove: (_) {
+          if (_hoverIndex != globalIdx) {
+            setState(() => _hoverIndex = globalIdx);
+          }
+        },
+        onLeave: (_) {
+          if (_hoverIndex == globalIdx) {
+            setState(() => _hoverIndex = null);
+          }
+        },
+        builder: (context, candidateData, rejectedData) {
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: isHoverTarget
+                    ? const Color(0xFF3B82F6).withValues(alpha: 0.5)
+                    : const Color(0xFF262626),
+                width: isHoverTarget ? 2 : 1,
+              ),
+              color: const Color(0xFF111111),
+            ),
+            child: const Center(
+              child: Icon(Icons.videocam_outlined,
+                  color: Color(0xFF404040), size: 24),
+            ),
+          );
+        },
+      );
+    }
+
+    return Positioned(
+      left: left,
+      top: top,
+      width: width,
+      height: height,
+      child: child,
     );
   }
 }
 
-class _AddCameraCard extends StatelessWidget {
-  final VoidCallback onTap;
-  const _AddCameraCard({required this.onTap});
+class _PagerBar extends StatelessWidget {
+  final int pageIdx;
+  final int totalPages;
+  final ValueChanged<int> onChanged;
+
+  const _PagerBar({
+    required this.pageIdx,
+    required this.totalPages,
+    required this.onChanged,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFF333333)),
-          color: const Color(0xFF1A1A1A),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.chevron_left, size: 20),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          onPressed: pageIdx > 0 ? () => onChanged(pageIdx - 1) : null,
         ),
-        child: const Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.add, color: Color(0xFF525252), size: 28),
-              SizedBox(height: 4),
-              Text('Add Camera',
-                  style: TextStyle(color: Color(0xFF525252), fontSize: 12)),
-            ],
+        for (var i = 0; i < totalPages; i++)
+          GestureDetector(
+            onTap: () => onChanged(i),
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: i == pageIdx
+                    ? const Color(0xFF3B82F6)
+                    : const Color(0xFF404040),
+              ),
+            ),
           ),
+        IconButton(
+          icon: const Icon(Icons.chevron_right, size: 20),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          onPressed:
+              pageIdx < totalPages - 1 ? () => onChanged(pageIdx + 1) : null,
         ),
-      ),
+      ],
     );
   }
 }

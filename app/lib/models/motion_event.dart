@@ -1,3 +1,17 @@
+class FaceMatch {
+  final int faceId;
+  final String name;
+  final double confidence;
+
+  FaceMatch({required this.faceId, required this.name, required this.confidence});
+
+  factory FaceMatch.fromJson(Map<String, dynamic> json) => FaceMatch(
+        faceId: json['face_id'] as int,
+        name: json['name'] as String,
+        confidence: (json['confidence'] as num).toDouble(),
+      );
+}
+
 class MotionEvent {
   final int id;
   final int cameraId;
@@ -7,6 +21,8 @@ class MotionEvent {
   final String? detectionLabel;
   final double? detectionConfidence;
   final bool hasThumbnail;
+  final List<FaceMatch> faceMatches;
+  final bool faceUnknown;
 
   MotionEvent({
     required this.id,
@@ -17,6 +33,8 @@ class MotionEvent {
     this.detectionLabel,
     this.detectionConfidence,
     this.hasThumbnail = false,
+    this.faceMatches = const [],
+    this.faceUnknown = false,
   });
 
   factory MotionEvent.fromJson(Map<String, dynamic> json) => MotionEvent(
@@ -28,5 +46,9 @@ class MotionEvent {
         detectionLabel: json['detection_label'] as String?,
         detectionConfidence: (json['detection_confidence'] as num?)?.toDouble(),
         hasThumbnail: json['has_thumbnail'] as bool? ?? false,
+        faceMatches: ((json['face_matches'] as List<dynamic>?) ?? [])
+            .map((e) => FaceMatch.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        faceUnknown: json['face_unknown'] as bool? ?? false,
       );
 }

@@ -25,6 +25,7 @@ class AddCamerasWizardScreen extends StatefulWidget {
   final int existingCameraCount;
   final List<CameraGroup> groups;
   final GroupApi? groupApi;
+  final int? initialGroupId;
 
   const AddCamerasWizardScreen({
     super.key,
@@ -33,6 +34,7 @@ class AddCamerasWizardScreen extends StatefulWidget {
     this.existingCameraCount = 0,
     this.groups = const [],
     this.groupApi,
+    this.initialGroupId,
   });
 
   @override
@@ -304,7 +306,7 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
         resolution: resolution,
         codec: codec,
         manual: manual,
-      ));
+      )..groupId = widget.initialGroupId);
     }
     setState(() {
       _pending = pending;

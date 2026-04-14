@@ -53,7 +53,7 @@ async def create_group(data: CameraGroupCreate, db: AsyncSession = Depends(get_d
     db.add(group)
     await db.commit()
     await db.refresh(group)
-    logger.info("Camera group created", extra={"group_id": group.id, "name": group.name})
+    logger.info("Camera group created", extra={"group_id": group.id, "group_name": group.name})
     return CameraGroupResponse(id=group.id, name=group.name, sort_order=group.sort_order, camera_count=0)
 
 

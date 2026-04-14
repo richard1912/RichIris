@@ -123,6 +123,35 @@ echo      Done.
 echo.
 
 :: -----------------------------------------------
+:: 5b. Face recognition models (SCRFD + ArcFace)
+:: -----------------------------------------------
+if exist "%DEPS%\models\det_10g.onnx" (
+    echo [face] det_10g.onnx - already present, skipping
+) else (
+    echo [face] Downloading SCRFD face detector...
+    curl -L -o "%DEPS%\models\det_10g.onnx" "%GITHUB_BASE%/det_10g.onnx"
+    if errorlevel 1 (
+        echo WARNING: Failed to download SCRFD — face recognition will be disabled
+        del "%DEPS%\models\det_10g.onnx" 2>nul
+    ) else (
+        echo      Done.
+    )
+)
+if exist "%DEPS%\models\w600k_r50.onnx" (
+    echo [face] w600k_r50.onnx - already present, skipping
+) else (
+    echo [face] Downloading ArcFace embedding model...
+    curl -L -o "%DEPS%\models\w600k_r50.onnx" "%GITHUB_BASE%/w600k_r50.onnx"
+    if errorlevel 1 (
+        echo WARNING: Failed to download ArcFace — face recognition will be disabled
+        del "%DEPS%\models\w600k_r50.onnx" 2>nul
+    ) else (
+        echo      Done.
+    )
+)
+echo.
+
+:: -----------------------------------------------
 :: 6. Python dependencies
 :: -----------------------------------------------
 set /a STEP+=1

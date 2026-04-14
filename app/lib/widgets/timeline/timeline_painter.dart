@@ -140,7 +140,18 @@ class TimelinePainter extends CustomPainter {
 
         final drawX2 = ((x2 - x1 < 8) ? x1 + 8 : x2);
 
-        paint.color = DetectionColors.forCategory(cat).withValues(alpha: 0.8);
+        // Person events tint cyan when a known face matched, rose on unknown
+        Color baseColor = DetectionColors.forCategory(cat);
+        if (cat == DetectionCategory.person) {
+          final hasFaces = (event.faceMatches as List).isNotEmpty;
+          final hasUnknown = event.faceUnknown == true;
+          if (hasFaces) {
+            baseColor = DetectionColors.faceKnown;
+          } else if (hasUnknown) {
+            baseColor = DetectionColors.faceUnknown;
+          }
+        }
+        paint.color = baseColor.withValues(alpha: 0.8);
         canvas.drawRRect(
           RRect.fromRectAndRadius(
             Rect.fromLTRB(

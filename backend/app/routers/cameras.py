@@ -598,6 +598,8 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         ai_detect_vehicles=data.ai_detect_vehicles,
         ai_detect_animals=data.ai_detect_animals,
         ai_confidence_threshold=data.ai_confidence_threshold,
+        face_recognition=data.face_recognition,
+        face_match_threshold=data.face_match_threshold,
     )
     db.add(camera)
     await db.commit()
@@ -673,6 +675,10 @@ async def update_camera(
         camera.ai_detect_animals = data.ai_detect_animals
     if data.ai_confidence_threshold is not None:
         camera.ai_confidence_threshold = data.ai_confidence_threshold
+    if data.face_recognition is not None:
+        camera.face_recognition = data.face_recognition
+    if data.face_match_threshold is not None:
+        camera.face_match_threshold = data.face_match_threshold
     if "motion_scripts" in (data.model_fields_set or set()):
         if data.motion_scripts is not None:
             camera.motion_scripts = json.dumps([s.model_dump() for s in data.motion_scripts])

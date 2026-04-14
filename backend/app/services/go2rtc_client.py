@@ -330,6 +330,29 @@ class Go2rtcClient:
                 for suffix in suffixes
             ])
 
+    async def fetch_jpeg(self, stream_name: str, timeout: float = 2.0) -> bytes | None:
+        """Grab a one-shot JPEG snapshot from a go2rtc stream. Returns None on failure.
+
+        Uses go2rtc's HTTP frame API which decodes a single I-frame from the
+        live RTSP feed without restarting the stream. Typical latency ~50–200 ms.
+        """
+        url = f"{self._base_url}/api/frame.jpeg?src={quote(stream_name)}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200 and resp.content:
+                    return resp.content
+                logger.warning("go2rtc frame fetch non-200", extra={
+                    "stream": stream_name, "status": resp.status_code,
+                    "body_len": len(resp.content),
+                })
+                return None
+        except Exception as e:
+            logger.warning("go2rtc frame fetch failed", extra={
+                "stream": stream_name, "err": str(e)[:200],
+            })
+            return None
+
     async def is_healthy(self) -> bool:
         """Check if go2rtc is responding."""
         try:

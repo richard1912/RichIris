@@ -162,6 +162,36 @@ if (-not (Test-Path $rtdetrPath)) {
     Log "RT-DETR: already present, skipping"
 }
 
+# --- SCRFD face detector ---
+$scrfdPath = Join-Path $DepsDir "models\det_10g.onnx"
+if (-not (Test-Path $scrfdPath)) {
+    Write-Host "Downloading SCRFD face detector..."
+    try {
+        Download-File -Url "$GITHUB_BASE/det_10g.onnx" -OutFile $scrfdPath -Label "SCRFD"
+        Log "SCRFD: OK"
+    } catch {
+        Log "SCRFD: FAILED - $_"
+        $failed += "scrfd"
+    }
+} else {
+    Log "SCRFD: already present, skipping"
+}
+
+# --- ArcFace embedding model ---
+$arcfacePath = Join-Path $DepsDir "models\w600k_r50.onnx"
+if (-not (Test-Path $arcfacePath)) {
+    Write-Host "Downloading ArcFace embedding model..."
+    try {
+        Download-File -Url "$GITHUB_BASE/w600k_r50.onnx" -OutFile $arcfacePath -Label "ArcFace"
+        Log "ArcFace: OK"
+    } catch {
+        Log "ArcFace: FAILED - $_"
+        $failed += "arcface"
+    }
+} else {
+    Log "ArcFace: already present, skipping"
+}
+
 # Cleanup temp
 if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -195,6 +225,20 @@ if (Test-Path $rtdetrPath) {
     Log ('  OK: rtdetr-l.onnx (' + $s + ' megabytes)')
 } else {
     Log "  MISSING: rtdetr-l.onnx (AI detection disabled)"
+}
+
+# SCRFD + ArcFace are optional (facial recognition only)
+if (Test-Path $scrfdPath) {
+    $s = [math]::Round((Get-Item $scrfdPath).Length / 1MB, 1)
+    Log ('  OK: det_10g.onnx (' + $s + ' megabytes)')
+} else {
+    Log "  MISSING: det_10g.onnx (face recognition disabled)"
+}
+if (Test-Path $arcfacePath) {
+    $s = [math]::Round((Get-Item $arcfacePath).Length / 1MB, 1)
+    Log ('  OK: w600k_r50.onnx (' + $s + ' megabytes)')
+} else {
+    Log "  MISSING: w600k_r50.onnx (face recognition disabled)"
 }
 
 if ($failed.Count -gt 0) {

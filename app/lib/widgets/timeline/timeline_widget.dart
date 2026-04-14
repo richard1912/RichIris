@@ -316,7 +316,16 @@ class _TimelineWidgetState extends State<TimelineWidget> {
 
   Widget _buildThumbEntry(BuildContext _) {
     final isMotion = _hoverMotionEvent != null;
-    final motionColor = DetectionColors.forLabel(_hoverMotionEvent?.detectionLabel);
+    // Override the category color with the face hue when a face was detected
+    // so the hover box matches the timeline bar (cyan=known, rose=unknown).
+    final ev = _hoverMotionEvent;
+    final motionColor = ev == null
+        ? DetectionColors.motionOnly
+        : ev.faceMatches.isNotEmpty
+            ? DetectionColors.faceKnown
+            : ev.faceUnknown
+                ? DetectionColors.faceUnknown
+                : DetectionColors.forLabel(ev.detectionLabel);
     final borderColor = isMotion ? motionColor : const Color(0xFF404040);
 
     return Positioned(
@@ -360,10 +369,25 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                       () {
                         final e = _hoverMotionEvent!;
                         final minSens = (101 - e.peakIntensity / 0.05).clamp(0, 100).round();
-                        final ai = e.detectionLabel != null
-                            ? '${e.detectionLabel}${e.detectionConfidence != null ? ' ${(e.detectionConfidence! * 100).round()}%' : ''} | '
-                            : '';
-                        // Parse startTime to show HH:MM:SS
+                        // Prefer face identity over the raw detection label.
+                        // - Known face(s): "Richard 63%" (or "Richard, Alice" when multiple)
+                        // - Unknown face:  "Unknown face | person 92%"
+                        // - No face data:  "person 92%"
+                        String ai = '';
+                        if (e.faceMatches.isNotEmpty) {
+                          final names = e.faceMatches.map((m) => m.name).join(', ');
+                          final top = e.faceMatches
+                              .map((m) => m.confidence)
+                              .reduce((a, b) => a > b ? a : b);
+                          ai = '$names ${(top * 100).round()}% | ';
+                        } else if (e.faceUnknown) {
+                          final base = e.detectionLabel != null
+                              ? '${e.detectionLabel}${e.detectionConfidence != null ? ' ${(e.detectionConfidence! * 100).round()}%' : ''}'
+                              : 'person';
+                          ai = 'Unknown face | $base | ';
+                        } else if (e.detectionLabel != null) {
+                          ai = '${e.detectionLabel}${e.detectionConfidence != null ? ' ${(e.detectionConfidence! * 100).round()}%' : ''} | ';
+                        }
                         final dt = DateTime.tryParse(e.startTime);
                         final ts = dt != null
                             ? '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}'

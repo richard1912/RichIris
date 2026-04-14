@@ -13,7 +13,7 @@ from app.config import get_app_dir, get_config
 from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
-from app.routers import backup, cameras, clips, groups, motion, recordings, settings, storage, streams, system
+from app.routers import backup, cameras, clips, faces, groups, motion, recordings, settings, storage, streams, system
 from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
@@ -21,6 +21,7 @@ from app.services.playback import get_playback_manager
 from app.services.frame_broker import get_frame_broker
 from app.services.stream_manager import get_stream_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
+from app.services.face_recognizer import get_face_recognizer
 from app.services.motion_detector import get_motion_detector
 from app.services.object_detector import get_object_detector
 
@@ -113,6 +114,12 @@ async def lifespan(app: FastAPI):
     if any(getattr(cam, 'ai_detection', False) for cam in cameras_list):
         await obj_detector.start()
 
+    # Start face recognizer if any camera has face_recognition enabled
+    face_recognizer = get_face_recognizer()
+    if any(getattr(cam, 'face_recognition', False) for cam in cameras_list):
+        await face_recognizer.start()
+        await face_recognizer.reload_cache()
+
     motion_detector = get_motion_detector()
     await motion_detector.start(cameras_list)
 
@@ -130,6 +137,7 @@ async def lifespan(app: FastAPI):
     logger.info("RichIris NVR shutting down")
     await update_checker.stop()
     await motion_detector.stop()
+    await face_recognizer.stop()
     await obj_detector.stop()
     await thumb_capture.stop()
     await frame_broker.stop()
@@ -243,13 +251,14 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="RichIris NVR",
-        version="0.0.14",
+        version="0.1.0",
         lifespan=lifespan,
     )
 
     app.include_router(backup.router)
     app.include_router(cameras.router)
     app.include_router(clips.router)
+    app.include_router(faces.router)
     app.include_router(groups.router)
     app.include_router(motion.router)
     app.include_router(recordings.router)

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import '../models/camera.dart';
 import '../models/camera_group.dart';
+import '../models/face.dart';
 import '../services/api_client.dart';
 import '../services/camera_api.dart';
+import '../services/face_api.dart';
 import '../services/group_api.dart';
 import '../utils/detection_colors.dart';
 import '../widgets/rtsp_wizard_dialog.dart';
@@ -16,6 +18,8 @@ class _ScriptEntry {
   bool animals;
   bool motionOnly;
   int offDelay;
+  List<int> faces;
+  bool faceUnknown;
 
   _ScriptEntry({
     required this.onCtrl,
@@ -25,7 +29,9 @@ class _ScriptEntry {
     this.animals = true,
     this.motionOnly = true,
     this.offDelay = 10,
-  });
+    List<int>? faces,
+    this.faceUnknown = false,
+  }) : faces = faces ?? [];
 }
 
 class CameraFormScreen extends StatefulWidget {
@@ -34,6 +40,8 @@ class CameraFormScreen extends StatefulWidget {
   final Camera? camera;
   final List<CameraGroup> groups;
   final GroupApi? groupApi;
+  final FaceApi? faceApi;
+  final int? initialGroupId;
 
   const CameraFormScreen({
     super.key,
@@ -42,6 +50,8 @@ class CameraFormScreen extends StatefulWidget {
     this.camera,
     this.groups = const [],
     this.groupApi,
+    this.faceApi,
+    this.initialGroupId,
   });
 
   @override
@@ -64,6 +74,9 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late bool _aiDetectVehicles;
   late bool _aiDetectAnimals;
   late int _aiConfidenceThreshold;
+  late bool _faceRecognition;
+  late int _faceMatchThreshold;
+  List<Face> _knownFaces = [];
   int? _groupId;
   bool _saving = false;
   String? _error;
@@ -119,13 +132,28 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       animals: s.animals,
       motionOnly: s.motionOnly,
       offDelay: s.offDelay,
+      faces: List<int>.from(s.faces),
+      faceUnknown: s.faceUnknown,
     )).toList();
     _aiDetection = widget.camera?.aiDetection ?? true;
     _aiDetectPersons = widget.camera?.aiDetectPersons ?? true;
     _aiDetectVehicles = widget.camera?.aiDetectVehicles ?? true;
     _aiDetectAnimals = widget.camera?.aiDetectAnimals ?? true;
     _aiConfidenceThreshold = widget.camera?.aiConfidenceThreshold ?? 50;
-    _groupId = widget.camera?.groupId;
+    _faceRecognition = widget.camera?.faceRecognition ?? false;
+    _faceMatchThreshold = widget.camera?.faceMatchThreshold ?? 50;
+    _groupId = widget.camera?.groupId ?? widget.initialGroupId;
+    _loadFaces();
+  }
+
+  Future<void> _loadFaces() async {
+    if (widget.faceApi == null) return;
+    try {
+      final faces = await widget.faceApi!.fetchAll();
+      if (mounted) setState(() => _knownFaces = faces);
+    } catch (_) {
+      // Non-fatal: form still works without face filter UI
+    }
   }
 
   @override
@@ -168,6 +196,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 'animals': e.animals,
                 'motion_only': e.motionOnly,
                 'off_delay': e.offDelay,
+                'faces': e.faces,
+                'face_unknown': e.faceUnknown,
               };
             })
             .toList();
@@ -185,6 +215,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           'ai_detect_vehicles': _aiDetectVehicles,
           'ai_detect_animals': _aiDetectAnimals,
           'ai_confidence_threshold': _aiConfidenceThreshold,
+          'face_recognition': _faceRecognition,
+          'face_match_threshold': _faceMatchThreshold,
         };
         await widget.cameraApi.update(widget.camera!.id, data);
       } else {
@@ -516,6 +548,55 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                     active: true),
               ],
             ),
+            if (_faceRecognition && _aiDetectPersons) ...[
+              const SizedBox(height: 8),
+              const Text('Face filter (optional):',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 4,
+                runSpacing: 0,
+                children: [
+                  for (final f in _knownFaces)
+                    FilterChip(
+                      label: Text(f.name, style: const TextStyle(fontSize: 11)),
+                      selected: entry.faces.contains(f.id),
+                      onSelected: (v) => setState(() {
+                        if (v) {
+                          if (!entry.faces.contains(f.id)) entry.faces.add(f.id);
+                        } else {
+                          entry.faces.remove(f.id);
+                        }
+                      }),
+                      selectedColor: const Color(0xFF06B6D4).withValues(alpha: 0.7),
+                      checkmarkColor: Colors.white,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+                  FilterChip(
+                    label: const Text('Unknown', style: TextStyle(fontSize: 11)),
+                    selected: entry.faceUnknown,
+                    onSelected: (v) => setState(() => entry.faceUnknown = v),
+                    selectedColor: const Color(0xFFE11D48).withValues(alpha: 0.6),
+                    checkmarkColor: Colors.white,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                  ),
+                ],
+              ),
+              if (entry.faces.isEmpty && !entry.faceUnknown)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    _knownFaces.isEmpty
+                        ? 'No faces enrolled yet — script fires for all persons.'
+                        : 'No filter selected — script fires for all persons.',
+                    style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                  ),
+                ),
+            ],
           ],
         ),
       ),
@@ -760,6 +841,41 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                     label: '$_aiConfidenceThreshold%',
                     onChanged: (v) => setState(() => _aiConfidenceThreshold = v.round()),
                   ),
+                  // Face recognition (only meaningful when Persons detection is on)
+                  SwitchListTile(
+                    title: const Text('Face Recognition'),
+                    subtitle: Text(
+                      _aiDetectPersons
+                          ? 'Identify enrolled people in person detections'
+                          : 'Enable Persons detection above to use',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    value: _faceRecognition && _aiDetectPersons,
+                    onChanged: _aiDetectPersons
+                        ? (v) => setState(() => _faceRecognition = v)
+                        : null,
+                    contentPadding: EdgeInsets.zero,
+                    activeColor: const Color(0xFF06B6D4),
+                  ),
+                  if (_faceRecognition && _aiDetectPersons) ...[
+                    Row(
+                      children: [
+                        const Text('Match Threshold', style: TextStyle(fontSize: 14)),
+                        const Spacer(),
+                        Text('$_faceMatchThreshold%',
+                            style: const TextStyle(fontSize: 13, color: Color(0xFF06B6D4))),
+                      ],
+                    ),
+                    Slider(
+                      value: _faceMatchThreshold.toDouble(),
+                      min: 30,
+                      max: 90,
+                      divisions: 12,
+                      activeColor: const Color(0xFF06B6D4),
+                      label: '$_faceMatchThreshold%',
+                      onChanged: (v) => setState(() => _faceMatchThreshold = v.round()),
+                    ),
+                  ],
                 ],
                 const SizedBox(height: 6),
                 _buildScriptsList(),

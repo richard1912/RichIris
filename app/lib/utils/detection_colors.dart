@@ -7,6 +7,8 @@ class DetectionColors {
   static const vehicle = Color(0xFF818CF8);   // indigo
   static const animal = Color(0xFF34D399);    // emerald
   static const motionOnly = Color(0xFF6B7280); // gray
+  static const faceKnown = Color(0xFF06B6D4);   // cyan — known face recognized
+  static const faceUnknown = Color(0xFFE11D48); // rose — unknown face seen
 
   static const _vehicleLabels = {'bicycle', 'car', 'motorcycle', 'bus', 'truck'};
 

@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../config/constants.dart';
 import '../models/camera.dart';
+import '../models/grid_layout.dart';
 import '../models/system_status.dart';
 import '../services/stream_api.dart';
 import '../services/recording_api.dart';
@@ -23,6 +24,7 @@ import '../models/camera_group.dart';
 import '../services/group_api.dart';
 import '../widgets/camera_grid.dart';
 import '../widgets/group_chip_bar.dart';
+import '../widgets/layout_picker_button.dart';
 import '../widgets/version_info_dialog.dart';
 import '../widgets/quality_selector.dart';
 import '../widgets/timeline/timeline_widget.dart';
@@ -33,6 +35,8 @@ class HomeScreen extends StatefulWidget {
   final List<CameraGroup> groups;
   final int? selectedGroupId;
   final ValueChanged<int?> onGroupSelected;
+  final String layoutId;
+  final ValueChanged<String> onLayoutChanged;
   final VoidCallback onGroupsChanged;
   final GroupApi groupApi;
   final SystemStatus? systemStatus;
@@ -58,8 +62,10 @@ class HomeScreen extends StatefulWidget {
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback onOpenSystem;
   final VoidCallback onOpenSystemSettings;
+  final VoidCallback? onOpenFaces;
   final VoidCallback onAddCamera;
   final ValueChanged<Camera> onEditCamera;
+  final ValueChanged<Camera>? onAddToGroup;
   final Future<void> Function(List<int>) onReorder;
   final ValueChanged<bool> onDragStateChanged;
   final PlaybackRef playbackRef;
@@ -74,6 +80,8 @@ class HomeScreen extends StatefulWidget {
     required this.groups,
     this.selectedGroupId,
     required this.onGroupSelected,
+    required this.layoutId,
+    required this.onLayoutChanged,
     required this.onGroupsChanged,
     required this.groupApi,
     this.systemStatus,
@@ -99,8 +107,10 @@ class HomeScreen extends StatefulWidget {
     required this.onStreamSourceChanged,
     required this.onOpenSystem,
     required this.onOpenSystemSettings,
+    this.onOpenFaces,
     required this.onAddCamera,
     required this.onEditCamera,
+    this.onAddToGroup,
     required this.onReorder,
     required this.onDragStateChanged,
     required this.playbackRef,
@@ -507,6 +517,15 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           IconButton(
+            icon: const Icon(Icons.add, size: 20),
+            tooltip: 'Add Camera',
+            onPressed: widget.onAddCamera,
+          ),
+          LayoutPickerButton(
+            currentLayoutId: widget.layoutId,
+            onLayoutChanged: widget.onLayoutChanged,
+          ),
+          IconButton(
             icon: const Icon(Icons.bug_report, size: 20),
             tooltip: 'Report a Bug',
             onPressed: () => _showBugReportDialog(context),
@@ -533,6 +552,12 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(width: 8),
           ],
+          if (widget.onOpenFaces != null)
+            IconButton(
+              icon: const Icon(Icons.face_retouching_natural, size: 20),
+              tooltip: 'Faces',
+              onPressed: widget.onOpenFaces,
+            ),
           IconButton(
             icon: const Icon(Icons.storage, size: 20),
             tooltip: 'System Status',
@@ -579,14 +604,13 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Column(
         children: [
-          if (widget.groups.isNotEmpty)
-            GroupChipBar(
-              groups: widget.groups,
-              selectedGroupId: widget.selectedGroupId,
-              onGroupSelected: widget.onGroupSelected,
-              onGroupsChanged: widget.onGroupsChanged,
-              groupApi: widget.groupApi,
-            ),
+          GroupChipBar(
+            groups: widget.groups,
+            selectedGroupId: widget.selectedGroupId,
+            onGroupSelected: widget.onGroupSelected,
+            onGroupsChanged: widget.onGroupsChanged,
+            groupApi: widget.groupApi,
+          ),
           Expanded(
             child: CameraGrid(
               cameras: widget.cameras,
@@ -595,10 +619,11 @@ class _HomeScreenState extends State<HomeScreen> {
               streamApi: widget.streamApi,
               streamSource: widget.streamSource.param,
               quality: widget.quality.param,
+              layout: gridLayoutById(widget.layoutId),
               selectedCameraId: widget.selectedCameraId,
               onCameraSelected: widget.onCameraSelected,
               onEditCamera: widget.onEditCamera,
-              onAddCamera: widget.onAddCamera,
+              onAddToGroup: widget.onAddToGroup,
               onReorder: widget.onReorder,
               onDragStateChanged: widget.onDragStateChanged,
               livePlayers: _isLive ? widget.livePlayers : const {},

@@ -14,6 +14,7 @@ from app.config import get_config
 from app.database import get_session_factory
 from app.models import MotionEvent
 from app.services.ffmpeg import sanitize_camera_name
+from app.services.face_recognizer import get_face_recognizer
 from app.services.frame_broker import get_frame_broker
 from app.services.object_detector import get_object_detector
 
@@ -37,6 +38,10 @@ MAX_EVENT_DURATION = 120  # Force-close events after 2 minutes to prevent false-
 POLL_INTERVAL = 0.5       # Seconds between frame checks (broker runs at 2 fps)
 BLUR_SIZE = (21, 21)
 DIFF_THRESHOLD = 25
+# Once a known face matches at >= this cosine, skip further face inference
+# in the event. Well above the default 0.5 match threshold so we don't lock
+# in a marginal match and miss a clearer frame.
+FACE_LOCKIN_CONFIDENCE = 0.65
 MOTION_ALPHA = 0.01       # Slow running-average adaptation (steady state)
 MOTION_ALPHA_STARTUP = 0.2
 BASELINE_STARTUP_FRAMES = 25
@@ -69,6 +74,9 @@ class MotionDetector:
         self._pending_detections: dict[tuple[int, str], tuple] = {}
         # Cached move threshold per camera (pixels), computed from frame dimensions
         self._move_threshold: dict[int, float] = {}
+        # Highest cosine similarity known-face match seen so far per active event.
+        # Used to skip further face inference once we have a confident identification.
+        self._best_face_confidence: dict[tuple[int, str], float] = {}
 
     @staticmethod
     def _parse_motion_scripts(camera) -> list[dict]:
@@ -101,6 +109,8 @@ class MotionDetector:
                         ai_detect_vehicles=cam.ai_detect_vehicles,
                         ai_detect_animals=cam.ai_detect_animals,
                         ai_threshold=cam.ai_confidence_threshold / 100.0,
+                        face_recognition=getattr(cam, "face_recognition", False),
+                        face_match_threshold=getattr(cam, "face_match_threshold", 50) / 100.0,
                         startup_delay=stagger_delay,
                     )
                 )
@@ -166,6 +176,10 @@ class MotionDetector:
             if camera.ai_detection:
                 detector = get_object_detector()
                 await detector.start()
+            if getattr(camera, "face_recognition", False):
+                recognizer = get_face_recognizer()
+                await recognizer.start()
+                await recognizer.reload_cache()
             scripts = self._parse_motion_scripts(camera)
             task = asyncio.create_task(
                 self._detect_loop(
@@ -176,6 +190,8 @@ class MotionDetector:
                     ai_detect_vehicles=camera.ai_detect_vehicles,
                     ai_detect_animals=camera.ai_detect_animals,
                     ai_threshold=camera.ai_confidence_threshold / 100.0,
+                    face_recognition=getattr(camera, "face_recognition", False),
+                    face_match_threshold=getattr(camera, "face_match_threshold", 50) / 100.0,
                 )
             )
             self._tasks[cam_id] = task
@@ -227,6 +243,8 @@ class MotionDetector:
         ai_detect_persons: bool = True, ai_detect_vehicles: bool = False,
         ai_detect_animals: bool = False,
         ai_threshold: float = 0.5,
+        face_recognition: bool = False,
+        face_match_threshold: float = 0.5,
         startup_delay: float = 0,
     ) -> None:
         """Per-camera detection loop: pull frame → motion check → AI detection → event."""
@@ -328,27 +346,55 @@ class MotionDetector:
                                 # Track best pending detection for when confirmation fires
                                 pkey = (cam_id, cat)
                                 prev = self._pending_detections.get(pkey)
+                                best_bbox = (best.x1, best.y1, best.x2, best.y2)
                                 if prev is None or best.confidence > prev[1]:
                                     self._pending_detections[pkey] = (
-                                        best.label, best.confidence, changed_pct, frame.copy(),
+                                        best.label, best.confidence, changed_pct, frame.copy(), best_bbox,
                                     )
                                 if confirmed:
                                     any_confirmed = True
                                     pending = self._pending_detections.pop(pkey, None)
                                     if pending:
-                                        await self._on_motion(
-                                            cam_id, cam_name, pending[2], scripts,
-                                            detection_label=pending[0],
-                                            detection_confidence=pending[1],
-                                            frame=pending[3],
-                                        )
+                                        p_label, p_conf, p_intensity, p_frame, p_bbox = pending
                                     else:
-                                        await self._on_motion(
-                                            cam_id, cam_name, changed_pct, scripts,
-                                            detection_label=best.label,
-                                            detection_confidence=best.confidence,
-                                            frame=frame,
+                                        p_label, p_conf, p_intensity, p_frame, p_bbox = (
+                                            best.label, best.confidence, changed_pct, frame, best_bbox,
                                         )
+                                    # Always run SCRFD on person events so the enrollment UI
+                                    # can filter thumbnails to ones with an actual face, even
+                                    # on cameras where face recognition itself is off.
+                                    # Full match + embedding only runs when FR is enabled and
+                                    # we haven't already locked in a confident match.
+                                    face_info = None
+                                    thumb_frame = p_frame
+                                    if cat == "person":
+                                        ev_key = (cam_id, cat)
+                                        locked_in = (
+                                            self._best_face_confidence.get(ev_key, 0.0)
+                                            >= FACE_LOCKIN_CONFIDENCE
+                                        )
+                                        if face_recognition and not locked_in:
+                                            face_info = await self._recognize_faces(
+                                                cam_name, p_frame, p_bbox, face_match_threshold,
+                                            )
+                                            mf = (face_info or {}).get("source_frame")
+                                            if mf is not None:
+                                                thumb_frame = mf
+                                        elif not face_recognition:
+                                            # Cheap SCRFD-only pass to populate face_detected
+                                            face_info = await self._scrfd_only(
+                                                cam_name, p_frame, p_bbox,
+                                            )
+                                            mf = (face_info or {}).get("source_frame")
+                                            if mf is not None:
+                                                thumb_frame = mf
+                                    await self._on_motion(
+                                        cam_id, cam_name, p_intensity, scripts,
+                                        detection_label=p_label,
+                                        detection_confidence=p_conf,
+                                        frame=thumb_frame,
+                                        face_info=face_info,
+                                    )
                             else:
                                 # Category not detected this frame — record miss
                                 self._record_detection(cam_id, cat, False)
@@ -384,18 +430,21 @@ class MotionDetector:
                 await asyncio.sleep(5)
 
     def _save_detection_thumbnail(self, cam_name: str, frame: np.ndarray, now: datetime) -> str | None:
-        """Save the detection frame as a JPEG thumbnail. Returns the file path."""
+        """Save the detection frame as a JPEG thumbnail. Returns the file path.
+
+        Written at the native sub-stream resolution (no downscale) so faces are
+        large enough for SCRFD enrollment. JPEG compression keeps the disk cost
+        modest even at 640–1280 px wide.
+        """
         try:
             config = get_config()
-            tp = config.trickplay
             safe_name = sanitize_camera_name(cam_name)
             date_str = now.strftime("%Y-%m-%d")
             thumb_dir = Path(config.storage.thumbnails_dir) / safe_name / date_str / "detection_thumbs"
             thumb_dir.mkdir(parents=True, exist_ok=True)
             filename = f"detect_{now.strftime('%H%M%S_%f')}.jpg"
             path = thumb_dir / filename
-            resized = cv2.resize(frame, (tp.thumb_width, tp.thumb_height), interpolation=cv2.INTER_AREA)
-            cv2.imwrite(str(path), resized, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             return str(path)
         except Exception:
             logger.exception("Failed to save detection thumbnail")
@@ -412,11 +461,144 @@ class MotionDetector:
         }.get(category, "motion_only")
         return [s for s in scripts if s.get(cat_key, False)]
 
+    @staticmethod
+    def _scripts_match_face(script: dict, matched_face_ids: set[int], face_unknown: bool) -> bool:
+        """Evaluate face-based trigger filters on a script entry.
+
+        - If `faces` is set (non-empty), the script fires only when any listed face matches.
+        - If `face_unknown` is true, the script fires only on unknown-face events.
+        - If both are set, either condition triggers (OR).
+        - If neither is set, the script behaves as before (always fires for the category).
+        """
+        required_faces = script.get("faces") or []
+        wants_unknown = bool(script.get("face_unknown", False))
+        if not required_faces and not wants_unknown:
+            return True
+        if required_faces and matched_face_ids.intersection(required_faces):
+            return True
+        if wants_unknown and face_unknown:
+            return True
+        return False
+
+    async def _recognize_faces(
+        self, cam_name: str, sub_frame: np.ndarray,
+        sub_bbox: tuple[int, int, int, int], threshold: float,
+    ) -> dict:
+        """Run SCRFD + ArcFace on a fresh main-stream snapshot.
+
+        The sub-stream used for motion + RT-DETR is usually 640×480, where
+        faces end up at 10–25 px and ArcFace embeddings become unreliable.
+        We fetch a single JPEG from the main-stream via go2rtc and rescale
+        the person bbox to match its dimensions, then run the face pipeline
+        on that high-res crop. Falls back to the sub-stream frame if the
+        main-stream snapshot is unavailable.
+        """
+        recognizer = get_face_recognizer()
+        if not recognizer.available:
+            return {"matches": [], "unknown": False}
+
+        frame, bbox = await self._fetch_main_for_face(cam_name, sub_frame, sub_bbox)
+        used_main = frame is not sub_frame
+        try:
+            hits = await recognizer.detect_and_embed(frame, person_bbox=bbox)
+        except Exception:
+            logger.exception("Face recognition failed")
+            return {"matches": [], "unknown": False, "source_frame": None}
+
+        matches: list[dict] = []
+        seen_ids: set[int] = set()
+        unknown = False
+        for h in hits:
+            m = recognizer.match(h.embedding, threshold)
+            if m is None:
+                unknown = True
+                continue
+            if m.face_id in seen_ids:
+                for existing in matches:
+                    if existing["face_id"] == m.face_id and m.confidence > existing["confidence"]:
+                        existing["confidence"] = m.confidence
+                continue
+            seen_ids.add(m.face_id)
+            matches.append({
+                "face_id": m.face_id,
+                "name": m.name,
+                "confidence": round(m.confidence, 3),
+            })
+        return {
+            "matches": matches,
+            "unknown": unknown,
+            "face_detected": len(hits) > 0,
+            # Return the main-stream frame we pulled so the caller can use it
+            # as the saved detection thumbnail — future enrollments then have
+            # a high-res source to extract a cleaner face crop from.
+            "source_frame": frame if used_main else None,
+        }
+
+    async def _scrfd_only(
+        self, cam_name: str, sub_frame: np.ndarray,
+        sub_bbox: tuple[int, int, int, int],
+    ) -> dict:
+        """Run only SCRFD face detection (no ArcFace embedding / matching).
+
+        Used to populate the `face_detected` flag for person events on cameras
+        that don't have face recognition enabled, so the enrollment UI can
+        still filter thumbnails to ones containing an actual face.
+        """
+        recognizer = get_face_recognizer()
+        if not recognizer.available:
+            return {"matches": [], "unknown": False, "face_detected": False, "source_frame": None}
+        frame, bbox = await self._fetch_main_for_face(cam_name, sub_frame, sub_bbox)
+        used_main = frame is not sub_frame
+        try:
+            hits = await recognizer.detect_and_embed(frame, person_bbox=bbox)
+        except Exception:
+            logger.exception("SCRFD-only face detection failed")
+            return {"matches": [], "unknown": False, "face_detected": False, "source_frame": None}
+        return {
+            "matches": [],
+            "unknown": False,
+            "face_detected": len(hits) > 0,
+            "source_frame": frame if used_main else None,
+        }
+
+    async def _fetch_main_for_face(
+        self, cam_name: str, sub_frame: np.ndarray,
+        sub_bbox: tuple[int, int, int, int],
+    ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+        """Fetch a main-stream JPEG snapshot and scale the sub-stream bbox to it.
+
+        Returns (frame, bbox_xyxy). On any failure, returns the original
+        sub-stream frame + bbox so face recognition still runs (just at lower
+        resolution).
+        """
+        try:
+            from app.services.go2rtc_client import get_go2rtc_client, get_stream_name
+            stream = f"{get_stream_name(cam_name)}_s1_direct"
+            jpeg = await get_go2rtc_client().fetch_jpeg(stream, timeout=1.5)
+            if not jpeg:
+                return sub_frame, sub_bbox
+            arr = np.frombuffer(jpeg, dtype=np.uint8)
+            main = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if main is None or main.size == 0:
+                return sub_frame, sub_bbox
+            sh, sw = sub_frame.shape[:2]
+            mh, mw = main.shape[:2]
+            sx, sy = mw / sw, mh / sh
+            x1, y1, x2, y2 = sub_bbox
+            return main, (
+                int(x1 * sx), int(y1 * sy),
+                int(x2 * sx), int(y2 * sy),
+            )
+        except Exception:
+            logger.exception("Failed to fetch main-stream snapshot for face recognition")
+            return sub_frame, sub_bbox
+
     async def _on_motion(
         self, cam_id: int, cam_name: str, intensity: float,
         scripts: list[dict],
         detection_label: str | None = None, detection_confidence: float | None = None,
         frame: np.ndarray | None = None,
+        face_info: dict | None = None,
     ) -> None:
         now = datetime.now()
         category = _label_category(detection_label)
@@ -433,6 +615,18 @@ class MotionDetector:
         for task in self._pending_off_tasks.pop(key, []):
             task.cancel()
 
+        face_matches = (face_info or {}).get("matches") or []
+        face_unknown = bool((face_info or {}).get("unknown"))
+        face_detected = bool((face_info or {}).get("face_detected"))
+        matched_face_ids = {m["face_id"] for m in face_matches}
+        # Track the best known-face confidence for this event so the loop can
+        # short-circuit further face inference once we have a confident match.
+        if face_matches:
+            top = max(m["confidence"] for m in face_matches)
+            prev_best = self._best_face_confidence.get(key, 0.0)
+            if top > prev_best:
+                self._best_face_confidence[key] = top
+
         if key not in self._active_events:
             # Save detection thumbnail from the frame that triggered this event
             thumb_path = None
@@ -445,6 +639,9 @@ class MotionDetector:
                     camera_id=cam_id, start_time=now, peak_intensity=intensity,
                     detection_label=detection_label, detection_confidence=detection_confidence,
                     thumbnail_path=thumb_path,
+                    face_matches=json.dumps(face_matches) if face_matches else None,
+                    face_unknown=face_unknown and not face_matches,
+                    face_detected=face_detected,
                 )
                 session.add(event)
                 await session.commit()
@@ -453,9 +650,10 @@ class MotionDetector:
                 self._event_start[key] = now
                 # Store off-scripts with their delays for _finalize_event
                 matching = self._scripts_for_category(scripts, category)
+                firing = [s for s in matching if self._scripts_match_face(s, matched_face_ids, face_unknown)]
                 self._script_off[key] = [
                     (s.get("off"), s.get("off_delay", COOLDOWN_SECONDS))
-                    for s in matching if s.get("off")
+                    for s in firing if s.get("off")
                 ]
 
             log_extra = {"camera": cam_name, "intensity": round(intensity, 2), "category": category}
@@ -464,13 +662,18 @@ class MotionDetector:
                 log_extra["confidence"] = round(detection_confidence, 2)
             if thumb_path:
                 log_extra["thumbnail"] = thumb_path
+            if face_matches:
+                log_extra["faces"] = [m["name"] for m in face_matches]
+            if face_unknown:
+                log_extra["face_unknown"] = True
             logger.info("Motion started", extra=log_extra)
 
-            # Run all matching on-scripts for this category
-            for s in matching:
+            # Run all matching on-scripts for this category (honoring face filters)
+            for s in firing:
                 if s.get("on"):
                     asyncio.create_task(self._run_script(
                         s["on"], cam_name, now, intensity, detection_label, detection_confidence,
+                        face_names=[m["name"] for m in face_matches],
                     ))
         else:
             factory = get_session_factory()
@@ -485,6 +688,30 @@ class MotionDetector:
                     ):
                         event.detection_confidence = detection_confidence
                         event.detection_label = detection_label
+                    # Merge face matches: keep highest-confidence per face_id across the event
+                    if face_matches or face_unknown:
+                        existing: dict[int, dict] = {}
+                        if event.face_matches:
+                            try:
+                                for m in json.loads(event.face_matches):
+                                    existing[m["face_id"]] = m
+                            except (json.JSONDecodeError, TypeError, KeyError):
+                                pass
+                        for m in face_matches:
+                            prev = existing.get(m["face_id"])
+                            if prev is None or m["confidence"] > prev["confidence"]:
+                                existing[m["face_id"]] = m
+                        if existing:
+                            event.face_matches = json.dumps(list(existing.values()))
+                            # Once we have a known match, any earlier "unknown"
+                            # flag was almost certainly the same person at a
+                            # worse angle — clear it so the timeline reflects
+                            # the identity we now know about.
+                            event.face_unknown = False
+                        elif face_unknown:
+                            event.face_unknown = True
+                    if face_detected and not event.face_detected:
+                        event.face_detected = True
                     await session.commit()
 
     async def _check_cooldown(self, cam_id: int) -> None:
@@ -502,6 +729,7 @@ class MotionDetector:
         event_id = self._active_events.pop(key, None)
         self._event_start.pop(key, None)
         self._last_motion.pop(key, None)
+        self._best_face_confidence.pop(key, None)
         off_scripts = self._script_off.pop(key, None) or []
         if event_id is None:
             return
@@ -545,6 +773,7 @@ class MotionDetector:
     async def _run_script(
         self, script: str, cam_name: str, timestamp: datetime, intensity: float,
         detection_label: str | None = None, detection_confidence: float | None = None,
+        face_names: list[str] | None = None,
     ) -> None:
         try:
             env = {
@@ -554,6 +783,7 @@ class MotionDetector:
                 "MOTION_INTENSITY": str(round(intensity, 2)),
                 "DETECTION_LABEL": detection_label or "",
                 "DETECTION_CONFIDENCE": str(round(detection_confidence, 2)) if detection_confidence else "",
+                "FACE_NAMES": ",".join(face_names) if face_names else "",
             }
             proc = await asyncio.create_subprocess_shell(
                 script, env=env,

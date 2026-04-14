@@ -210,6 +210,61 @@ async def init_db() -> None:
             logger.info("Migration: added group_id column to cameras")
         except Exception:
             pass  # Column already exists
+    # Migrate: add face_recognition column to cameras
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN face_recognition BOOLEAN NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added face_recognition column to cameras")
+        except Exception:
+            pass
+    # Migrate: add face_match_threshold column to cameras
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN face_match_threshold INTEGER NOT NULL DEFAULT 50")
+            )
+            logger.info("Migration: added face_match_threshold column to cameras")
+        except Exception:
+            pass
+    # Migrate: add face_matches column to motion_events
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE motion_events ADD COLUMN face_matches TEXT")
+            )
+            logger.info("Migration: added face_matches column to motion_events")
+        except Exception:
+            pass
+    # Migrate: add face_unknown column to motion_events
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE motion_events ADD COLUMN face_unknown BOOLEAN NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added face_unknown column to motion_events")
+        except Exception:
+            pass
+    # Migrate: add face_detected column to motion_events (SCRFD-only hit,
+    # populated on every person event regardless of per-camera FR setting).
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE motion_events ADD COLUMN face_detected BOOLEAN NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added face_detected column to motion_events")
+        except Exception:
+            pass
+    # Migrate: add face_crop_path to face_embeddings (for existing deployments where table was created without it)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE face_embeddings ADD COLUMN face_crop_path VARCHAR(500)")
+            )
+            logger.info("Migration: added face_crop_path column to face_embeddings")
+        except Exception:
+            pass
     # Migrate: convert legacy motion_script/motion_script_off to motion_scripts JSON
     async with engine.begin() as conn:
         try:

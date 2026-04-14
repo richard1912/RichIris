@@ -17,6 +17,10 @@ const kPlaybackQualityKey = 'richiris-playback-quality';
 const kStreamSourceKey = 'richiris-stream-source';
 const kSkippedVersionKey = 'richiris-skipped-version';
 const kSelectedGroupKey = 'richiris-selected-group';
+const kGridLayoutKeyPrefix = 'richiris-grid-layout-';
+
+String gridLayoutPrefKey(int? groupId) =>
+    '$kGridLayoutKeyPrefix${groupId?.toString() ?? 'all'}';
 
 String _serverUrlKey() =>
     isClientOnlyInstall() ? kServerUrlKeyClient : kServerUrlKey;

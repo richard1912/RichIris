@@ -67,6 +67,7 @@ class GroupChipBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: GestureDetector(
         onLongPress: onLongPress,
+        onSecondaryTap: onLongPress,  // right-click on desktop
         child: ChoiceChip(
           label: Text(count != null ? '$label ($count)' : label),
           selected: selected,

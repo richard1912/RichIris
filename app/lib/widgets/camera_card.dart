@@ -22,6 +22,7 @@ class CameraCard extends StatefulWidget {
   final Size? dragFeedbackSize;
   final VoidCallback? onDragStarted;
   final VoidCallback? onDragEnd;
+  final VoidCallback? onAddToGroup;
 
   const CameraCard({
     super.key,
@@ -41,6 +42,7 @@ class CameraCard extends StatefulWidget {
     this.dragFeedbackSize,
     this.onDragStarted,
     this.onDragEnd,
+    this.onAddToGroup,
   });
 
   @override
@@ -173,6 +175,28 @@ class _CameraCardState extends State<CameraCard> {
                       ),
                     ),
                   ),
+                  // Add-to-group button — shown when card is selected
+                  if (widget.selected && widget.onAddToGroup != null)
+                    Positioned(
+                      top: 30,
+                      right: 4,
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: widget.onAddToGroup,
+                          borderRadius: BorderRadius.circular(4),
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.black54,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Icon(Icons.add,
+                                size: 14, color: Color(0xFFA3A3A3)),
+                          ),
+                        ),
+                      ),
+                    ),
                   // Drag handle — shown when card is selected
                   if (widget.showDragHint)
                     Positioned(

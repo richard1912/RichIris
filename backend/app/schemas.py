@@ -13,6 +13,8 @@ class MotionScriptConfig(BaseModel):
     animals: bool = True
     motion_only: bool = True
     off_delay: int = 10  # seconds after last motion before off-script runs
+    faces: list[int] = []  # if non-empty, fires only when any listed Face id is present
+    face_unknown: bool = False  # fires when an unknown face is detected
 
 
 class CameraGroupCreate(BaseModel):
@@ -50,6 +52,8 @@ class CameraCreate(BaseModel):
     ai_detect_vehicles: bool = True
     ai_detect_animals: bool = True
     ai_confidence_threshold: int = 50
+    face_recognition: bool = False
+    face_match_threshold: int = 50
 
 
 class CameraUpdate(BaseModel):
@@ -69,6 +73,8 @@ class CameraUpdate(BaseModel):
     ai_detect_vehicles: bool | None = None
     ai_detect_animals: bool | None = None
     ai_confidence_threshold: int | None = None
+    face_recognition: bool | None = None
+    face_match_threshold: int | None = None
 
 
 class CameraResponse(BaseModel):
@@ -93,6 +99,8 @@ class CameraResponse(BaseModel):
     ai_detect_vehicles: bool = False
     ai_detect_animals: bool = False
     ai_confidence_threshold: int = 50
+    face_recognition: bool = False
+    face_match_threshold: int = 50
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -111,6 +119,12 @@ class CameraResponse(BaseModel):
         return cls(**data)
 
 
+class FaceMatchInfo(BaseModel):
+    face_id: int
+    name: str
+    confidence: float
+
+
 class MotionEventResponse(BaseModel):
     id: int
     camera_id: int
@@ -120,11 +134,21 @@ class MotionEventResponse(BaseModel):
     detection_label: str | None = None
     detection_confidence: float | None = None
     has_thumbnail: bool = False
+    face_matches: list[FaceMatchInfo] = []
+    face_unknown: bool = False
 
     model_config = {"from_attributes": True}
 
     @classmethod
     def from_event(cls, event, camera_id: int | None = None):
+        import json
+        matches: list[FaceMatchInfo] = []
+        if event.face_matches:
+            try:
+                for m in json.loads(event.face_matches):
+                    matches.append(FaceMatchInfo(**m))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
         return cls(
             id=event.id,
             camera_id=event.camera_id,
@@ -134,7 +158,66 @@ class MotionEventResponse(BaseModel):
             detection_label=event.detection_label,
             detection_confidence=event.detection_confidence,
             has_thumbnail=bool(event.thumbnail_path),
+            face_matches=matches,
+            face_unknown=bool(getattr(event, "face_unknown", False)),
         )
+
+
+class FaceCreate(BaseModel):
+    name: str
+    notes: str | None = None
+
+
+class FaceUpdate(BaseModel):
+    name: str | None = None
+    notes: str | None = None
+
+
+class FaceEmbeddingInfo(BaseModel):
+    id: int
+    source_thumbnail_path: str | None = None
+    face_crop_path: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FaceResponse(BaseModel):
+    id: int
+    name: str
+    notes: str | None = None
+    embedding_count: int = 0
+    latest_crop_path: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FaceEnrollRequest(BaseModel):
+    source_thumbnail_path: str
+    bbox: list[int] | None = None  # [x1, y1, x2, y2] — choose a specific detected face
+
+
+class FaceEnrollCandidate(BaseModel):
+    bbox: list[int]
+    score: float
+
+
+class FaceEnrollResponse(BaseModel):
+    status: str  # "enrolled" | "multiple_faces" | "no_face"
+    embedding_id: int | None = None
+    candidates: list[FaceEnrollCandidate] = []
+    crop_path: str | None = None
+
+
+class UnlabeledThumb(BaseModel):
+    event_id: int
+    camera_id: int
+    camera_name: str
+    start_time: datetime
+    thumbnail_url: str
+    detection_label: str | None = None
+    assigned_face_names: list[str] = []  # Faces already enrolled from this thumbnail
 
 
 class RecordingResponse(BaseModel):

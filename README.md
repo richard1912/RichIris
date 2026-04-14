@@ -16,6 +16,7 @@ A self-hosted NVR (Network Video Recorder) for 24/7 recording of RTSP cameras wi
 - **Trickplay thumbnails** -- hover/scrub preview on timeline
 - **Motion detection** -- per-camera sensitivity, timeline overlay, configurable script triggers
 - **AI object detection** -- RT-DETR for persons, vehicles, and animals with color-coded timeline bars and multi-frame confirmation
+- **Facial recognition** -- enroll known people from past detection thumbnails (SCRFD + ArcFace on DirectML); timeline highlights cyan for known faces, rose for strangers; per-person script triggers
 - **Clip export** -- select a time range and export an MP4
 - **Retention management** -- configurable max age and max storage, oldest recordings purged first
 - **Native apps** -- Windows desktop and Android client
@@ -30,7 +31,7 @@ Download the latest `RichIris-Setup.exe` from [Releases](https://github.com/rich
 The installer will:
 - Install the RichIris backend and desktop app
 - Ask you to choose a **data directory** for recordings, database, and logs (pick a drive with plenty of space)
-- Download required dependencies (FFmpeg, go2rtc, RT-DETR model) automatically
+- Download required dependencies (FFmpeg, go2rtc, RT-DETR + SCRFD + ArcFace ONNX models) automatically
 - Install and start the RichIris Windows service
 
 ### 2. Add cameras
@@ -109,6 +110,7 @@ SQLite DB + Recordings + Thumbnails
 - **Live view**: go2rtc receives camera RTSP streams and re-serves via RTSP (:8554). Flutter app connects directly to go2rtc for smooth HEVC playback. Zoomable video in fullscreen.
 - **Playback**: Direct mode serves raw segments instantly. Other quality tiers transcode on-the-fly via NVENC
 - **AI detection**: Snapshot-based pipeline -- motion pre-filter, then RT-DETR inference with multi-frame confirmation (2 detections in 3 frames + positional movement)
+- **Facial recognition**: Runs only after RT-DETR confirms a person. Pulls a 4K main-stream snapshot from go2rtc, crops to the person bbox, runs SCRFD to find faces, then ArcFace for 512-D embeddings. Cosine-matches against an in-memory cache of enrolled faces. Known faces tint the timeline cyan, unknowns rose. Enroll from the Faces button on the home screen by tagging past detection thumbnails — the filter shows only thumbnails where a face was actually detected.
 
 ## Video Quality
 

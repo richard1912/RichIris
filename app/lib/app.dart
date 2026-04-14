@@ -11,6 +11,7 @@ import 'config/api_config.dart';
 import 'config/constants.dart';
 import 'models/camera.dart';
 import 'models/camera_group.dart';
+import 'models/grid_layout.dart';
 import 'models/playback_ref.dart';
 import 'utils/time_utils.dart';
 import 'models/system_status.dart';
@@ -21,8 +22,10 @@ import 'screens/settings_screen.dart';
 import 'screens/add_cameras_wizard_screen.dart';
 import 'screens/camera_form_screen.dart';
 import 'screens/system_settings_screen.dart';
+import 'screens/faces_screen.dart';
 import 'services/api_client.dart';
 import 'services/camera_api.dart';
+import 'services/face_api.dart';
 import 'services/group_api.dart';
 import 'services/recording_api.dart';
 import 'services/clip_api.dart';
@@ -47,6 +50,7 @@ class RichIrisApp extends StatefulWidget {
 class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   ApiClient? _apiClient;
   CameraApi? _cameraApi;
+  FaceApi? _faceApi;
   GroupApi? _groupApi;
   RecordingApi? _recordingApi;
   ClipApi? _clipApi;
@@ -133,6 +137,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     }
 
     _cameraApi = CameraApi(_apiClient!);
+    _faceApi = FaceApi(_apiClient!);
     _groupApi = GroupApi(_apiClient!);
     _recordingApi = RecordingApi(_apiClient!);
     _clipApi = ClipApi(_apiClient!);
@@ -281,6 +286,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
               ? SettingsScreen(onSaved: _onServerUrlSet)
               : _MainNav(
                   cameraApi: _cameraApi!,
+                  faceApi: _faceApi!,
                   groupApi: _groupApi!,
                   recordingApi: _recordingApi!,
                   clipApi: _clipApi!,
@@ -315,6 +321,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
 
 class _MainNav extends StatefulWidget {
   final CameraApi cameraApi;
+  final FaceApi faceApi;
   final GroupApi groupApi;
   final RecordingApi recordingApi;
   final ClipApi clipApi;
@@ -345,6 +352,7 @@ class _MainNav extends StatefulWidget {
 
   const _MainNav({
     required this.cameraApi,
+    required this.faceApi,
     required this.groupApi,
     required this.recordingApi,
     required this.clipApi,
@@ -382,8 +390,10 @@ class _MainNavState extends State<_MainNav> {
   int? _selectedCameraId;
   int? _fullscreenCameraId;
   int? _selectedGroupId;
+  final Map<int?, String> _layoutIdByGroup = {};
   bool _isDragging = false;
   bool _showSystem = false;
+  bool _showFaces = false;
   final Map<int, Player> _livePlayers = {};
   final Map<int, VideoController> _liveControllers = {};
   Quality? _frozenGridQuality; // quality the grid last used; frozen while fullscreen
@@ -414,12 +424,18 @@ class _MainNavState extends State<_MainNav> {
   Future<void> _loadSelectedGroup() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString(kSelectedGroupKey);
-    if (saved != null && saved != 'all' && mounted) {
+    int? initialGroupId;
+    if (saved != null && saved != 'all') {
       final id = int.tryParse(saved);
-      // Validate that the group still exists
       if (id != null && widget.groups.any((g) => g.id == id)) {
-        setState(() => _selectedGroupId = id);
+        initialGroupId = id;
       }
+    }
+    // Preload the current group's layout so the grid renders with the
+    // right number of slots on first paint.
+    await _ensureLayoutLoaded(initialGroupId, prefs);
+    if (mounted) {
+      setState(() => _selectedGroupId = initialGroupId);
     }
   }
 
@@ -430,6 +446,112 @@ class _MainNavState extends State<_MainNav> {
     } else {
       await prefs.setString(kSelectedGroupKey, groupId.toString());
     }
+  }
+
+  Future<void> _ensureLayoutLoaded(
+      int? groupId, SharedPreferences prefs) async {
+    if (_layoutIdByGroup.containsKey(groupId)) return;
+    final saved = prefs.getString(gridLayoutPrefKey(groupId));
+    final valid = (saved != null && kGridLayouts.any((l) => l.id == saved))
+        ? saved
+        : kDefaultLayoutId;
+    _layoutIdByGroup[groupId] = valid;
+    // If the saved value was invalid/missing, don't overwrite yet — we only
+    // persist when the user actively picks a layout.
+  }
+
+  Future<void> _onLayoutChanged(String id) async {
+    final groupId = _selectedGroupId;
+    setState(() => _layoutIdByGroup[groupId] = id);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(gridLayoutPrefKey(groupId), id);
+  }
+
+  void _onGroupSelected(int? id) async {
+    final prefs = await SharedPreferences.getInstance();
+    await _ensureLayoutLoaded(id, prefs);
+    if (!mounted) return;
+    setState(() => _selectedGroupId = id);
+    _saveSelectedGroup(id);
+  }
+
+  Future<void> _showAssignGroupSheet(Camera cam) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text('Assign "${cam.name}" to group',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+            const Divider(height: 1),
+            for (final g in widget.groups)
+              ListTile(
+                leading: const Icon(Icons.folder),
+                title: Text(g.name),
+                trailing: cam.groupId == g.id ? const Icon(Icons.check, color: Color(0xFF3B82F6)) : null,
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await widget.cameraApi.update(cam.id, {'group_id': g.id});
+                  await widget.onRefreshCameras();
+                  await widget.onRefreshGroups();
+                },
+              ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.add, color: Color(0xFF3B82F6)),
+              title: const Text('New group...', style: TextStyle(color: Color(0xFF3B82F6))),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final name = await _promptNewGroupName();
+                if (name == null || name.isEmpty) return;
+                try {
+                  final group = await widget.groupApi.create(name);
+                  await widget.cameraApi.update(cam.id, {'group_id': group.id});
+                  await widget.onRefreshCameras();
+                  await widget.onRefreshGroups();
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Failed to create group: $e')),
+                    );
+                  }
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<String?> _promptNewGroupName() async {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New Group'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Group name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// After the startup prewarm finishes, warm Flutter's image cache with the
@@ -599,6 +721,14 @@ class _MainNavState extends State<_MainNav> {
 
   @override
   Widget build(BuildContext context) {
+    if (_showFaces) {
+      return FacesScreen(
+        faceApi: widget.faceApi,
+        motionApi: widget.motionApi,
+        cameras: widget.cameras,
+        onBack: () => setState(() => _showFaces = false),
+      );
+    }
     if (_showSystem) {
       return SystemScreen(
         systemApi: widget.systemApi,
@@ -678,10 +808,9 @@ class _MainNavState extends State<_MainNav> {
             allCameras: widget.cameras,
             groups: widget.groups,
             selectedGroupId: _selectedGroupId,
-            onGroupSelected: (id) {
-              setState(() => _selectedGroupId = id);
-              _saveSelectedGroup(id);
-            },
+            onGroupSelected: _onGroupSelected,
+            layoutId: _layoutIdByGroup[_selectedGroupId] ?? kDefaultLayoutId,
+            onLayoutChanged: _onLayoutChanged,
             onGroupsChanged: () => widget.onRefreshGroups(),
             groupApi: widget.groupApi,
             systemStatus: widget.systemStatus,
@@ -731,6 +860,7 @@ class _MainNavState extends State<_MainNav> {
             onLiveStateChanged: widget.onLiveStateChanged,
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onOpenSystem: () => setState(() => _showSystem = true),
+            onOpenFaces: () => setState(() => _showFaces = true),
             onOpenSystemSettings: () {
               Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => SystemSettingsScreen(
@@ -803,13 +933,15 @@ class _MainNavState extends State<_MainNav> {
                     existingCameraCount: widget.cameras.length,
                     groups: widget.groups,
                     groupApi: widget.groupApi,
+                    initialGroupId: _selectedGroupId,
                   ),
                 ));
               } else if (choice == 'manual') {
                 await Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => CameraFormScreen(
                       cameraApi: widget.cameraApi, apiClient: widget.apiClient,
-                      groups: widget.groups, groupApi: widget.groupApi),
+                      groups: widget.groups, groupApi: widget.groupApi, faceApi: widget.faceApi,
+                      initialGroupId: _selectedGroupId),
                 ));
               } else {
                 return;
@@ -820,10 +952,11 @@ class _MainNavState extends State<_MainNav> {
               await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) =>
                     CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam,
-                        groups: widget.groups, groupApi: widget.groupApi),
+                        groups: widget.groups, groupApi: widget.groupApi, faceApi: widget.faceApi),
               ));
               await widget.onRefreshCameras();
             },
+            onAddToGroup: _showAssignGroupSheet,
             onReorder: (orderedIds) async {
               await widget.cameraApi.reorder(orderedIds);
               await widget.onRefreshCameras();
@@ -866,7 +999,7 @@ class _MainNavState extends State<_MainNav> {
               await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) =>
                     CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam,
-                        groups: widget.groups, groupApi: widget.groupApi),
+                        groups: widget.groups, groupApi: widget.groupApi, faceApi: widget.faceApi),
               ));
               await widget.onRefreshCameras();
             },
