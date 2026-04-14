@@ -12,12 +12,16 @@ class UpdateDialog extends StatefulWidget {
   final UpdateInfo update;
   final UpdateService updateService;
   final bool updateOnly;
+  final String? backendVersion;
+  final bool backendUpdateAvailable;
 
   const UpdateDialog({
     super.key,
     required this.update,
     required this.updateService,
     this.updateOnly = false,
+    this.backendVersion,
+    this.backendUpdateAvailable = false,
   });
 
   @override
@@ -204,6 +208,32 @@ class _UpdateDialogState extends State<UpdateDialog> {
           ),
         ],
         const SizedBox(height: 16),
+
+        // Backend outdated banner
+        if (widget.backendUpdateAvailable && widget.backendVersion != null) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.orange.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.dns, color: Colors.orange[400], size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Server is running v${widget.backendVersion}. Run the latest installer on the host machine to update it.',
+                    style: TextStyle(color: Colors.orange[300], fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
 
         // Changelog
         if (widget.update.changelog.isNotEmpty) ...[

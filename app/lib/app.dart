@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'config/api_config.dart';
 import 'config/constants.dart';
 import 'models/camera.dart';
+import 'models/camera_group.dart';
 import 'models/playback_ref.dart';
 import 'utils/time_utils.dart';
 import 'models/system_status.dart';
@@ -22,6 +23,7 @@ import 'screens/camera_form_screen.dart';
 import 'screens/system_settings_screen.dart';
 import 'services/api_client.dart';
 import 'services/camera_api.dart';
+import 'services/group_api.dart';
 import 'services/recording_api.dart';
 import 'services/clip_api.dart';
 import 'services/motion_api.dart';
@@ -45,6 +47,7 @@ class RichIrisApp extends StatefulWidget {
 class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   ApiClient? _apiClient;
   CameraApi? _cameraApi;
+  GroupApi? _groupApi;
   RecordingApi? _recordingApi;
   ClipApi? _clipApi;
   MotionApi? _motionApi;
@@ -66,6 +69,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   int _tzOffsetMs = 0;
 
   List<Camera> _cameras = [];
+  List<CameraGroup> _groups = [];
   SystemStatus? _systemStatus;
 
   @override
@@ -129,6 +133,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     }
 
     _cameraApi = CameraApi(_apiClient!);
+    _groupApi = GroupApi(_apiClient!);
     _recordingApi = RecordingApi(_apiClient!);
     _clipApi = ClipApi(_apiClient!);
     _motionApi = MotionApi(_apiClient!);
@@ -145,8 +150,8 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     for (var attempt = 0; attempt < 10; attempt++) {
       try {
         final result = await _updateService!.getUpdate();
-        if (result.update != null && mounted) {
-          final update = result.update!;
+        if (result.appUpdate != null && mounted) {
+          final update = result.appUpdate!;
           // ignore: use_build_context_synchronously
           showDialog(
             context: context,
@@ -179,6 +184,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
           _systemApi!.fetchTzOffsetMs(),
           _cameraApi!.fetchAll(),
           _systemApi!.fetchStatus(),
+          _groupApi!.fetchAll(),
         ]);
         if (mounted) {
           final status = results[2] as SystemStatus;
@@ -187,6 +193,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
             _tzOffsetMs = results[0] as int;
             _cameras = results[1] as List<Camera>;
             _systemStatus = status;
+            _groups = results[3] as List<CameraGroup>;
           });
           // Fire-and-forget: pre-warm timeline data for every enabled camera
           // so the first click into any camera has instant segments + motion
@@ -214,6 +221,13 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     try {
       final cameras = await _cameraApi!.fetchAll();
       if (mounted) setState(() => _cameras = cameras);
+    } catch (_) {}
+  }
+
+  Future<void> _refreshGroups() async {
+    try {
+      final groups = await _groupApi!.fetchAll();
+      if (mounted) setState(() => _groups = groups);
     } catch (_) {}
   }
 
@@ -267,6 +281,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
               ? SettingsScreen(onSaved: _onServerUrlSet)
               : _MainNav(
                   cameraApi: _cameraApi!,
+                  groupApi: _groupApi!,
                   recordingApi: _recordingApi!,
                   clipApi: _clipApi!,
                   motionApi: _motionApi!,
@@ -279,6 +294,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   timelineCache: _timelineCache!,
                   appVersion: _appVersion,
                   cameras: _cameras,
+                  groups: _groups,
                   systemStatus: _systemStatus,
                   quality: _quality,
                   isLive: _isLive,
@@ -288,6 +304,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   onLiveStateChanged: _onLiveStateChanged,
                   onStreamSourceChanged: _onStreamSourceChanged,
                   onRefreshCameras: _refreshCameras,
+                  onRefreshGroups: _refreshGroups,
                   onRefreshStatus: _refreshStatus,
                   onServerUrlChanged: _onServerUrlSet,
                   serverUrl: _serverUrl,
@@ -298,6 +315,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
 
 class _MainNav extends StatefulWidget {
   final CameraApi cameraApi;
+  final GroupApi groupApi;
   final RecordingApi recordingApi;
   final ClipApi clipApi;
   final MotionApi motionApi;
@@ -310,6 +328,7 @@ class _MainNav extends StatefulWidget {
   final TimelineCache timelineCache;
   final String appVersion;
   final List<Camera> cameras;
+  final List<CameraGroup> groups;
   final SystemStatus? systemStatus;
   final Quality quality;
   final bool isLive;
@@ -319,12 +338,14 @@ class _MainNav extends StatefulWidget {
   final ValueChanged<bool> onLiveStateChanged;
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final Future<void> Function() onRefreshCameras;
+  final Future<void> Function() onRefreshGroups;
   final Future<void> Function() onRefreshStatus;
   final ValueChanged<String> onServerUrlChanged;
   final String? serverUrl;
 
   const _MainNav({
     required this.cameraApi,
+    required this.groupApi,
     required this.recordingApi,
     required this.clipApi,
     required this.motionApi,
@@ -337,6 +358,7 @@ class _MainNav extends StatefulWidget {
     required this.timelineCache,
     required this.appVersion,
     required this.cameras,
+    required this.groups,
     required this.systemStatus,
     required this.quality,
     required this.isLive,
@@ -346,6 +368,7 @@ class _MainNav extends StatefulWidget {
     required this.onLiveStateChanged,
     required this.onStreamSourceChanged,
     required this.onRefreshCameras,
+    required this.onRefreshGroups,
     required this.onRefreshStatus,
     required this.onServerUrlChanged,
     required this.serverUrl,
@@ -358,6 +381,8 @@ class _MainNav extends StatefulWidget {
 class _MainNavState extends State<_MainNav> {
   int? _selectedCameraId;
   int? _fullscreenCameraId;
+  int? _selectedGroupId;
+  bool _isDragging = false;
   bool _showSystem = false;
   final Map<int, Player> _livePlayers = {};
   final Map<int, VideoController> _liveControllers = {};
@@ -380,9 +405,31 @@ class _MainNavState extends State<_MainNav> {
   @override
   void initState() {
     super.initState();
+    _loadSelectedGroup();
     _startPolling();
     _scheduleUpdateCheck();
     _schedulePrecacheThumbs();
+  }
+
+  Future<void> _loadSelectedGroup() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(kSelectedGroupKey);
+    if (saved != null && saved != 'all' && mounted) {
+      final id = int.tryParse(saved);
+      // Validate that the group still exists
+      if (id != null && widget.groups.any((g) => g.id == id)) {
+        setState(() => _selectedGroupId = id);
+      }
+    }
+  }
+
+  Future<void> _saveSelectedGroup(int? groupId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (groupId == null) {
+      await prefs.remove(kSelectedGroupKey);
+    } else {
+      await prefs.setString(kSelectedGroupKey, groupId.toString());
+    }
   }
 
   /// After the startup prewarm finishes, warm Flutter's image cache with the
@@ -437,18 +484,40 @@ class _MainNavState extends State<_MainNav> {
       if (!mounted) return;
       try {
         final result = await widget.updateService.checkNow();
-        if (result.update == null || !mounted) return;
-        final update = result.update!;
-        if (await widget.updateService.isVersionSkipped(update.version)) return;
-        showDialog(
+        if (!mounted) return;
+
+        // Show app update dialog if the app itself is outdated
+        if (result.appUpdate != null) {
+          final update = result.appUpdate!;
+          if (!await widget.updateService.isVersionSkipped(update.version)) {
+            showDialog(
+              // ignore: use_build_context_synchronously
+              context: context,
+              barrierDismissible: false,
+              builder: (_) => UpdateDialog(
+                update: update,
+                updateService: widget.updateService,
+                backendVersion: result.backendVersion,
+                backendUpdateAvailable: result.backendUpdateAvailable,
+              ),
+            );
+            return;
+          }
+        }
+
+        // If only the backend is outdated, show a brief snackbar
+        if (result.backendUpdateAvailable && result.backendVersion != null) {
+          final latest = result.latestVersion;
+          final msg = latest != null
+              ? 'RichIris server is running v${result.backendVersion} (latest: v$latest). Update the server by running the installer on the host machine.'
+              : 'RichIris server needs updating. Run the latest installer on the host machine.';
           // ignore: use_build_context_synchronously
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => UpdateDialog(
-            update: update,
-            updateService: widget.updateService,
-          ),
-        );
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(msg),
+            duration: const Duration(seconds: 8),
+            behavior: SnackBarBehavior.floating,
+          ));
+        }
       } catch (_) {}
     });
   }
@@ -457,7 +526,10 @@ class _MainNavState extends State<_MainNav> {
     Future.doWhile(() async {
       await Future.delayed(const Duration(milliseconds: kCameraRefreshMs));
       if (!mounted) return false;
-      await widget.onRefreshCameras();
+      if (!_isDragging) {
+        await widget.onRefreshCameras();
+        await widget.onRefreshGroups();
+      }
       await widget.onRefreshStatus();
       return mounted;
     });
@@ -600,7 +672,18 @@ class _MainNavState extends State<_MainNav> {
         Offstage(
           offstage: fullscreenCam != null,
           child: HomeScreen(
-            cameras: widget.cameras,
+            cameras: _selectedGroupId != null
+                ? widget.cameras.where((c) => c.groupId == _selectedGroupId).toList()
+                : widget.cameras,
+            allCameras: widget.cameras,
+            groups: widget.groups,
+            selectedGroupId: _selectedGroupId,
+            onGroupSelected: (id) {
+              setState(() => _selectedGroupId = id);
+              _saveSelectedGroup(id);
+            },
+            onGroupsChanged: () => widget.onRefreshGroups(),
+            groupApi: widget.groupApi,
             systemStatus: widget.systemStatus,
             quality: gridQuality,
             streamSource: widget.streamSource,
@@ -718,12 +801,15 @@ class _MainNavState extends State<_MainNav> {
                     cameraApi: widget.cameraApi,
                     apiClient: widget.apiClient,
                     existingCameraCount: widget.cameras.length,
+                    groups: widget.groups,
+                    groupApi: widget.groupApi,
                   ),
                 ));
               } else if (choice == 'manual') {
                 await Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => CameraFormScreen(
-                      cameraApi: widget.cameraApi, apiClient: widget.apiClient),
+                      cameraApi: widget.cameraApi, apiClient: widget.apiClient,
+                      groups: widget.groups, groupApi: widget.groupApi),
                 ));
               } else {
                 return;
@@ -733,9 +819,17 @@ class _MainNavState extends State<_MainNav> {
             onEditCamera: (cam) async {
               await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) =>
-                    CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam),
+                    CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam,
+                        groups: widget.groups, groupApi: widget.groupApi),
               ));
               await widget.onRefreshCameras();
+            },
+            onReorder: (orderedIds) async {
+              await widget.cameraApi.reorder(orderedIds);
+              await widget.onRefreshCameras();
+            },
+            onDragStateChanged: (dragging) {
+              _isDragging = dragging;
             },
             playbackRef: _gridRef,
             resumePlaybackTime: _resumePlaybackTime,
@@ -771,7 +865,8 @@ class _MainNavState extends State<_MainNav> {
             onEditCamera: (cam) async {
               await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) =>
-                    CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam),
+                    CameraFormScreen(cameraApi: widget.cameraApi, apiClient: widget.apiClient, camera: cam,
+                        groups: widget.groups, groupApi: widget.groupApi),
               ));
               await widget.onRefreshCameras();
             },

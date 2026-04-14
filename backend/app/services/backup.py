@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_bootstrap, get_config
-from app.models import Camera, Setting
+from app.models import Camera, CameraGroup, Setting
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,8 @@ def _camera_to_dict(cam: Camera) -> dict:
         "codec": cam.codec,
         "fps": cam.fps,
         "rotation": cam.rotation,
+        "sort_order": cam.sort_order,
+        "group_id": cam.group_id,
         "motion_sensitivity": cam.motion_sensitivity,
         "motion_script": cam.motion_script,
         "motion_script_off": cam.motion_script_off,
@@ -62,6 +64,15 @@ def _camera_to_dict(cam: Camera) -> dict:
         "ai_detect_vehicles": cam.ai_detect_vehicles,
         "ai_detect_animals": cam.ai_detect_animals,
         "ai_confidence_threshold": cam.ai_confidence_threshold,
+    }
+
+
+def _group_to_dict(group: CameraGroup) -> dict:
+    """Serialize a CameraGroup ORM object to a plain dict."""
+    return {
+        "id": group.id,
+        "name": group.name,
+        "sort_order": group.sort_order,
     }
 
 
@@ -169,13 +180,20 @@ class BackupManager:
             settings = {s.key: s.value for s in result.scalars().all()}
             settings_json = json.dumps(settings, indent=2)
 
+        groups_json = None
         if "cameras" in components:
+            # Export groups alongside cameras
+            group_result = await session.execute(select(CameraGroup).order_by(CameraGroup.sort_order))
+            groups_list = [_group_to_dict(g) for g in group_result.scalars().all()]
+            if groups_list:
+                groups_json = json.dumps(groups_list, indent=2)
+
             result = await session.execute(select(Camera))
             cameras = [_camera_to_dict(c) for c in result.scalars().all()]
             cameras_json = json.dumps(cameras, indent=2)
 
         self._task = asyncio.create_task(
-            self._run_backup(self._current, components, settings_json, cameras_json)
+            self._run_backup(self._current, components, settings_json, cameras_json, groups_json)
         )
         return self._current
 
@@ -185,6 +203,7 @@ class BackupManager:
         components: list[str],
         settings_json: str | None,
         cameras_json: str | None,
+        groups_json: str | None = None,
     ) -> None:
         """Core backup loop: scan files, create ZIP archive."""
         config = get_config()
@@ -282,6 +301,13 @@ class BackupManager:
                         progress.files_done += 1
                         progress.bytes_done += len(settings_json.encode())
                         progress.current_file = "settings.json"
+
+                    # Camera groups
+                    if groups_json and not progress._cancel_requested:
+                        zf.writestr("camera_groups.json", groups_json, compress_type=zipfile.ZIP_DEFLATED)
+                        progress.files_done += 1
+                        progress.bytes_done += len(groups_json.encode())
+                        progress.current_file = "camera_groups.json"
 
                     # Cameras
                     if cameras_json and not progress._cancel_requested:
@@ -398,9 +424,14 @@ class BackupManager:
 
                 if "cameras.json" in names:
                     available_components.append("cameras")
+                    cam_size = zf.getinfo("cameras.json").file_size
+                    cam_files = 1
+                    if "camera_groups.json" in names:
+                        cam_size += zf.getinfo("camera_groups.json").file_size
+                        cam_files += 1
                     component_details["cameras"] = {
-                        "size": zf.getinfo("cameras.json").file_size,
-                        "files": 1,
+                        "size": cam_size,
+                        "files": cam_files,
                     }
 
                 if "database/richiris.db" in names:
@@ -490,6 +521,12 @@ class BackupManager:
                         total_files += 1
                         total_bytes += info.file_size
 
+                    if "cameras" in components and "camera_groups.json" in zf.namelist():
+                        info = zf.getinfo("camera_groups.json")
+                        entries.append(("camera_groups", "camera_groups.json", info.file_size))
+                        total_files += 1
+                        total_bytes += info.file_size
+
                     if "cameras" in components and "cameras.json" in zf.namelist():
                         info = zf.getinfo("cameras.json")
                         entries.append(("cameras", "cameras.json", info.file_size))
@@ -551,6 +588,12 @@ class BackupManager:
                             data = zf.read(arcname)
                             # Store for async processing
                             progress._settings_data = data  # type: ignore[attr-defined]
+                            progress.files_done += 1
+                            progress.bytes_done += size
+
+                        elif component == "camera_groups":
+                            data = zf.read(arcname)
+                            progress._groups_data = data  # type: ignore[attr-defined]
                             progress.files_done += 1
                             progress.bytes_done += size
 
@@ -628,6 +671,9 @@ class BackupManager:
             if hasattr(progress, "_settings_data"):
                 await self._restore_settings(progress._settings_data)  # type: ignore[attr-defined]
 
+            if hasattr(progress, "_groups_data"):
+                await self._restore_groups(progress._groups_data)  # type: ignore[attr-defined]
+
             if hasattr(progress, "_cameras_data"):
                 await self._restore_cameras(progress._cameras_data)  # type: ignore[attr-defined]
 
@@ -696,6 +742,36 @@ class BackupManager:
         async with factory() as session:
             await update_settings(session, settings)
         logger.info("Restored settings", extra={"count": len(settings)})
+
+    async def _restore_groups(self, data: bytes) -> None:
+        """Restore camera groups from JSON data into the database (upsert by name)."""
+        from app.database import get_session_factory
+
+        groups_list = json.loads(data)
+        factory = get_session_factory()
+        async with factory() as session:
+            for g_data in groups_list:
+                name = g_data.get("name")
+                if not name:
+                    continue
+                result = await session.execute(
+                    select(CameraGroup).where(CameraGroup.name == name)
+                )
+                existing = result.scalar_one_or_none()
+                if existing:
+                    if "sort_order" in g_data:
+                        existing.sort_order = g_data["sort_order"]
+                else:
+                    group = CameraGroup(
+                        name=name,
+                        sort_order=g_data.get("sort_order", 0),
+                    )
+                    # Preserve original ID for FK references in cameras.json
+                    if "id" in g_data:
+                        group.id = g_data["id"]
+                    session.add(group)
+            await session.commit()
+        logger.info("Restored camera groups", extra={"count": len(groups_list)})
 
     async def _restore_cameras(self, data: bytes) -> None:
         """Restore cameras from JSON data into the database (upsert by name)."""

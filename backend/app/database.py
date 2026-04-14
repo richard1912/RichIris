@@ -189,6 +189,27 @@ async def init_db() -> None:
             logger.info("Migration: added motion_scripts column to cameras")
         except Exception:
             pass  # Column already exists
+    # Migrate: add sort_order column to cameras
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added sort_order column to cameras")
+            # Seed sort_order = id for existing cameras so current order is preserved
+            await conn.execute(text("UPDATE cameras SET sort_order = id"))
+            logger.info("Migration: seeded sort_order from camera ids")
+        except Exception:
+            pass  # Column already exists
+    # Migrate: add group_id column to cameras
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN group_id INTEGER REFERENCES camera_groups(id)")
+            )
+            logger.info("Migration: added group_id column to cameras")
+        except Exception:
+            pass  # Column already exists
     # Migrate: convert legacy motion_script/motion_script_off to motion_scripts JSON
     async with engine.begin() as conn:
         try:

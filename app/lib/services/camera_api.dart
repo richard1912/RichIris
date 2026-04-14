@@ -128,6 +128,7 @@ class CameraApi {
     String? subStreamUrl,
     bool enabled = true,
     int rotation = 0,
+    int? groupId,
   }) async {
     final resp = await _client.dio.post('/api/cameras', data: {
       'name': name,
@@ -135,8 +136,15 @@ class CameraApi {
       if (subStreamUrl != null) 'sub_stream_url': subStreamUrl,
       'enabled': enabled,
       'rotation': rotation,
+      if (groupId != null) 'group_id': groupId,
     });
     return Camera.fromJson(resp.data as Map<String, dynamic>);
+  }
+
+  Future<void> reorder(List<int> cameraIds) async {
+    await _client.dio.put('/api/cameras/reorder', data: {
+      'order': cameraIds,
+    });
   }
 
   Future<Camera> update(int id, Map<String, dynamic> data) async {
@@ -149,5 +157,15 @@ class CameraApi {
       '/api/cameras/$id',
       queryParameters: {if (purgeData) 'purge_data': 'true'},
     );
+  }
+
+  /// Test-run a script command and return the result.
+  Future<Map<String, dynamic>> testScript(String command) async {
+    final resp = await _client.dio.post(
+      '/api/cameras/test-script',
+      data: {'command': command},
+      options: Options(receiveTimeout: const Duration(seconds: 20)),
+    );
+    return resp.data as Map<String, dynamic>;
   }
 }

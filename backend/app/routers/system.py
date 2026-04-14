@@ -543,12 +543,17 @@ async def get_version():
 
 @router.get("/update")
 async def get_update_info():
-    """Return cached latest release info (from periodic GitHub check)."""
+    """Return cached latest release info (from periodic GitHub check).
+
+    Always returns the latest GitHub release so clients can compare against
+    their own version independently.  ``backend_version`` is the backend's
+    own version so apps know whether the server itself needs updating.
+    """
     from app.services.update_checker import get_update_checker
     checker = get_update_checker()
     return {
         "update_available": checker.latest_release is not None,
-        "current_version": checker.current_version,
+        "backend_version": checker.current_version,
         "latest": checker.latest_release,
         "last_checked": checker.last_check.isoformat() if checker.last_check else None,
     }
@@ -562,7 +567,7 @@ async def check_for_update():
     await checker.check_now()
     return {
         "update_available": checker.latest_release is not None,
-        "current_version": checker.current_version,
+        "backend_version": checker.current_version,
         "latest": checker.latest_release,
         "last_checked": checker.last_check.isoformat() if checker.last_check else None,
     }

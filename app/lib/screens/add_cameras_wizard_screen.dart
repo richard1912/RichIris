@@ -3,9 +3,11 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 
+import '../models/camera_group.dart';
 import '../models/camera_scan.dart';
 import '../services/api_client.dart';
 import '../services/camera_api.dart';
+import '../services/group_api.dart';
 import '../widgets/rtsp_wizard_dialog.dart' show RtspDiscoverResult;
 
 /// Multi-step wizard: scan the LAN for IP cameras, let the user pick which
@@ -21,12 +23,16 @@ class AddCamerasWizardScreen extends StatefulWidget {
   final CameraApi cameraApi;
   final ApiClient apiClient;
   final int existingCameraCount;
+  final List<CameraGroup> groups;
+  final GroupApi? groupApi;
 
   const AddCamerasWizardScreen({
     super.key,
     required this.cameraApi,
     required this.apiClient,
     this.existingCameraCount = 0,
+    this.groups = const [],
+    this.groupApi,
   });
 
   @override
@@ -43,6 +49,7 @@ class _PendingCamera {
   String? codec;
   bool include = true;
   bool manual; // user entered URLs themselves
+  int? groupId;
 
   // Thumbnail preview state (populated async on step 3 entry).
   Uint8List? thumbnailBytes;
@@ -371,6 +378,7 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
           name: p.nameCtrl.text.trim().isEmpty ? 'Camera ${p.ip}' : p.nameCtrl.text.trim(),
           rtspUrl: p.mainUrl,
           subStreamUrl: p.subUrl,
+          groupId: p.groupId,
         );
         _createOutcomes.add(_CreateOutcome(ip: p.ip, name: p.nameCtrl.text.trim(), success: true));
       } on DioException catch (e) {
@@ -955,6 +963,34 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
             style: TextStyle(fontSize: 13, color: Colors.grey[300]),
           ),
         ),
+        if (widget.groups.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              children: [
+                const Text('Assign all to:', style: TextStyle(fontSize: 13)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: DropdownButtonFormField<int?>(
+                    value: null,
+                    decoration: const InputDecoration(isDense: true, border: OutlineInputBorder()),
+                    items: [
+                      const DropdownMenuItem<int?>(value: null, child: Text('Ungrouped')),
+                      ...widget.groups.map((g) =>
+                          DropdownMenuItem<int?>(value: g.id, child: Text(g.name))),
+                    ],
+                    onChanged: (v) {
+                      setState(() {
+                        for (final p in _pending) {
+                          p.groupId = v;
+                        }
+                      });
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -986,6 +1022,22 @@ class _AddCamerasWizardScreenState extends State<AddCamerasWizardScreen> {
                               ),
                               enabled: p.include,
                             ),
+                            if (widget.groups.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              DropdownButtonFormField<int?>(
+                                value: p.groupId,
+                                decoration: const InputDecoration(
+                                  labelText: 'Group',
+                                  isDense: true,
+                                ),
+                                items: [
+                                  const DropdownMenuItem<int?>(value: null, child: Text('Ungrouped')),
+                                  ...widget.groups.map((g) =>
+                                      DropdownMenuItem<int?>(value: g.id, child: Text(g.name))),
+                                ],
+                                onChanged: p.include ? (v) => setState(() => p.groupId = v) : null,
+                              ),
+                            ],
                             const SizedBox(height: 4),
                             Row(
                               children: [

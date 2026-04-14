@@ -58,7 +58,8 @@ class MotionDetector:
         self._active_events: dict[tuple[int, str], int] = {}
         self._event_start: dict[tuple[int, str], datetime] = {}
         self._last_motion: dict[tuple[int, str], datetime] = {}
-        self._script_off: dict[tuple[int, str], list[str]] = {}
+        self._script_off: dict[tuple[int, str], list[tuple[str, int]]] = {}  # (script, off_delay)
+        self._pending_off_tasks: dict[tuple[int, str], list[asyncio.Task]] = {}
         self._avg_baseline: dict[int, np.ndarray | None] = {}
         self._baseline_frames: dict[int, int] = {}
         # Multi-frame AI confirmation buffers
@@ -132,6 +133,11 @@ class MotionDetector:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
+        # Cancel any pending delayed off-scripts
+        for tasks in self._pending_off_tasks.values():
+            for task in tasks:
+                task.cancel()
+        self._pending_off_tasks.clear()
         # Finalize all active events before shutdown
         for key in list(self._active_events):
             await self._finalize_event(key)
@@ -146,7 +152,11 @@ class MotionDetector:
             except (asyncio.CancelledError, Exception):
                 pass
             del self._tasks[cam_id]
-            # Finalize all active events and clear AI history for this camera
+            # Cancel pending off-tasks and finalize all active events for this camera
+            for key in list(self._pending_off_tasks):
+                if key[0] == cam_id:
+                    for task in self._pending_off_tasks.pop(key, []):
+                        task.cancel()
             keys = [k for k in self._active_events if k[0] == cam_id]
             for key in keys:
                 await self._finalize_event(key)
@@ -419,6 +429,10 @@ class MotionDetector:
             if start and (now - start).total_seconds() >= MAX_EVENT_DURATION:
                 await self._finalize_event(key)
 
+        # Cancel any pending delayed off-scripts (motion resumed before they fired)
+        for task in self._pending_off_tasks.pop(key, []):
+            task.cancel()
+
         if key not in self._active_events:
             # Save detection thumbnail from the frame that triggered this event
             thumb_path = None
@@ -437,9 +451,12 @@ class MotionDetector:
                 await session.refresh(event)
                 self._active_events[key] = event.id
                 self._event_start[key] = now
-                # Store off-scripts for this category so _finalize_event can run them
+                # Store off-scripts with their delays for _finalize_event
                 matching = self._scripts_for_category(scripts, category)
-                self._script_off[key] = [s.get("off") for s in matching if s.get("off")]
+                self._script_off[key] = [
+                    (s.get("off"), s.get("off_delay", COOLDOWN_SECONDS))
+                    for s in matching if s.get("off")
+                ]
 
             log_extra = {"camera": cam_name, "intensity": round(intensity, 2), "category": category}
             if detection_label:
@@ -495,12 +512,35 @@ class MotionDetector:
                 event.end_time = datetime.now()
                 await session.commit()
         logger.info("Motion ended", extra={"camera_id": key[0], "category": key[1], "event_id": event_id})
-        # Handle both legacy (single string) and new (list) formats
-        if isinstance(off_scripts, str):
-            off_scripts = [off_scripts]
-        for script_off in off_scripts:
-            if script_off:
+        # Schedule off-scripts with per-script delays
+        pending_tasks = []
+        for item in off_scripts:
+            # Handle legacy (single string) and new (script, delay) tuple formats
+            if isinstance(item, str):
+                script_off, delay = item, COOLDOWN_SECONDS
+            else:
+                script_off, delay = item
+            if not script_off:
+                continue
+            # Event finalizes COOLDOWN_SECONDS after last motion.
+            # If off_delay > COOLDOWN_SECONDS, schedule additional wait.
+            remaining = max(0, delay - COOLDOWN_SECONDS)
+            if remaining > 0:
+                task = asyncio.create_task(
+                    self._delayed_run_script(remaining, script_off, str(key[0]), datetime.now(), 0.0))
+                pending_tasks.append(task)
+            else:
                 asyncio.create_task(self._run_script(script_off, str(key[0]), datetime.now(), 0.0))
+        if pending_tasks:
+            self._pending_off_tasks[key] = pending_tasks
+
+    async def _delayed_run_script(
+        self, delay: float, script: str, cam_name: str,
+        timestamp: datetime, intensity: float,
+    ) -> None:
+        """Wait *delay* seconds then run an off-script. Cancellation-safe."""
+        await asyncio.sleep(delay)
+        await self._run_script(script, cam_name, timestamp, intensity)
 
     async def _run_script(
         self, script: str, cam_name: str, timestamp: datetime, intensity: float,

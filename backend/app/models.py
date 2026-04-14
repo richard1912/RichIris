@@ -16,6 +16,17 @@ class Setting(Base):
     category: Mapped[str] = mapped_column(String(50), nullable=False)
 
 
+class CameraGroup(Base):
+    __tablename__ = "camera_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    cameras: Mapped[list["Camera"]] = relationship(back_populates="group")
+
+
 class Camera(Base):
     __tablename__ = "cameras"
 
@@ -32,6 +43,8 @@ class Camera(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("camera_groups.id", ondelete="SET NULL"), nullable=True)
 
     motion_sensitivity: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
     motion_script: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -43,6 +56,7 @@ class Camera(Base):
     ai_detect_animals: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     ai_confidence_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
 
+    group: Mapped["CameraGroup | None"] = relationship(back_populates="cameras")
     recordings: Mapped[list["Recording"]] = relationship(back_populates="camera")
     clip_exports: Mapped[list["ClipExport"]] = relationship(back_populates="camera")
     motion_events: Mapped[list["MotionEvent"]] = relationship(back_populates="camera")

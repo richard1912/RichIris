@@ -45,6 +45,7 @@ class UpdateChecker:
 
     def __init__(self) -> None:
         self._latest_release: dict | None = None
+        self._backend_update_available: bool = False
         self._current_version: str = "0.0.0"
         self._last_check: datetime | None = None
         self._task: asyncio.Task | None = None
@@ -74,6 +75,10 @@ class UpdateChecker:
         return self._latest_release
 
     @property
+    def backend_update_available(self) -> bool:
+        return self._backend_update_available
+
+    @property
     def last_check(self) -> datetime | None:
         return self._last_check
 
@@ -91,7 +96,7 @@ class UpdateChecker:
         while True:
             try:
                 await self._check_github()
-                if self._latest_release and os.name == "nt":
+                if self._backend_update_available and os.name == "nt":
                     self._maybe_launch_app()
             except Exception:
                 logger.exception("Update check cycle failed")
@@ -120,31 +125,34 @@ class UpdateChecker:
             releases = resp.json()
             if not isinstance(releases, list) or not releases:
                 self._latest_release = None
+                self._backend_update_available = False
                 return
 
-            # Filter to releases newer than current, sorted newest first
+            # Find the absolute latest non-draft/prerelease and all releases
+            # newer than the backend's own version (for changelog aggregation).
+            stable = []
             newer = []
             for rel in releases:
                 if rel.get("draft") or rel.get("prerelease"):
                     continue
+                stable.append(rel)
                 tag = rel.get("tag_name", "")
                 ver = tag.lstrip("v")
                 if _compare_versions(ver, self._current_version) > 0:
                     newer.append(rel)
 
-            if not newer:
+            if not stable:
                 self._latest_release = None
-                latest_tag = releases[0].get("tag_name", "").lstrip("v")
-                logger.debug(
-                    "No update available",
-                    extra={"current": self._current_version, "latest": latest_tag},
-                )
+                self._backend_update_available = False
                 return
 
-            # Latest release (newest) for version/assets/published_at
-            latest = newer[0]
+            # Always expose the absolute latest release so clients can
+            # compare against their own version independently.
+            latest = stable[0]
             latest_tag = latest.get("tag_name", "")
             latest_version = latest_tag.lstrip("v")
+
+            self._backend_update_available = len(newer) > 0
 
             # Parse assets from latest release. Two Windows installers ship
             # in each release: the full NVR installer (RichIris-Setup.exe) and
@@ -167,9 +175,11 @@ class UpdateChecker:
                 elif name.endswith(".apk"):
                     assets["android"] = info
 
-            # Combine changelogs from all newer releases (newest first)
+            # Combine changelogs from releases newer than backend (for display).
+            # If backend is current, just use the latest release body.
+            changelog_releases = newer if newer else [latest]
             changelog_parts = []
-            for rel in newer:
+            for rel in changelog_releases:
                 tag = rel.get("tag_name", "")
                 body = (rel.get("body") or "").strip()
                 if body:
@@ -183,10 +193,16 @@ class UpdateChecker:
                 "published_at": latest.get("published_at", ""),
                 "assets": assets,
             }
-            logger.info(
-                "Update available",
-                extra={"current": self._current_version, "latest": latest_version},
-            )
+            if self._backend_update_available:
+                logger.info(
+                    "Backend update available",
+                    extra={"current": self._current_version, "latest": latest_version},
+                )
+            else:
+                logger.debug(
+                    "Backend is up to date",
+                    extra={"current": self._current_version, "latest": latest_version},
+                )
 
         except httpx.TimeoutException:
             logger.warning("GitHub API request timed out")

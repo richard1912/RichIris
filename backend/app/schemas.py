@@ -12,6 +12,25 @@ class MotionScriptConfig(BaseModel):
     vehicles: bool = True
     animals: bool = True
     motion_only: bool = True
+    off_delay: int = 10  # seconds after last motion before off-script runs
+
+
+class CameraGroupCreate(BaseModel):
+    name: str
+
+
+class CameraGroupUpdate(BaseModel):
+    name: str | None = None
+    sort_order: int | None = None
+
+
+class CameraGroupResponse(BaseModel):
+    id: int
+    name: str
+    sort_order: int = 0
+    camera_count: int = 0
+
+    model_config = {"from_attributes": True}
 
 
 class CameraCreate(BaseModel):
@@ -20,6 +39,8 @@ class CameraCreate(BaseModel):
     sub_stream_url: str | None = None
     enabled: bool = True
     rotation: int = 0
+    sort_order: int = 0
+    group_id: int | None = None
     motion_sensitivity: int = 100
     motion_script: str | None = None
     motion_script_off: str | None = None
@@ -37,6 +58,8 @@ class CameraUpdate(BaseModel):
     sub_stream_url: str | None = None
     enabled: bool | None = None
     rotation: int | None = None
+    sort_order: int | None = None
+    group_id: int | None = None
     motion_sensitivity: int | None = None
     motion_script: str | None = None
     motion_script_off: str | None = None
@@ -59,6 +82,8 @@ class CameraResponse(BaseModel):
     codec: str | None = None
     fps: float | None = None
     rotation: int = 0
+    sort_order: int = 0
+    group_id: int | None = None
     motion_sensitivity: int = 0
     motion_script: str | None = None
     motion_script_off: str | None = None
@@ -190,3 +215,14 @@ class ClipExportResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class TestScriptRequest(BaseModel):
+    command: str
+
+
+class TestScriptResponse(BaseModel):
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False

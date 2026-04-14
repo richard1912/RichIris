@@ -24,7 +24,7 @@ enum _CheckState { checking, upToDate, error }
 
 class _VersionInfoDialogState extends State<VersionInfoDialog> {
   _CheckState _state = _CheckState.checking;
-  UpdateInfo? _update;
+  UpdateCheckResult? _result;
   String? _lastChecked;
   String? _error;
 
@@ -44,14 +44,13 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
     try {
       final result = await widget.updateService.checkNow();
       if (!mounted) return;
-      if (result.update != null) {
-        // Update available — jump straight to the update dialog
-        _update = result.update;
-        _showUpdateDialog();
+      _result = result;
+      if (result.appUpdate != null) {
+        // App update available — jump straight to the update dialog
+        _showUpdateDialog(result);
         return;
       }
       setState(() {
-        _update = null;
         _lastChecked = result.lastChecked;
         _state = _CheckState.upToDate;
       });
@@ -68,14 +67,16 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
     }
   }
 
-  void _showUpdateDialog() {
+  void _showUpdateDialog(UpdateCheckResult result) {
     Navigator.of(context).pop();
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (_) => UpdateDialog(
-        update: _update!,
+        update: result.appUpdate!,
         updateService: widget.updateService,
+        backendVersion: result.backendVersion,
+        backendUpdateAvailable: result.backendUpdateAvailable,
       ),
     );
   }
@@ -116,7 +117,7 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Last checked: ${_formatLastChecked(_lastChecked ?? _update?.lastChecked)}',
+                'Last checked: ${_formatLastChecked(_lastChecked ?? _result?.lastChecked)}',
                 style: TextStyle(fontSize: 11, color: Colors.grey[600]),
               ),
               const SizedBox(height: 20),
@@ -132,6 +133,30 @@ class _VersionInfoDialogState extends State<VersionInfoDialog> {
                 Icon(Icons.check_circle, color: Colors.green[400], size: 32),
                 const SizedBox(height: 8),
                 Text("You're running the latest version", style: TextStyle(color: Colors.green[400], fontSize: 13)),
+                if (_result != null && _result!.backendUpdateAvailable && _result!.backendVersion != null) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.dns, color: Colors.orange[400], size: 18),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            'Server is running v${_result!.backendVersion}. Run the latest installer on the host machine to update.',
+                            style: TextStyle(color: Colors.orange[300], fontSize: 12),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 20),
               ] else if (_state == _CheckState.error) ...[
                 Icon(Icons.error_outline, color: Colors.red[400], size: 32),

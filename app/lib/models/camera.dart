@@ -5,6 +5,7 @@ class MotionScriptConfig {
   bool vehicles;
   bool animals;
   bool motionOnly;
+  int offDelay;
 
   MotionScriptConfig({
     this.on,
@@ -13,6 +14,7 @@ class MotionScriptConfig {
     this.vehicles = true,
     this.animals = true,
     this.motionOnly = true,
+    this.offDelay = 10,
   });
 
   factory MotionScriptConfig.fromJson(Map<String, dynamic> json) =>
@@ -23,6 +25,7 @@ class MotionScriptConfig {
         vehicles: json['vehicles'] as bool? ?? true,
         animals: json['animals'] as bool? ?? true,
         motionOnly: json['motion_only'] as bool? ?? true,
+        offDelay: json['off_delay'] as int? ?? 10,
       );
 
   Map<String, dynamic> toJson() => {
@@ -32,6 +35,7 @@ class MotionScriptConfig {
         'vehicles': vehicles,
         'animals': animals,
         'motion_only': motionOnly,
+        'off_delay': offDelay,
       };
 
   MotionScriptConfig copy() => MotionScriptConfig(
@@ -41,6 +45,7 @@ class MotionScriptConfig {
         vehicles: vehicles,
         animals: animals,
         motionOnly: motionOnly,
+        offDelay: offDelay,
       );
 }
 
@@ -55,6 +60,8 @@ class Camera {
   final String? codec;
   final double? fps;
   final int rotation;
+  final int sortOrder;
+  final int? groupId;
   final int motionSensitivity;
   final String? motionScript;
   final String? motionScriptOff;
@@ -77,6 +84,8 @@ class Camera {
     this.codec,
     this.fps,
     this.rotation = 0,
+    this.sortOrder = 0,
+    this.groupId,
     this.motionSensitivity = 0,
     this.motionScript,
     this.motionScriptOff,
@@ -100,6 +109,8 @@ class Camera {
         codec: json['codec'] as String?,
         fps: (json['fps'] as num?)?.toDouble(),
         rotation: json['rotation'] as int? ?? 0,
+        sortOrder: json['sort_order'] as int? ?? 0,
+        groupId: json['group_id'] as int?,
         motionSensitivity: json['motion_sensitivity'] as int? ?? 0,
         motionScript: json['motion_script'] as String?,
         motionScriptOff: json['motion_script_off'] as String?,
@@ -121,6 +132,8 @@ class Camera {
         if (subStreamUrl != null) 'sub_stream_url': subStreamUrl,
         'enabled': enabled,
         'rotation': rotation,
+        'sort_order': sortOrder,
+        if (groupId != null) 'group_id': groupId,
         'motion_sensitivity': motionSensitivity,
         if (motionScript != null) 'motion_script': motionScript,
         'motion_scripts': motionScripts.map((s) => s.toJson()).toList(),

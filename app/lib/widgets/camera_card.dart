@@ -18,6 +18,10 @@ class CameraCard extends StatefulWidget {
   final VideoController? playbackController;
   final bool playbackLoading;
   final bool playbackFailed;
+  final bool showDragHint;
+  final Size? dragFeedbackSize;
+  final VoidCallback? onDragStarted;
+  final VoidCallback? onDragEnd;
 
   const CameraCard({
     super.key,
@@ -33,6 +37,10 @@ class CameraCard extends StatefulWidget {
     this.playbackController,
     this.playbackLoading = false,
     this.playbackFailed = false,
+    this.showDragHint = false,
+    this.dragFeedbackSize,
+    this.onDragStarted,
+    this.onDragEnd,
   });
 
   @override
@@ -165,6 +173,60 @@ class _CameraCardState extends State<CameraCard> {
                       ),
                     ),
                   ),
+                  // Drag handle — shown when card is selected
+                  if (widget.showDragHint)
+                    Positioned(
+                      bottom: 4,
+                      left: 4,
+                      child: Draggable<int>(
+                        data: widget.camera.id,
+                        onDragStarted: widget.onDragStarted,
+                        onDragEnd: (_) => widget.onDragEnd?.call(),
+                        onDraggableCanceled: (_, __) => widget.onDragEnd?.call(),
+                        feedback: Material(
+                          elevation: 8,
+                          borderRadius: BorderRadius.circular(8),
+                          color: Colors.transparent,
+                          child: SizedBox(
+                            width: widget.dragFeedbackSize?.width ?? 200,
+                            height: widget.dragFeedbackSize?.height ?? 112,
+                            child: Opacity(
+                              opacity: 0.85,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: const Color(0xFF3B82F6), width: 2),
+                                  color: const Color(0xFF1A1A1A),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    widget.camera.name,
+                                    style: const TextStyle(color: Colors.white, fontSize: 14, decoration: TextDecoration.none),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        childWhenDragging: const SizedBox.shrink(),
+                        child: MouseRegion(
+                          cursor: SystemMouseCursors.grab,
+                          child: AnimatedOpacity(
+                            opacity: widget.selected ? 0.7 : 0.0,
+                            duration: const Duration(milliseconds: 200),
+                            child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Icon(Icons.drag_indicator,
+                                  size: 18, color: Color(0xFFD4D4D4)),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),

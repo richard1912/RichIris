@@ -1104,7 +1104,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                 if (_longPressActive) {
                   _longPressActive = false;
                   _hoverMotionEvent = null;
-                  _ctrl.setScrubHour(null);
+                  // Don't clear scrubHour here — onScaleEnd fires AFTER
+                  // onPointerUp and needs scrubHour to navigate to the
+                  // drag release position instead of the initial touch.
                   setState(() => _hoverTime = null);
                   _updateThumbOverlay();
                 }
@@ -1114,6 +1116,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   final pct = details.localPosition.dx / width;
                   final yFrac = details.localPosition.dy / barHeight;
                   _onTimelineTap(pct, yFraction: yFrac);
+                  // Clean up scrubHour for pure tap / long-press-without-drag
+                  // (onScaleEnd won't fire in those cases)
+                  _ctrl.setScrubHour(null);
                 },
                 onScaleStart: (details) {
                   _lastScale = 1.0;

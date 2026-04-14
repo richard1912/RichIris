@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import '../models/camera.dart';
+import '../models/camera_group.dart';
 import '../services/api_client.dart';
 import '../services/camera_api.dart';
+import '../services/group_api.dart';
 import '../utils/detection_colors.dart';
 import '../widgets/rtsp_wizard_dialog.dart';
+import '../widgets/script_wizard_dialog.dart';
 
 class _ScriptEntry {
   final TextEditingController onCtrl;
@@ -12,6 +15,7 @@ class _ScriptEntry {
   bool vehicles;
   bool animals;
   bool motionOnly;
+  int offDelay;
 
   _ScriptEntry({
     required this.onCtrl,
@@ -20,6 +24,7 @@ class _ScriptEntry {
     this.vehicles = true,
     this.animals = true,
     this.motionOnly = true,
+    this.offDelay = 10,
   });
 }
 
@@ -27,8 +32,17 @@ class CameraFormScreen extends StatefulWidget {
   final CameraApi cameraApi;
   final ApiClient apiClient;
   final Camera? camera;
+  final List<CameraGroup> groups;
+  final GroupApi? groupApi;
 
-  const CameraFormScreen({super.key, required this.cameraApi, required this.apiClient, this.camera});
+  const CameraFormScreen({
+    super.key,
+    required this.cameraApi,
+    required this.apiClient,
+    this.camera,
+    this.groups = const [],
+    this.groupApi,
+  });
 
   @override
   State<CameraFormScreen> createState() => _CameraFormScreenState();
@@ -50,9 +64,11 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late bool _aiDetectVehicles;
   late bool _aiDetectAnimals;
   late int _aiConfidenceThreshold;
+  int? _groupId;
   bool _saving = false;
   String? _error;
   bool _obscurePassword = true;
+  String? _testingScript; // tracks which script field is currently being tested
 
   bool get isEditing => widget.camera != null;
 
@@ -102,12 +118,14 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       vehicles: s.vehicles,
       animals: s.animals,
       motionOnly: s.motionOnly,
+      offDelay: s.offDelay,
     )).toList();
     _aiDetection = widget.camera?.aiDetection ?? true;
     _aiDetectPersons = widget.camera?.aiDetectPersons ?? true;
     _aiDetectVehicles = widget.camera?.aiDetectVehicles ?? true;
     _aiDetectAnimals = widget.camera?.aiDetectAnimals ?? true;
     _aiConfidenceThreshold = widget.camera?.aiConfidenceThreshold ?? 50;
+    _groupId = widget.camera?.groupId;
   }
 
   @override
@@ -149,6 +167,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 'vehicles': e.vehicles,
                 'animals': e.animals,
                 'motion_only': e.motionOnly,
+                'off_delay': e.offDelay,
               };
             })
             .toList();
@@ -158,6 +177,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           'sub_stream_url': subUrl,
           'enabled': _enabled,
           'rotation': _rotation,
+          'group_id': _groupId,
           'motion_sensitivity': _motionSensitivity,
           'motion_scripts': scriptsList,
           'ai_detection': _aiDetection,
@@ -174,6 +194,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           subStreamUrl: subUrl,
           enabled: _enabled,
           rotation: _rotation,
+          groupId: _groupId,
         );
       }
       if (mounted) Navigator.of(context).pop();
@@ -232,6 +253,53 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       setState(() => _error = e.toString());
+    }
+  }
+
+  Future<void> _testScript(String command, String fieldKey) async {
+    if (command.trim().isEmpty) return;
+    setState(() => _testingScript = fieldKey);
+    try {
+      final result = await widget.cameraApi.testScript(command.trim());
+      if (!mounted) return;
+      final exitCode = result['exit_code'] as int;
+      final timedOut = result['timed_out'] as bool? ?? false;
+      final stdout = (result['stdout'] as String? ?? '').trim();
+      final stderr = (result['stderr'] as String? ?? '').trim();
+
+      if (timedOut) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Script timed out (15s limit)'), backgroundColor: Colors.orange),
+        );
+      } else if (exitCode == 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(stdout.isNotEmpty ? 'OK: $stdout' : 'Script ran successfully (exit code 0)'),
+            backgroundColor: Colors.green[700],
+          ),
+        );
+      } else {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text('Script failed (exit code $exitCode)'),
+            content: SingleChildScrollView(
+              child: SelectableText(
+                stderr.isNotEmpty ? stderr : (stdout.isNotEmpty ? stdout : 'No output'),
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+              ),
+            ),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+      );
+    } finally {
+      if (mounted) setState(() => _testingScript = null);
     }
   }
 
@@ -297,6 +365,53 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     );
   }
 
+  Widget _buildScriptActions(TextEditingController ctrl, String fieldKey) {
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: ctrl,
+      builder: (context, value, _) {
+        final hasText = value.text.trim().isNotEmpty;
+        final isTesting = _testingScript == fieldKey;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: Icon(Icons.auto_fix_high, size: 18, color: Colors.blue[300]),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              tooltip: 'Script builder wizard',
+              onPressed: () async {
+                final result = await showDialog<String>(
+                  context: context,
+                  builder: (_) => ScriptWizardDialog(
+                    initialCommand: ctrl.text.trim().isNotEmpty ? ctrl.text.trim() : null,
+                  ),
+                );
+                if (result != null && mounted) {
+                  setState(() => ctrl.text = result);
+                }
+              },
+            ),
+            const SizedBox(width: 4),
+            if (isTesting)
+              const Padding(
+                padding: EdgeInsets.only(right: 8),
+                child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              )
+            else
+              IconButton(
+                icon: Icon(Icons.play_arrow, size: 20,
+                    color: hasText ? Colors.green[400] : Colors.grey[700]),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                tooltip: 'Test run this script',
+                onPressed: hasText ? () => _testScript(ctrl.text, fieldKey) : null,
+              ),
+          ],
+        );
+      },
+    );
+  }
+
   Widget _buildScriptEntry(int index) {
     final entry = _scriptEntries[index];
     return Card(
@@ -333,16 +448,50 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 labelText: 'On Script',
                 isDense: true,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                suffixIcon: _buildScriptActions(entry.onCtrl, 'on_$index'),
+                suffixIconConstraints: const BoxConstraints(maxHeight: 30),
               ),
               style: const TextStyle(fontSize: 13),
             ),
             const SizedBox(height: 8),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: entry.offCtrl,
+              builder: (context, value, _) {
+                if (value.text.trim().isEmpty) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: [
+                      const Text('Off delay:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                      Expanded(
+                        child: Slider(
+                          value: entry.offDelay.toDouble(),
+                          min: 10,
+                          max: 300,
+                          divisions: 58,
+                          activeColor: const Color(0xFFF59E0B),
+                          label: '${entry.offDelay}s',
+                          onChanged: (v) => setState(() => entry.offDelay = v.round()),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 40,
+                        child: Text('${entry.offDelay}s',
+                            style: const TextStyle(fontSize: 12, color: Color(0xFFF59E0B))),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
             TextFormField(
               controller: entry.offCtrl,
               decoration: InputDecoration(
                 labelText: 'Off Script',
                 isDense: true,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                suffixIcon: _buildScriptActions(entry.offCtrl, 'off_$index'),
+                suffixIconConstraints: const BoxConstraints(maxHeight: 30),
               ),
               style: const TextStyle(fontSize: 13),
             ),
@@ -502,6 +651,19 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 ],
                 onChanged: (v) => setState(() => _rotation = v ?? 0),
               ),
+              if (widget.groups.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                DropdownButtonFormField<int?>(
+                  value: _groupId,
+                  decoration: const InputDecoration(labelText: 'Group'),
+                  items: [
+                    const DropdownMenuItem<int?>(value: null, child: Text('Ungrouped')),
+                    ...widget.groups.map((g) =>
+                        DropdownMenuItem<int?>(value: g.id, child: Text(g.name))),
+                  ],
+                  onChanged: (v) => setState(() => _groupId = v),
+                ),
+              ],
               const SizedBox(height: 14),
               SwitchListTile(
                 title: const Text('Enabled'),

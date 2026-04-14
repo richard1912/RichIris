@@ -10,13 +10,13 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
 from app.database import get_db
 from app.models import Camera, ClipExport, MotionEvent, Recording
-from app.schemas import CameraCreate, CameraResponse, CameraUpdate
+from app.schemas import CameraCreate, CameraResponse, CameraUpdate, TestScriptRequest, TestScriptResponse
 from app.services.ffmpeg import sanitize_camera_name
 from app.services.motion_detector import get_motion_detector
 from app.services.stream_manager import get_stream_manager
@@ -544,10 +544,26 @@ async def camera_snapshot(req: SnapshotRequest):
     return Response(content=stdout, media_type="image/jpeg")
 
 
+class CameraReorderRequest(BaseModel):
+    order: list[int]  # list of camera IDs in desired order
+
+
+@router.put("/reorder")
+async def reorder_cameras(data: CameraReorderRequest, db: AsyncSession = Depends(get_db)):
+    """Update sort_order for all cameras based on provided ID list."""
+    for idx, camera_id in enumerate(data.order):
+        await db.execute(
+            update(Camera).where(Camera.id == camera_id).values(sort_order=idx)
+        )
+    await db.commit()
+    logger.info("Cameras reordered", extra={"count": len(data.order)})
+    return {"ok": True}
+
+
 @router.get("", response_model=list[CameraResponse])
 async def list_cameras(db: AsyncSession = Depends(get_db)):
     """List all cameras."""
-    result = await db.execute(select(Camera).order_by(Camera.id))
+    result = await db.execute(select(Camera).order_by(Camera.sort_order, Camera.id))
     cameras = result.scalars().all()
     logger.debug("Listed cameras", extra={"count": len(cameras)})
     return [CameraResponse.from_camera(c) for c in cameras]
@@ -572,6 +588,7 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         name=data.name, rtsp_url=data.rtsp_url,
         sub_stream_url=data.sub_stream_url or None,
         enabled=data.enabled, rotation=data.rotation,
+        sort_order=data.sort_order, group_id=data.group_id,
         motion_sensitivity=data.motion_sensitivity,
         motion_script=data.motion_script,
         motion_script_off=data.motion_script_off,
@@ -636,6 +653,10 @@ async def update_camera(
         camera.enabled = data.enabled
     if data.rotation is not None:
         camera.rotation = data.rotation
+    if data.sort_order is not None:
+        camera.sort_order = data.sort_order
+    if "group_id" in (data.model_fields_set or set()):
+        camera.group_id = data.group_id
     if data.motion_sensitivity is not None:
         camera.motion_sensitivity = data.motion_sensitivity
     if "motion_script" in (data.model_fields_set or set()):
@@ -682,6 +703,43 @@ async def update_camera(
     await detector.update_camera(camera)
 
     return CameraResponse.from_camera(camera)
+
+
+@router.post("/test-script", response_model=TestScriptResponse)
+async def test_script(req: TestScriptRequest):
+    """Run a script command and return its output for testing purposes."""
+    import os
+    command = req.command.strip()
+    if not command:
+        raise HTTPException(400, "Command is required")
+    try:
+        env = {
+            **os.environ,
+            "MOTION_CAMERA": "Test",
+            "MOTION_TIME": "2000-01-01T00:00:00",
+            "MOTION_INTENSITY": "0",
+            "DETECTION_LABEL": "",
+            "DETECTION_CONFIDENCE": "",
+        }
+        proc = await asyncio.create_subprocess_shell(
+            command, env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        return TestScriptResponse(
+            exit_code=proc.returncode,
+            stdout=stdout.decode(errors="replace")[-2000:],
+            stderr=stderr.decode(errors="replace")[-2000:],
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return TestScriptResponse(exit_code=-1, stdout="", stderr="", timed_out=True)
+    except Exception as e:
+        return TestScriptResponse(exit_code=-1, stdout="", stderr=str(e))
 
 
 @router.delete("/{camera_id}", status_code=204)

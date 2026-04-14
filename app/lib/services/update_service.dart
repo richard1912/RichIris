@@ -60,6 +60,24 @@ class UpdateInfo {
   }
 }
 
+/// Result of an update check.  Separates app vs backend update status so
+/// the UI can notify about each independently.
+class UpdateCheckResult {
+  final UpdateInfo? appUpdate;
+  final String? latestVersion;
+  final String? backendVersion;
+  final bool backendUpdateAvailable;
+  final String? lastChecked;
+
+  const UpdateCheckResult({
+    this.appUpdate,
+    this.latestVersion,
+    this.backendVersion,
+    this.backendUpdateAvailable = false,
+    this.lastChecked,
+  });
+}
+
 class UpdateService {
   final ApiClient _client;
   final String currentVersion;
@@ -76,33 +94,58 @@ class UpdateService {
   /// broker the GitHub call, so we hit the GitHub releases API directly.
   /// Full installs keep using the backend's cached result to avoid GitHub
   /// rate limits and share the 6h periodic check across the LAN.
-  Future<({UpdateInfo? update, String? lastChecked})> getUpdate() async {
+  Future<UpdateCheckResult> getUpdate() async {
     if (isClientOnlyInstall()) return _fetchFromGitHub();
     final resp = await _client.dio.get('/api/system/update');
-    final data = resp.data as Map<String, dynamic>;
-    final lastChecked = data['last_checked'] as String?;
-    if (data['update_available'] != true || data['latest'] == null) {
-      return (update: null, lastChecked: lastChecked);
-    }
-    return (update: UpdateInfo.fromJson(data, lastChecked), lastChecked: lastChecked);
+    return _parseBackendResponse(resp.data as Map<String, dynamic>);
   }
 
   /// Force a fresh update check. Client-only installs go straight to GitHub;
   /// full installs have the backend re-check GitHub and return the result.
-  Future<({UpdateInfo? update, String? lastChecked})> checkNow() async {
+  Future<UpdateCheckResult> checkNow() async {
     if (isClientOnlyInstall()) return _fetchFromGitHub();
     final resp = await _client.dio.post('/api/system/update/check');
-    final data = resp.data as Map<String, dynamic>;
+    return _parseBackendResponse(resp.data as Map<String, dynamic>);
+  }
+
+  /// Parse the backend's update response and compare the latest release
+  /// against both the app's own version and the backend's version.
+  UpdateCheckResult _parseBackendResponse(Map<String, dynamic> data) {
     final lastChecked = data['last_checked'] as String?;
-    if (data['update_available'] != true || data['latest'] == null) {
-      return (update: null, lastChecked: lastChecked);
+    final latest = data['latest'] as Map<String, dynamic>?;
+    final backendVersion = data['backend_version'] as String?;
+
+    if (latest == null) {
+      return UpdateCheckResult(lastChecked: lastChecked, backendVersion: backendVersion, latestVersion: null);
     }
-    return (update: UpdateInfo.fromJson(data, lastChecked), lastChecked: lastChecked);
+
+    final latestVersion = latest['version'] as String? ?? '0.0.0';
+
+    // App update: compare latest GitHub version against THIS app's version.
+    final appNeedsUpdate = _compareSemver(latestVersion, currentVersion) > 0;
+    UpdateInfo? appUpdate;
+    if (appNeedsUpdate) {
+      // Wrap in the format UpdateInfo.fromJson expects
+      appUpdate = UpdateInfo.fromJson({'latest': latest}, lastChecked);
+    }
+
+    // Backend update: compare latest GitHub version against the backend's
+    // reported version.
+    final backendNeedsUpdate = backendVersion != null &&
+        _compareSemver(latestVersion, backendVersion) > 0;
+
+    return UpdateCheckResult(
+      appUpdate: appUpdate,
+      latestVersion: latestVersion,
+      backendVersion: backendVersion,
+      backendUpdateAvailable: backendNeedsUpdate,
+      lastChecked: lastChecked,
+    );
   }
 
   /// Direct GitHub releases query used by client-only installs. Mirrors the
   /// filtering + parsing logic in `backend/app/services/update_checker.py`.
-  Future<({UpdateInfo? update, String? lastChecked})> _fetchFromGitHub() async {
+  Future<UpdateCheckResult> _fetchFromGitHub() async {
     final lastChecked = DateTime.now().toUtc().toIso8601String();
     final dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),
@@ -115,11 +158,11 @@ class UpdateService {
         queryParameters: {'per_page': 50},
       );
       if (resp.statusCode != 200 || resp.data is! List) {
-        return (update: null, lastChecked: lastChecked);
+        return UpdateCheckResult(lastChecked: lastChecked);
       }
       final releases = (resp.data as List).cast<Map<String, dynamic>>();
       if (releases.isEmpty) {
-        return (update: null, lastChecked: lastChecked);
+        return UpdateCheckResult(lastChecked: lastChecked);
       }
 
       // Filter drafts/prereleases, keep only releases newer than current.
@@ -132,7 +175,7 @@ class UpdateService {
         }
       }
       if (newer.isEmpty) {
-        return (update: null, lastChecked: lastChecked);
+        return UpdateCheckResult(lastChecked: lastChecked);
       }
 
       final latest = newer.first;
@@ -172,7 +215,6 @@ class UpdateService {
       }
 
       final synthetic = <String, dynamic>{
-        'update_available': true,
         'latest': {
           'version': latestVersion,
           'tag_name': latestTag,
@@ -181,12 +223,12 @@ class UpdateService {
           'assets': assets,
         },
       };
-      return (
-        update: UpdateInfo.fromJson(synthetic, lastChecked),
+      return UpdateCheckResult(
+        appUpdate: UpdateInfo.fromJson(synthetic, lastChecked),
         lastChecked: lastChecked,
       );
     } catch (_) {
-      return (update: null, lastChecked: lastChecked);
+      return UpdateCheckResult(lastChecked: lastChecked);
     } finally {
       dio.close();
     }

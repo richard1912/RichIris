@@ -13,7 +13,7 @@ from app.config import get_app_dir, get_config
 from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
-from app.routers import backup, cameras, clips, motion, recordings, settings, storage, streams, system
+from app.routers import backup, cameras, clips, groups, motion, recordings, settings, storage, streams, system
 from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
@@ -243,13 +243,14 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="RichIris NVR",
-        version="0.0.13",
+        version="0.0.14",
         lifespan=lifespan,
     )
 
     app.include_router(backup.router)
     app.include_router(cameras.router)
     app.include_router(clips.router)
+    app.include_router(groups.router)
     app.include_router(motion.router)
     app.include_router(recordings.router)
     app.include_router(settings.router)

@@ -19,13 +19,22 @@ import '../services/camera_api.dart';
 import '../services/update_service.dart';
 import '../utils/time_utils.dart';
 import '../widgets/bug_report_dialog.dart';
+import '../models/camera_group.dart';
+import '../services/group_api.dart';
 import '../widgets/camera_grid.dart';
+import '../widgets/group_chip_bar.dart';
 import '../widgets/version_info_dialog.dart';
 import '../widgets/quality_selector.dart';
 import '../widgets/timeline/timeline_widget.dart';
 
 class HomeScreen extends StatefulWidget {
   final List<Camera> cameras;
+  final List<Camera> allCameras;
+  final List<CameraGroup> groups;
+  final int? selectedGroupId;
+  final ValueChanged<int?> onGroupSelected;
+  final VoidCallback onGroupsChanged;
+  final GroupApi groupApi;
   final SystemStatus? systemStatus;
   final Quality quality;
   final StreamSource streamSource;
@@ -51,6 +60,8 @@ class HomeScreen extends StatefulWidget {
   final VoidCallback onOpenSystemSettings;
   final VoidCallback onAddCamera;
   final ValueChanged<Camera> onEditCamera;
+  final Future<void> Function(List<int>) onReorder;
+  final ValueChanged<bool> onDragStateChanged;
   final PlaybackRef playbackRef;
   final String? resumePlaybackTime;
   final int resumePlaybackGen;
@@ -59,6 +70,12 @@ class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
     required this.cameras,
+    required this.allCameras,
+    required this.groups,
+    this.selectedGroupId,
+    required this.onGroupSelected,
+    required this.onGroupsChanged,
+    required this.groupApi,
     this.systemStatus,
     required this.quality,
     required this.streamSource,
@@ -84,6 +101,8 @@ class HomeScreen extends StatefulWidget {
     required this.onOpenSystemSettings,
     required this.onAddCamera,
     required this.onEditCamera,
+    required this.onReorder,
+    required this.onDragStateChanged,
     required this.playbackRef,
     this.resumePlaybackTime,
     this.resumePlaybackGen = 0,
@@ -560,9 +579,18 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Column(
         children: [
+          if (widget.groups.isNotEmpty)
+            GroupChipBar(
+              groups: widget.groups,
+              selectedGroupId: widget.selectedGroupId,
+              onGroupSelected: widget.onGroupSelected,
+              onGroupsChanged: widget.onGroupsChanged,
+              groupApi: widget.groupApi,
+            ),
           Expanded(
             child: CameraGrid(
               cameras: widget.cameras,
+              allCameras: widget.allCameras,
               systemStatus: widget.systemStatus,
               streamApi: widget.streamApi,
               streamSource: widget.streamSource.param,
@@ -571,6 +599,8 @@ class _HomeScreenState extends State<HomeScreen> {
               onCameraSelected: widget.onCameraSelected,
               onEditCamera: widget.onEditCamera,
               onAddCamera: widget.onAddCamera,
+              onReorder: widget.onReorder,
+              onDragStateChanged: widget.onDragStateChanged,
               livePlayers: _isLive ? widget.livePlayers : const {},
               liveControllers: _isLive ? widget.liveControllers : const {},
               fullscreenCameraId: widget.fullscreenCameraId,
@@ -594,7 +624,7 @@ class _HomeScreenState extends State<HomeScreen> {
               onLive: _goLive,
               getNvrTime: _getNvrTime,
               initialDate: _timelineDateOverride,
-              cameras: widget.cameras.where((c) => c.enabled).toList(),
+              cameras: widget.allCameras.where((c) => c.enabled).toList(),
             ),
         ],
       ),
