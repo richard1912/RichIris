@@ -10,6 +10,7 @@ import '../../services/clip_api.dart';
 import '../../services/motion_api.dart';
 import '../../services/timeline_cache.dart';
 import '../../utils/time_utils.dart';
+import '../../utils/playback_benchmark.dart';
 import '../../config/constants.dart';
 import '../datetime_picker_dialog.dart';
 import '../export_clip_wizard_dialog.dart';
@@ -518,6 +519,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     // Hold the playhead at the tapped position for 3s while the player loads
     _playheadHoldUntilMs = DateTime.now().millisecondsSinceEpoch + 3000;
     final iso = hourToISO(_ctrl.selectedDate, targetHour);
+    PlaybackBenchmark.start();
     widget.onPlayback(iso);
   }
 

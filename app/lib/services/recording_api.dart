@@ -24,7 +24,7 @@ class RecordingApi {
 
   Future<PlaybackSession> startPlayback(
       int cameraId, String start, String quality,
-      {String direction = 'forward'}) async {
+      {String direction = 'forward', String? benchId}) async {
     final resp = await _client.dio.post(
       '/api/recordings/$cameraId/playback',
       queryParameters: {
@@ -32,6 +32,9 @@ class RecordingApi {
         'quality': quality,
         'direction': direction,
       },
+      options: benchId != null
+          ? Options(headers: {'X-Bench-Id': benchId})
+          : null,
     );
     return PlaybackSession.fromJson(resp.data as Map<String, dynamic>);
   }

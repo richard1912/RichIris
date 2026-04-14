@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import get_bootstrap, get_config
+from app.services.benchmark import BenchmarkTrace
 from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class PlaybackSession:
     ready: bool = False
     streaming: bool = False
     _ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _bench: BenchmarkTrace | None = None
 
 
 class PlaybackManager:
@@ -114,12 +116,15 @@ class PlaybackManager:
         self, session_id: str, segment_paths: list[str],
         seek_seconds: float = 0.0, duration_limit: float = 1800.0,
         quality: str = "high", camera_id: int | None = None,
+        bench: BenchmarkTrace | None = None,
     ) -> PlaybackSession:
         """Start a playback session. High = instant remux, medium/low = NVENC transcode."""
         # Return existing session if still valid
         if session_id in self._sessions:
             session = self._sessions[session_id]
             session.last_access = time.time()
+            if bench:
+                bench.mark("session_cache_hit", session_id=session_id)
             return session
 
         # Kill old sessions for the same camera to prevent ffmpeg accumulation
@@ -131,6 +136,8 @@ class PlaybackManager:
             for sid in stale:
                 logger.info("Evicting old playback session", extra={"session_id": sid, "camera_id": camera_id})
                 await self.stop_session(sid)
+            if bench and stale:
+                bench.mark("evicted_old_sessions", count=len(stale))
 
         self._ensure_cleanup()
 
@@ -138,6 +145,7 @@ class PlaybackManager:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         session = PlaybackSession(session_id=session_id, output_dir=output_dir, camera_id=camera_id)
+        session._bench = bench
         self._sessions[session_id] = session
 
         config = get_config()
@@ -153,6 +161,8 @@ class PlaybackManager:
             if probed_codec:
                 source_codec = probed_codec
             logger.info("Probed recording", extra={"kbps": source_kbps, "codec": source_codec, "quality": quality})
+            if bench:
+                bench.mark("probe_done", kbps=source_kbps, codec=source_codec)
 
         preset = _build_playback_preset(quality, source_kbps, source_codec)
         pre_input = preset["pre_input"]
@@ -162,6 +172,9 @@ class PlaybackManager:
 
         # For single file: direct input with fast seek (-ss before -i)
         # For multiple files: use concat demuxer (no seek support, use -ss after -i)
+        # -noaccurate_seek: lands on the nearest keyframe instead of decoding to
+        # the exact frame. Safe because we're using -c copy (no re-encode anyway)
+        # and saves the keyframe-search work that dominates startup.
         # -avoid_negative_ts make_zero: shifts timestamps so first frame starts at
         # pts=0. Fixes green frames caused by .ts segments with initial timestamp
         # offset (e.g., first keyframe at pts=1.4s instead of 0).
@@ -169,6 +182,7 @@ class PlaybackManager:
             cmd = [
                 config.ffmpeg.path, "-y",
                 *pre_input,
+                "-noaccurate_seek",
                 "-ss", str(seek_seconds),
                 "-i", segment_paths[0],
                 "-t", str(duration_limit),
@@ -191,6 +205,7 @@ class PlaybackManager:
                 *pre_input,
                 "-f", "concat", "-safe", "0",
                 "-i", str(concat_list_path),
+                "-noaccurate_seek",
                 "-ss", str(seek_seconds),
                 "-t", str(duration_limit),
                 *codec_args,
@@ -210,6 +225,8 @@ class PlaybackManager:
             stderr=asyncio.subprocess.PIPE,
         )
         assign_to_job(session.process.pid)
+        if bench:
+            bench.mark("ffmpeg_spawned", pid=session.process.pid, streaming=session.streaming)
 
         # Wait for completion (remux is near-instant, typically < 1 second)
         asyncio.create_task(self._wait_ready(session))
@@ -235,6 +252,9 @@ class PlaybackManager:
                 if output_path.exists() and output_path.stat().st_size > 4096:
                     session.ready = True
                     logger.info("Streaming playback ready", extra={"session_id": session.session_id})
+                    if session._bench:
+                        session._bench.mark("fmp4_header_written",
+                                            bytes=output_path.stat().st_size)
                     session._ready_event.set()
                     return
                 # If process already exited, check file
@@ -267,6 +287,8 @@ class PlaybackManager:
         if output_path.exists() and output_path.stat().st_size > 0:
             session.ready = True
             logger.info("Playback session ready", extra={"session_id": session.session_id})
+            if session._bench:
+                session._bench.mark("remux_complete", bytes=output_path.stat().st_size)
         else:
             stderr = await session.process.stderr.read() if session.process.stderr else b""
             logger.error(

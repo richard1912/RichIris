@@ -32,7 +32,7 @@ Flutter App → RTSP → go2rtc :18554 (live) | HTTP MP4 → FastAPI:8700 → FF
 - **go2rtc keepalives**: StreamManager runs httpx fMP4 consumer per camera (s1_direct). Sub-stream kept warm by FrameBroker. Keepalives staggered 1s apart, auto-reconnect 5s retry.
 - **FrameBroker** (`services/frame_broker.py`): Persistent ffmpeg per camera pulling MJPEG from go2rtc s2_direct at 2fps. Parsed via JPEG SOI/EOI → numpy frames. `get_latest()` (instant) or `get_fresh(max_wait)`. Auto-restarts with 3s backoff. Starts before motion + thumbnails in lifespan.
 - **Live view**: Flutter connects to go2rtc RTSP via media_kit (libmpv). 5s cache, 16MB demuxer, TCP transport, hw decoding. Stall detection (10s), exponential backoff (500ms→10s). HTTP fMP4 proxy retained as fallback.
-- **Playback**: Direct = raw .ts served instantly. High/Low/Ultra Low = HEVC NVENC transcode → fMP4 (`-movflags frag_keyframe+empty_moov`). Sessions auto-cleanup 30s idle, same-camera eviction.
+- **Playback**: All qualities go through PlaybackManager → fMP4 (`-movflags frag_keyframe+empty_moov`). Direct = `ffmpeg -c copy` remux with `-noaccurate_seek -ss N` pre-seek (server-side seek shifts work off libmpv — first frame faster than letting it scan a raw .ts). High/Low/Ultra Low = HEVC NVENC transcode. Streaming endpoint supports HTTP Range on completed files (libmpv ranged reads); growing files served as plain `200 OK` stream because we can't promise an end byte. **No client-side `player.seek` after open** — fMP4's PTS=0 already corresponds to the user's chosen time. `seek_seconds` in the response is metadata-only (timeline display alignment). Sessions auto-cleanup 30s idle, same-camera eviction.
 - **GPU**: NVIDIA RTX 4080 SUPER (RT-DETR inference + NVENC transcoding)
 
 ### Motion + AI Detection
@@ -46,7 +46,7 @@ Two selectors: **Stream** (Main/Sub, live only) and **Quality** (Direct/High/Low
 
 Live streams baked into go2rtc.yaml at startup. High aliases to direct for HEVC sources (no point re-encoding same codec/bitrate). Non-HEVC sources get HEVC re-encode. Low = 1/8 bitrate, Ultra Low = 1/16 bitrate + 15fps + short GOP.
 
-Playback transcoding: same tiers, probed from .ts file. Direct = instant raw serve. Others = NVENC transcode with `-ss` seek.
+Playback transcoding: same tiers, probed from .ts file. Direct = `-c copy` remux with `-noaccurate_seek -ss` (lands on nearest keyframe; can leave seeks ±GOP-duration off the requested time). Others = NVENC transcode with `-ss` seek.
 
 ### Timezone
 Recordings stored as **local time without timezone**. Configurable via Settings → General. Frontend must NOT use `.toISOString()` (converts to UTC). Always format as local ISO strings.
@@ -59,7 +59,8 @@ RichIris/
 │   ├── routers/  (backup, cameras, clips, groups, recordings, settings, storage, streams, system, motion)
 │   └── services/ (backup, ffmpeg, stream_manager, go2rtc_client, go2rtc_manager, recorder,
 │                   clip_exporter, playback, settings, thumbnail_capture, retention,
-│                   storage_migration, motion_detector, object_detector, update_checker, frame_broker)
+│                   storage_migration, motion_detector, object_detector, update_checker,
+│                   frame_broker, benchmark)
 ├── app/lib/      # Flutter (main, app, theme, config/, models/, services/, screens/, widgets/, utils/)
 ├── installer/    (richiris.iss, richiris_client.iss, download_deps.ps1)
 ├── dependencies/ # gitignored: ffmpeg, ffprobe, nssm, go2rtc, models/rtdetr-l.onnx (~388MB)
@@ -76,7 +77,7 @@ RichIris/
 **Groups**: `GET/POST /api/groups` | `PUT/DELETE /api/groups/{id}` | `POST /api/groups/{id}/bulk` (body: `{action: "enable"|"disable"|"arm_motion"|"disarm_motion"}`)
 **Faces**: `GET /api/faces` | `POST /api/faces` `{name, notes?}` | `PUT/DELETE /api/faces/{id}` | `GET /api/faces/{id}/embeddings` | `POST /api/faces/{id}/embeddings` `{source_thumbnail_path, bbox?}` (returns `enrolled` / `multiple_faces` / `no_face`) | `DELETE /api/faces/embeddings/{id}` | `GET /api/faces/thumbnails/unlabeled?date=&camera_id=&limit=` | `GET /api/faces/thumbnails/event/{event_id}/path` | `GET /api/faces/embeddings/{id}/crop` | `GET /api/faces/{id}/latest-crop`
 **Streams**: `GET /api/streams/{id}/live` (go2rtc info) | `GET .../live.mp4` (fMP4 proxy) | `GET .../rtsp-info` (RTSP URL)
-**Recordings**: `GET .../dates` | `GET .../segments?date=` | `POST .../playback?start=&quality=&direction=` | `GET .../playback/{session}/playback.mp4` | `GET .../segment/{id}` (raw .ts) | `GET .../thumbnails?date=` | `GET .../thumb/{date}/{file}`
+**Recordings**: `GET .../dates` | `GET .../segments?date=` | `POST .../playback?start=&quality=&direction=` (optional `X-Bench-Id` header for end-to-end timing trace) | `GET .../playback/{session}/playback.mp4` (HTTP Range support on completed files; growing files served as plain stream) | `GET .../segment/{id}` (raw .ts) | `GET .../thumbnails?date=` | `GET .../thumb/{date}/{file}`
 **System**: `GET status` | `GET storage` | `GET logs?minutes=` | `POST client-event` | `POST retention/run` | `GET/POST data-dir` | `POST data-dir/validate` | `GET version` | `GET/POST update`
 **Settings**: `GET/PUT /api/settings`
 **Backup**: `GET preview` | `POST create` | `GET {id}/progress` | `POST {id}/cancel` | `POST inspect` | `POST restore` | `GET restore/{id}/progress` | `POST restore/{id}/cancel`

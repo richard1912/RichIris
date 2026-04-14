@@ -1,11 +1,12 @@
 """Recording playback API endpoints."""
 
+import asyncio
 import hashlib
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,7 @@ from app.config import get_config
 from app.database import get_db
 from app.models import Camera, Recording
 from app.schemas import RecordingResponse, ThumbnailInfo
+from app.services.benchmark import BenchmarkTrace
 from app.services.playback import get_playback_manager
 from app.services.thumbnail_capture import get_thumbnail_capture
 
@@ -76,6 +78,7 @@ async def start_playback_session(
     start: datetime = Query(..., description="Start time ISO format"),
     quality: str = Query("direct", description="Quality tier: direct, high, low, ultralow"),
     direction: str = Query("forward", description="Fallback direction: forward or backward"),
+    x_bench_id: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     """Start a playback session for the recording segment at the requested time.
@@ -85,6 +88,9 @@ async def start_playback_session(
     """
     if quality not in ("direct", "high", "low", "ultralow"):
         quality = "direct"
+
+    bench = BenchmarkTrace(x_bench_id, camera_id=camera_id, quality=quality)
+    bench.mark("request_received", start=start.isoformat())
 
     camera = await db.get(Camera, camera_id)
     if not camera:
@@ -138,6 +144,8 @@ async def start_playback_session(
 
     seek_seconds = max(0.0, (start - seg.start_time).total_seconds())
     seg_end = seg.end_time or (seg.start_time + timedelta(seconds=seg.duration or 900))
+    bench.mark("segment_resolved", segment_id=seg.id, seek_seconds=round(seek_seconds, 2),
+               in_progress=seg.in_progress)
 
     # Check if more segments exist after this one
     has_more_result = await db.execute(
@@ -151,8 +159,9 @@ async def start_playback_session(
     has_more = has_more_result.first() is not None
 
     # All qualities go through PlaybackManager for clean fMP4 output.
-    # Direct = ffmpeg -c copy remux (fixes .ts timestamp offset that causes
-    # green frames). Transcoded = HEVC NVENC encode.
+    # Direct = ffmpeg -c copy remux with -ss pre-seek (server-side seek shifts
+    # the work off libmpv so first frame is faster than letting libmpv binary-
+    # search a raw .ts for the target PTS). Transcoded = HEVC NVENC encode.
     session_key = f"{seg.id}-{quality}-{seek_seconds:.0f}"
     session_id = hashlib.md5(session_key.encode()).hexdigest()[:12]
 
@@ -163,17 +172,22 @@ async def start_playback_session(
         seek_seconds=seek_seconds,
         quality=quality,
         camera_id=camera_id,
+        bench=bench,
     )
+    bench.mark("session_started", session_id=session_id, streaming=session.streaming)
 
     # Wait for transcode to be ready
     await session._ready_event.wait()
+    bench.mark("ready_event_set", ready=session.ready)
     if not session.ready:
+        bench.summary()
         raise HTTPException(status_code=500, detail="Playback transcode failed")
 
     logger.info(
         "Playback session ready",
         extra={"camera_id": camera_id, "recording_id": seg.id, "quality": quality, "session_id": session_id},
     )
+    bench.summary()
 
     return {
         "segment_url": f"/api/recordings/playback/{session_id}/playback.mp4",
@@ -185,8 +199,13 @@ async def start_playback_session(
 
 
 @router.get("/segment/{recording_id}")
-async def get_segment_file(recording_id: int, db: AsyncSession = Depends(get_db)):
-    """Serve a specific recording segment file (raw)."""
+async def get_segment_file(
+    recording_id: int,
+    range: str | None = Header(default=None),
+    x_bench_id: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve a raw .ts recording segment. FileResponse handles Range natively."""
     recording = await db.get(Recording, recording_id)
     if not recording:
         raise HTTPException(status_code=404, detail="Recording not found")
@@ -195,12 +214,44 @@ async def get_segment_file(recording_id: int, db: AsyncSession = Depends(get_db)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Segment file missing")
 
+    if x_bench_id:
+        logger.info(
+            "[BENCH:%s] ts_request_received recording=%d range=%s size=%d",
+            x_bench_id, recording_id, range or "-", path.stat().st_size,
+        )
+
     return FileResponse(path, media_type="video/mp2t")
 
 
+def _parse_range(range_header: str | None) -> tuple[int, int | None] | None:
+    """Parse a Range header like 'bytes=N-M' or 'bytes=N-'. Returns (start, end_inclusive)."""
+    if not range_header:
+        return None
+    try:
+        unit, _, spec = range_header.partition("=")
+        if unit.strip().lower() != "bytes":
+            return None
+        first = spec.split(",")[0].strip()
+        start_s, _, end_s = first.partition("-")
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else None
+        return start, end
+    except (ValueError, AttributeError):
+        return None
+
+
 @router.get("/playback/{session_id}/playback.mp4")
-async def get_playback_file(session_id: str):
-    """Stream a transcoded playback MP4 (fragmented MP4 from PlaybackManager)."""
+async def get_playback_file(
+    session_id: str,
+    range: str | None = Header(default=None),
+    x_bench_id: str | None = Header(default=None),
+):
+    """Stream a transcoded playback MP4 (fragmented MP4 from PlaybackManager).
+
+    Supports HTTP Range requests so libmpv can issue ranged GETs for individual
+    fMP4 fragments instead of re-downloading the whole growing file on every
+    reconnect.
+    """
     mgr = get_playback_manager()
     session = mgr.get_session(session_id)
     if not session:
@@ -210,33 +261,99 @@ async def get_playback_file(session_id: str):
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="Playback file not ready")
 
-    if session.streaming and session.process and session.process.returncode is None:
-        # Stream the file as it's being written (fragmented MP4)
-        import asyncio
+    bench_id = x_bench_id or (session._bench.bench_id if session._bench else None)
+    is_growing = bool(
+        session.streaming and session.process and session.process.returncode is None
+    )
+    file_size = output_path.stat().st_size
+    parsed = _parse_range(range)
 
-        async def stream_fmp4():
+    if bench_id:
+        logger.info(
+            "[BENCH:%s] mp4_request_received session=%s range=%s file_size=%d growing=%s",
+            bench_id, session_id, range or "-", file_size, is_growing,
+        )
+
+    mgr.touch(session_id)
+
+    # Growing file: ignore Range and stream from byte 0 (live-stream semantics).
+    # We can't honor Range because we can't promise an end byte for a file whose
+    # final size is unknown, and libmpv strictly enforces 206 Content-Range bounds.
+    # Once ffmpeg finishes the segment becomes seekable via the path below.
+    if is_growing:
+        async def stream_growing():
+            sent = 0
             with open(output_path, "rb") as f:
+                stalls = 0
                 while True:
                     chunk = f.read(65536)
                     if chunk:
+                        stalls = 0
+                        if sent == 0 and bench_id:
+                            logger.info(
+                                "[BENCH:%s] mp4_first_chunk_sent bytes=%d offset=0 mode=growing",
+                                bench_id, len(chunk),
+                            )
+                        sent += len(chunk)
                         yield chunk
                     else:
-                        # Check if ffmpeg is still writing
                         if session.process and session.process.returncode is None:
-                            await asyncio.sleep(0.1)
+                            stalls += 1
+                            if stalls > 100:
+                                break
+                            await asyncio.sleep(0.05)
                         else:
-                            # Read any remaining data
-                            remaining = f.read()
-                            if remaining:
-                                yield remaining
                             break
 
-        mgr.touch(session_id)
-        return StreamingResponse(stream_fmp4(), media_type="video/mp4")
+        return StreamingResponse(
+            stream_growing(), media_type="video/mp4",
+            headers={"Accept-Ranges": "none", "Cache-Control": "no-cache"},
+        )
 
-    # Non-streaming or completed: serve the full file
-    mgr.touch(session_id)
-    return FileResponse(output_path, media_type="video/mp4")
+    # Completed file path (file_size is final and accurate).
+    if parsed is None:
+        return FileResponse(
+            output_path, media_type="video/mp4",
+            headers={"Accept-Ranges": "bytes"},
+        )
+
+    start, end = parsed
+    # Clamp range to actual file bounds.
+    if start >= file_size:
+        raise HTTPException(
+            status_code=416, detail="Range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+    last = file_size - 1 if end is None else min(end, file_size - 1)
+    length = last - start + 1
+
+    async def stream_range():
+        sent = 0
+        with open(output_path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                if sent == 0 and bench_id:
+                    logger.info(
+                        "[BENCH:%s] mp4_first_chunk_sent bytes=%d offset=%d mode=range",
+                        bench_id, len(chunk), start,
+                    )
+                sent += len(chunk)
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(
+        stream_range(), status_code=206, media_type="video/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+            "Content-Range": f"bytes {start}-{last}/{file_size}",
+            "Content-Length": str(length),
+        },
+    )
 
 
 @router.get("/{camera_id}/thumbnails", response_model=list[ThumbnailInfo])

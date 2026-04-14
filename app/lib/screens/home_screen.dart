@@ -19,6 +19,7 @@ import '../models/playback_ref.dart';
 import '../services/camera_api.dart';
 import '../services/update_service.dart';
 import '../utils/time_utils.dart';
+import '../utils/playback_benchmark.dart';
 import '../widgets/bug_report_dialog.dart';
 import '../models/camera_group.dart';
 import '../services/group_api.dart';
@@ -130,6 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<int, VideoController> _pbControllers = {};
   final Map<int, StreamSubscription> _completedSubs = {};
   final Map<int, StreamSubscription> _seekSubs = {};
+  final Map<int, StreamSubscription> _firstFrameSubs = {};
   final Set<int> _pbLoading = {};
   final Set<int> _pbFailed = {};
   int _generation = 0;
@@ -192,6 +194,9 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final sub in _seekSubs.values) {
       sub.cancel();
     }
+    for (final sub in _firstFrameSubs.values) {
+      sub.cancel();
+    }
     for (final p in _pbPlayers.values) {
       p.dispose();
     }
@@ -235,11 +240,24 @@ class _HomeScreenState extends State<HomeScreen> {
       sub.cancel();
     }
     _seekSubs.clear();
+    for (final sub in _firstFrameSubs.values) {
+      sub.cancel();
+    }
+    _firstFrameSubs.clear();
     for (final p in _pbPlayers.values) {
       p.stop();
     }
 
     final enabledCameras = widget.cameras.where((c) => c.enabled).toList();
+    // PlaybackBenchmark.start() was called in the timeline tap handler so that
+    // gesture-to-handler latency is included. If something else triggered
+    // playback (segment continuation), start a fresh trace here.
+    final bench = PlaybackBenchmark.current ??
+        PlaybackBenchmark.start(
+            quality: widget.quality.param,
+            cameraIds: enabledCameras.map((c) => c.id).toList());
+    bench.mark('start_playback_enter',
+        extra: {'quality': widget.quality.param, 'cameras': enabledCameras.length});
 
     // Set playback start immediately so _getNvrTime returns the intended time
     // even while sessions are still loading (prevents fallback to DateTime.now()
@@ -270,9 +288,13 @@ class _HomeScreenState extends State<HomeScreen> {
       if (_generation != gen || widget.fullscreenCameraId != null) return;
       final cam = enabledCameras[i];
       try {
+        bench.mark('api_request_start', extra: {'camera': cam.id});
         final session = await widget.recordingApi.startPlayback(
           cam.id, start, widget.quality.param,
+          benchId: bench.id,
         );
+        bench.mark('api_response_received',
+            extra: {'camera': cam.id, 'seek_s': session.seekSeconds.toStringAsFixed(2)});
         sessions[cam.id] = session;
       } catch (_) {
         if (_generation == gen && mounted) {
@@ -285,6 +307,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // Set wall clock for accurate master time tracking
     _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
 
+    bench.mark('opening_players');
     for (final entry in sessions.entries) {
       _pbLoading.remove(entry.key);
       _openCameraSession(entry.key, entry.value, gen);
@@ -296,19 +319,28 @@ class _HomeScreenState extends State<HomeScreen> {
   void _openCameraSession(int cameraId, PlaybackSession session, int gen) {
     final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
     final player = _ensurePlayer(cameraId);
+    final bench = PlaybackBenchmark.current;
+    bench?.mark('player_open', extra: {'camera': cameraId});
     player.open(Media(fullUrl));
 
-    // Seek to offset within segment
-    if (session.seekSeconds > 1.0) {
-      _seekSubs[cameraId]?.cancel();
-      _seekSubs[cameraId] = player.stream.duration.listen((dur) {
-        if (dur > Duration.zero && _generation == gen && mounted) {
-          player.seek(Duration(milliseconds: (session.seekSeconds * 1000).round()));
-          _seekSubs[cameraId]?.cancel();
-          _seekSubs.remove(cameraId);
+    // Detect first decoded frame: position stream emits a non-zero value once
+    // the player actually has a frame to render. Only the first camera's first
+    // frame finalizes the bench summary.
+    if (bench != null) {
+      _firstFrameSubs[cameraId]?.cancel();
+      _firstFrameSubs[cameraId] = player.stream.position.listen((pos) {
+        if (pos > Duration.zero && identical(PlaybackBenchmark.current, bench)) {
+          bench.mark('first_frame', extra: {'camera': cameraId});
+          bench.summary(finalPhase: 'bench_complete');
+          _firstFrameSubs[cameraId]?.cancel();
+          _firstFrameSubs.remove(cameraId);
         }
       });
     }
+
+    // No client-side seek: backend ffmpeg pre-seeks via -ss, so the served
+    // fMP4's PTS=0 already corresponds to the user's chosen time. seekSeconds
+    // is metadata-only (timeline display alignment).
 
     // Keep ref session state up-to-date for the selected camera
     if (cameraId == widget.selectedCameraId) {
@@ -327,38 +359,20 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _continueCameraPlayback(int cameraId, String segmentEnd, int gen) async {
     if (_generation != gen || !mounted) return;
     try {
+      // Use master clock as the start so the backend pre-seeks this camera to
+      // the correct point — keeps it aligned with cameras that didn't hit a
+      // segment boundary, without needing a client-side seek inside the fMP4.
+      final masterIso = _masterTimeIso();
+      final start = masterIso ?? segmentEnd;
       final session = await widget.recordingApi.startPlayback(
-        cameraId, segmentEnd, widget.quality.param,
+        cameraId, start, widget.quality.param,
       );
       if (_generation != gen || !mounted) return;
-
-      // Use master clock to seek into the new segment so this camera
-      // stays aligned with cameras that didn't have a segment boundary.
-      final masterIso = _masterTimeIso();
-      double seekOverride = session.seekSeconds;
-      if (masterIso != null) {
-        final masterTime = DateTime.parse(masterIso);
-        final segStart = DateTime.parse(session.segmentStart.isNotEmpty
-            ? session.segmentStart : segmentEnd);
-        final drift = masterTime.difference(segStart).inMilliseconds / 1000.0;
-        if (drift > 0) seekOverride = drift;
-      }
 
       final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
       final player = _pbPlayers[cameraId];
       if (player == null) return;
       player.open(Media(fullUrl));
-
-      if (seekOverride > 1.0) {
-        _seekSubs[cameraId]?.cancel();
-        _seekSubs[cameraId] = player.stream.duration.listen((dur) {
-          if (dur > Duration.zero && _generation == gen && mounted) {
-            player.seek(Duration(milliseconds: (seekOverride * 1000).round()));
-            _seekSubs[cameraId]?.cancel();
-            _seekSubs.remove(cameraId);
-          }
-        });
-      }
 
       _completedSubs[cameraId]?.cancel();
       _completedSubs[cameraId] = player.stream.completed.listen((completed) {
@@ -383,6 +397,10 @@ class _HomeScreenState extends State<HomeScreen> {
       sub.cancel();
     }
     _seekSubs.clear();
+    for (final sub in _firstFrameSubs.values) {
+      sub.cancel();
+    }
+    _firstFrameSubs.clear();
     for (final p in _pbPlayers.values) {
       p.stop();
     }
