@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import '../models/camera.dart';
 import '../models/face.dart';
@@ -115,7 +116,7 @@ class _FacesScreenState extends State<FacesScreen> with SingleTickerProviderStat
         content: TextField(
           controller: controller,
           autofocus: true,
-          decoration: const InputDecoration(hintText: 'e.g. Richard'),
+          decoration: const InputDecoration(hintText: 'e.g. a name'),
           onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
         ),
         actions: [
@@ -128,6 +129,17 @@ class _FacesScreenState extends State<FacesScreen> with SingleTickerProviderStat
       ),
     );
     if (name == null || name.isEmpty) return;
+
+    // Client-side clash detection: if the user typed an existing name, offer
+    // to merge this cluster into that person instead of creating a duplicate.
+    final existing = _faces.where(
+      (f) => (f.name ?? '').toLowerCase() == name.toLowerCase(),
+    ).firstOrNull;
+    if (existing != null) {
+      await _offerMergeForExistingName(c, existing);
+      return;
+    }
+
     try {
       await widget.faceApi.nameCluster(c.id, name);
       if (mounted) {
@@ -137,10 +149,71 @@ class _FacesScreenState extends State<FacesScreen> with SingleTickerProviderStat
         _loadFaces();
         _loadClusters();
       }
+    } on DioException catch (e) {
+      // Defense-in-depth: if _faces was stale (cluster worker created a new
+      // named face since we last loaded), the server will still reject with
+      // 409 — fall back to the merge offer by re-fetching and retrying.
+      if (e.response?.statusCode == 409) {
+        await _loadFaces();
+        final existing = _faces.where(
+          (f) => (f.name ?? '').toLowerCase() == name.toLowerCase(),
+        ).firstOrNull;
+        if (existing != null) {
+          await _offerMergeForExistingName(c, existing);
+          return;
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to name cluster: $e')),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to name cluster: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _offerMergeForExistingName(FaceCluster c, Face existing) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('"${existing.displayName}" already exists'),
+        content: Text(
+          'A person named "${existing.displayName}" is already enrolled with '
+          '${existing.embeddingCount} sample${existing.embeddingCount == 1 ? '' : 's'}. '
+          'Merge this cluster (${c.embeddingCount} face${c.embeddingCount == 1 ? '' : 's'}) '
+          'into them?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Merge'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await widget.faceApi.mergeCluster(c.id, existing.id);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Merged into "${existing.displayName}"')),
+        );
+        _loadFaces();
+        _loadClusters();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Merge failed: $e')),
         );
       }
     }
