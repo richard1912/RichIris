@@ -29,9 +29,9 @@ RichIris is a custom-built NVR (Network Video Recorder). It runs natively on Win
                      │       │  Motion-gated object + face ID      │
                      │       │                                     │
                      │  ┌─────────────────────┐                    │
-                     │  │  IP Cameras (6x)    │                    │
-                     │  │  192.168.8.42-47    │                    │
+                     │  │  IP Cameras (N×)    │                    │
                      │  │  RTSP streams       │                    │
+                     │  │  LAN auto-discover  │                    │
                      │  └─────────────────────┘                    │
                      └─────────────────────────────────────────────┘
 ```
@@ -160,8 +160,8 @@ Flutter (Windows + Android) with media_kit (libmpv) for video playback.
 | Python | 3.13 |
 | Flutter | 3.x |
 | FFmpeg | 7.1.1 |
-| GPU | NVIDIA RTX 4080 SUPER |
+| GPU | NVIDIA (NVENC + DirectML ONNX); AMD/Intel via DirectML; CPU fallback |
 
 ## Network
 
-6 IP cameras on local network (192.168.8.42-47), RTSP streams. HEVC (H.265) at 4K (3840x2160) main stream, HEVC sub-stream (HTMS cameras) / H.264 sub-stream (Reolink).
+Any number of RTSP-capable IP cameras on a private LAN. Main-stream codec HEVC (H.265) or H.264 at the camera's native resolution (4K supported via `-c:v copy` recording). Sub-stream used for motion detection; sub-stream codec is probed per-camera. LAN subnet is auto-detected; users can also enter explicit subnets in the add-cameras wizard.

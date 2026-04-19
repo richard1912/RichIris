@@ -2,11 +2,9 @@
 update claude md as needed for code changes
 ## Quick Reference
 - **Backend**: Windows service `RichIris` via NSSM (FastAPI on port 8700). Restart: `nssm restart RichIris`
-- **Health watchdog (3 layers)**:
+- **Health watchdog (2 layers)**:
   1. **In-process self-watchdog** (`backend/app/services/self_watchdog.py`): probes `127.0.0.1:{port}/api/health` every 30s (60s startup grace, 5s timeout). 3 consecutive failures → `os._exit(1)` → NSSM restarts (AppExit=Restart, throttle 1500ms). Catches the silent-listener-death failure mode where uvicorn's socket dies but the asyncio loop keeps running.
-  2. **External scheduled-task watchdog** (`scripts/watchdog.ps1`, Scheduled Task `RichIris Watchdog` runs as SYSTEM every 60s via `pwsh.exe`): probes health; on failure calls `Restart-Service RichIris` and pushes ntfy (`https://ntfy.richardferretti.com/richiris`, auth via gitignored `scripts/watchdog.config.psd1`). Fallback for full event-loop deadlocks the in-process watchdog can't catch. Logs to `{data_dir}/logs/watchdog.log`. **Requires PowerShell 7 (pwsh) — PS 5.1 parser chokes on the script.**
-  3. **Uptimer HTTP monitor** (`C:\01-Self-Hosting\Uptimer\config\services.js` entry `richiris` → `http://host.docker.internal:8700/api/health`): 60s polling, Gmail alerts on state change. Dashboard: http://localhost:4000.
-  - ntfy user `richiris` has write-only access to topic `richiris` (created via `docker exec immich_ntfy ntfy user add` + `ntfy access`). Subscribe at https://ntfy.richardferretti.com/richiris with credentials.
+  2. **External scheduled-task watchdog** (`scripts/watchdog.ps1`, Scheduled Task runs as SYSTEM every 60s via `pwsh.exe`): probes health; on failure calls `Restart-Service RichIris` and optionally pushes an ntfy notification. Fallback for full event-loop deadlocks the in-process watchdog can't catch. Logs to `{data_dir}/logs/watchdog.log`. **Requires PowerShell 7 (pwsh) — PS 5.1 parser chokes on the script.** User-specific ntfy URL + credentials live in `scripts/watchdog.config.psd1` (gitignored; template: `scripts/watchdog.config.psd1.template`).
 - **go2rtc**: Child process on fixed ports (API 18700, RTSP 18554). Ports reported via `/api/system/status` → `go2rtc_rtsp_port`.
 - **Config**: `bootstrap.yaml` (data_dir + port only). All other settings in SQLite `settings` table via GUI or `GET/PUT /api/settings`. Legacy `config.yaml` migrated to DB on first startup.
 - **Data directory** (`data_dir` from bootstrap.yaml):
@@ -38,7 +36,7 @@ Flutter App → RTSP → go2rtc :18554 (live) | HTTP MP4 → FastAPI:8700 → FF
 - **FrameBroker** (`services/frame_broker.py`): Persistent ffmpeg per camera pulling MJPEG from go2rtc s2_direct at 2fps. Parsed via JPEG SOI/EOI → numpy frames. `get_latest()` (instant) or `get_fresh(max_wait)`. Auto-restarts with 3s backoff. Starts before motion + thumbnails in lifespan.
 - **Live view**: Flutter connects to go2rtc RTSP via media_kit (libmpv). 5s cache, 16MB demuxer, TCP transport, hw decoding. Stall detection (10s), exponential backoff (500ms→10s). HTTP fMP4 proxy retained as fallback.
 - **Playback**: All qualities go through PlaybackManager → fMP4 (`-movflags frag_keyframe+empty_moov`). Direct = `ffmpeg -c copy` remux with `-noaccurate_seek -ss N` pre-seek (server-side seek shifts work off libmpv — first frame faster than letting it scan a raw .ts). High/Low/Ultra Low = HEVC NVENC transcode. Streaming endpoint supports HTTP Range on completed files (libmpv ranged reads); growing files served as plain `200 OK` stream because we can't promise an end byte. **No client-side `player.seek` after open** — fMP4's PTS=0 already corresponds to the user's chosen time. `seek_seconds` in the response is metadata-only (timeline display alignment). Sessions auto-cleanup 30s idle, same-camera eviction.
-- **GPU**: NVIDIA RTX 4080 SUPER (RT-DETR inference + NVENC transcoding)
+- **GPU**: Any NVIDIA card for NVENC transcoding + RT-DETR acceleration (DirectML also works on AMD/Intel; CPU fallback available but slow).
 
 ### Motion + AI Detection
 Snapshot pipeline reading FrameBroker every 0.5s. Motion: running weighted-avg baseline, GaussianBlur(21,21), threshold(25). Sensitivity 0-100 → area threshold `(101-s)*0.05%`. AI: RT-DETR-L ONNX via `onnxruntime-directml` (~11ms GPU inference, CPU fallback). Multi-frame confirmation: 2 detections in 3 frames + bbox movement ≥1.5% diagonal. Categories: persons (COCO 0), vehicles (1,2,3,5,7), animals (14-23). Per-camera toggles + confidence threshold. `motion_scripts` JSON array with per-category triggers. Events: MotionEvent rows, 10s cooldown. Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE, FACE_NAMES. Scripts need full python.exe path (NSSM PATH differs).
@@ -113,9 +111,6 @@ RichIris/
 - **Installer**: Data dir picker (default `C:\ProgramData\RichIris`), creates subdirs, writes bootstrap.yaml, runs `download_deps.ps1`, installs service.
 - **Client-only installer**: Flutter app + VC redist only. LAN auto-discovery via `/api/health` probing. Flavor-aware auto-updater (direct GitHub API check).
 - **Dev setup**: `setup_dev.bat` downloads all deps + installs packages.
-
-## Cameras
-6 cameras on 192.168.8.42-47. HEVC 4K main streams. Sub-streams: HEVC (HTMS 42,44-47), H.264 (Reolink 43).
 
 ## Implementation Phases (all DONE)
 1-6: Foundation, Recording, Live View, Timeline, Clips, Retention, Production

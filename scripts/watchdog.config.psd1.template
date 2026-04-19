@@ -1,0 +1,16 @@
+# Template for scripts/watchdog.config.psd1 — copy this file to
+# `watchdog.config.psd1` (same directory) and fill in your values.
+# The real config file is gitignored so secrets don't end up in git.
+#
+# All keys are optional. If NtfyUrl is omitted, the watchdog still restarts
+# the service on health-check failures — it just won't send push notifications.
+@{
+    # Ntfy topic URL the watchdog posts to on service-restart events.
+    # Example: 'https://ntfy.example.com/mynvr'
+    # Leave unset (comment out / remove) to disable push notifications.
+    NtfyUrl      = ''
+
+    # Optional HTTP Basic credentials if your ntfy topic requires auth.
+    NtfyUser     = ''
+    NtfyPassword = ''
+}
