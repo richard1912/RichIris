@@ -1003,6 +1003,7 @@ class _MainNavState extends State<_MainNav> {
               ));
               await widget.onRefreshCameras();
             },
+            onAddToGroup: () => _showAssignGroupSheet(fullscreenCam),
             playbackRef: _fullscreenRef,
             initialPlaybackTime: _fullscreenInitialTime,
             initialPbPlayer: _handoffPlayer,

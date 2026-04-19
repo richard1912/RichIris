@@ -3,6 +3,8 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../models/camera.dart';
 import '../models/system_status.dart';
+import 'feature_badges.dart';
+import 'icon_chip.dart';
 import 'live_player.dart';
 
 class CameraCard extends StatefulWidget {
@@ -161,49 +163,21 @@ class _CameraCardState extends State<CameraCard> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        Tooltip(
-                          message: 'Edit camera settings',
-                          child: Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              onTap: widget.onEdit,
-                              borderRadius: BorderRadius.circular(4),
-                              child: Container(
-                                padding: const EdgeInsets.all(4),
-                                decoration: BoxDecoration(
-                                  color: Colors.black54,
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: const Icon(Icons.settings,
-                                    size: 14, color: Color(0xFFA3A3A3)),
-                              ),
-                            ),
-                          ),
+                        IconChip(
+                          icon: Icons.settings,
+                          tooltip: 'Edit camera settings',
+                          onTap: widget.onEdit,
                         ),
                         if (widget.onAddToGroup != null) ...[
                           const SizedBox(height: 3),
-                          Tooltip(
-                            message: 'Add to group',
-                            child: Material(
-                              color: Colors.transparent,
-                              child: InkWell(
-                                onTap: widget.onAddToGroup,
-                                borderRadius: BorderRadius.circular(4),
-                                child: Container(
-                                  padding: const EdgeInsets.all(4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.black54,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: const Icon(Icons.add,
-                                      size: 14, color: Color(0xFFA3A3A3)),
-                                ),
-                              ),
-                            ),
+                          IconChip(
+                            icon: Icons.add,
+                            tooltip: 'Add to group',
+                            onTap: widget.onAddToGroup,
                           ),
                         ],
                         const SizedBox(height: 3),
-                        _FeatureBadges(camera: widget.camera),
+                        FeatureBadges(camera: widget.camera),
                       ],
                     ),
                   ),
@@ -349,89 +323,3 @@ class _CameraCardState extends State<CameraCard> {
   }
 }
 
-/// Small row of icons shown under the settings gear, indicating which
-/// detection / automation features are enabled on a camera. Helps users
-/// see at a glance whether a camera is armed for motion, AI, face
-/// recognition, zoned, or has active scripts — without opening the form.
-class _FeatureBadges extends StatelessWidget {
-  final Camera camera;
-  const _FeatureBadges({required this.camera});
-
-  @override
-  Widget build(BuildContext context) {
-    final badges = <_Badge>[];
-    if (camera.motionSensitivity > 0) {
-      badges.add(const _Badge(
-        icon: Icons.directions_run,
-        color: Color(0xFF6B7280),
-        tooltip: 'Motion detection enabled',
-      ));
-    }
-    if (camera.motionSensitivity > 0 && camera.aiDetection) {
-      badges.add(const _Badge(
-        icon: Icons.psychology,
-        color: Color(0xFF3B82F6),
-        tooltip: 'AI object detection enabled',
-      ));
-    }
-    if (camera.faceRecognition && camera.aiDetectPersons) {
-      badges.add(const _Badge(
-        icon: Icons.face,
-        color: Color(0xFF06B6D4),
-        tooltip: 'Face recognition enabled',
-      ));
-    }
-    if (camera.zoneCount > 0) {
-      badges.add(_Badge(
-        icon: Icons.hexagon_outlined,
-        color: const Color(0xFF8B5CF6),
-        tooltip: '${camera.zoneCount} detection zone${camera.zoneCount == 1 ? '' : 's'}',
-      ));
-    }
-    final scriptCount = camera.motionScripts
-        .where((s) =>
-            (s.on != null && s.on!.trim().isNotEmpty) ||
-            (s.off != null && s.off!.trim().isNotEmpty))
-        .length;
-    if (scriptCount > 0) {
-      badges.add(_Badge(
-        icon: Icons.code,
-        color: const Color(0xFF22C55E),
-        tooltip: '$scriptCount script${scriptCount == 1 ? '' : 's'} configured',
-      ));
-    }
-    if (badges.isEmpty) return const SizedBox.shrink();
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        for (var i = 0; i < badges.length; i++) ...[
-          if (i > 0) const SizedBox(height: 3),
-          badges[i],
-        ],
-      ],
-    );
-  }
-}
-
-class _Badge extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final String tooltip;
-  const _Badge({required this.icon, required this.color, required this.tooltip});
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: tooltip,
-      child: Container(
-        padding: const EdgeInsets.all(4),
-        decoration: BoxDecoration(
-          color: Colors.black54,
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: Icon(icon, size: 14, color: color),
-      ),
-    );
-  }
-}

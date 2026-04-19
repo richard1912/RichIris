@@ -17,6 +17,8 @@ import '../utils/time_utils.dart';
 import '../utils/format_utils.dart';
 import '../models/playback_ref.dart';
 import '../widgets/bug_report_dialog.dart';
+import '../widgets/feature_badges.dart';
+import '../widgets/icon_chip.dart';
 import '../widgets/live_player.dart';
 import '../widgets/quality_selector.dart';
 import '../widgets/zoomable_video.dart';
@@ -40,6 +42,7 @@ class FullscreenScreen extends StatefulWidget {
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback? onBack;
   final ValueChanged<Camera>? onEditCamera;
+  final VoidCallback? onAddToGroup;
   final Player? livePlayer;
   final VideoController? liveController;
   final PlaybackRef playbackRef;
@@ -67,6 +70,7 @@ class FullscreenScreen extends StatefulWidget {
     required this.onStreamSourceChanged,
     this.onBack,
     this.onEditCamera,
+    this.onAddToGroup,
     this.livePlayer,
     this.liveController,
     required this.playbackRef,
@@ -132,6 +136,11 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       _pbPlayer = widget.initialPbPlayer;
       _pbController = widget.initialPbController ?? VideoController(_pbPlayer!);
       _isLive = false;
+      // Grid's player is already decoding — surface frames immediately.
+      // Without this the black overlay (gated on _pbVideoReady, normally
+      // flipped by _ensurePlayer's position listener) sits on top of the
+      // video forever since _ensurePlayer early-returns on the adopt path.
+      _pbVideoReady = true;
       _playbackStartTime = widget.initialPlaybackStartTime;
       _playbackUrl = 'adopted';
       _virtualTimeMs = _playbackStartTime != null
@@ -704,6 +713,49 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     );
   }
 
+  /// Top-right chip cluster — matches the grid camera card's styling 1:1.
+  /// Order mirrors the grid layout: action icons (stats/bug/refresh/settings/+)
+  /// first, then the feature badges column at the end.
+  List<Widget> _buildHeaderChips() {
+    return [
+      IconChip(
+        icon: Icons.bar_chart,
+        tooltip: 'Video Stats',
+        onTap: _toggleStats,
+      ),
+      const SizedBox(width: 3),
+      IconChip(
+        icon: Icons.bug_report,
+        tooltip: 'Report a Bug',
+        onTap: () => _showBugReportDialog(context),
+      ),
+      const SizedBox(width: 3),
+      IconChip(
+        icon: Icons.refresh,
+        tooltip: 'Refresh feed',
+        onTap: _refreshFeed,
+      ),
+      if (widget.onEditCamera != null) ...[
+        const SizedBox(width: 3),
+        IconChip(
+          icon: Icons.settings,
+          tooltip: 'Edit camera settings',
+          onTap: () => widget.onEditCamera!(widget.camera),
+        ),
+      ],
+      if (widget.onAddToGroup != null) ...[
+        const SizedBox(width: 3),
+        IconChip(
+          icon: Icons.add,
+          tooltip: 'Add to group',
+          onTap: widget.onAddToGroup,
+        ),
+      ],
+      const SizedBox(width: 3),
+      FeatureBadges(camera: widget.camera),
+    ];
+  }
+
   Widget _buildHeader(bool running) {
     final isAndroid = Platform.isAndroid;
     return Container(
@@ -741,28 +793,6 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                   ),
                 ),
                 const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.bar_chart, size: 20),
-                  tooltip: 'Video Stats',
-                  onPressed: _toggleStats,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.bug_report, size: 20),
-                  tooltip: 'Report a Bug',
-                  onPressed: () => _showBugReportDialog(context),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                ),
-                if (widget.onEditCamera != null)
-                  IconButton(
-                    icon: const Icon(Icons.settings, size: 20),
-                    tooltip: 'Camera Settings',
-                    onPressed: () => widget.onEditCamera!(widget.camera),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                  ),
                 if (!isAndroid) ...[
                   if (_isLive && widget.stream?.uptimeSeconds != null)
                     Padding(
@@ -790,15 +820,9 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                     onChanged: widget.onQualityChanged,
                     isLive: _isLive,
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.refresh, size: 20),
-                    tooltip: 'Refresh feed',
-                    onPressed: _refreshFeed,
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 36, minHeight: 32),
-                  ),
+                  const SizedBox(width: 6),
                 ],
+                ..._buildHeaderChips(),
               ],
             ),
             if (isAndroid)
@@ -832,14 +856,6 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                       value: widget.quality,
                       onChanged: widget.onQualityChanged,
                       isLive: _isLive,
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.refresh, size: 20),
-                      tooltip: 'Refresh feed',
-                      onPressed: _refreshFeed,
-                      padding: EdgeInsets.zero,
-                      constraints:
-                          const BoxConstraints(minWidth: 36, minHeight: 32),
                     ),
                   ],
                 ),
