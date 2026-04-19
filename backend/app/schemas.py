@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 
 class MotionScriptConfig(BaseModel):
+    name: str | None = None  # user-editable label; None → UI shows default "Script N"
     on: str | None = None
     off: str | None = None
     persons: bool = True
@@ -15,6 +16,42 @@ class MotionScriptConfig(BaseModel):
     off_delay: int = 10  # seconds after last motion before off-script runs
     faces: list[int] = []  # if non-empty, fires only when any listed Face id is present
     face_unknown: bool = False  # fires when an unknown face is detected
+    zone_ids: list[int] = []  # if non-empty, script fires only when trigger falls inside any listed zone
+
+
+class ZoneCreate(BaseModel):
+    name: str
+    points: list[list[float]]  # [[x,y],...] normalized 0..1
+
+
+class ZoneUpdate(BaseModel):
+    name: str | None = None
+    points: list[list[float]] | None = None
+
+
+class ZoneResponse(BaseModel):
+    id: int
+    camera_id: int
+    name: str
+    points: list[list[float]]
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_zone(cls, zone):
+        import json
+        try:
+            points = json.loads(zone.points_json)
+        except (json.JSONDecodeError, TypeError):
+            points = []
+        return cls(
+            id=zone.id,
+            camera_id=zone.camera_id,
+            name=zone.name,
+            points=points,
+            created_at=zone.created_at,
+            updated_at=zone.updated_at,
+        )
 
 
 class CameraGroupCreate(BaseModel):
@@ -101,12 +138,13 @@ class CameraResponse(BaseModel):
     ai_confidence_threshold: int = 50
     face_recognition: bool = False
     face_match_threshold: int = 50
+    zone_count: int = 0
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
     @classmethod
-    def from_camera(cls, camera):
+    def from_camera(cls, camera, zone_count: int = 0):
         import json
         scripts = []
         if camera.motion_scripts:
@@ -116,6 +154,7 @@ class CameraResponse(BaseModel):
                 pass
         data = {c.key: getattr(camera, c.key) for c in camera.__table__.columns}
         data["motion_scripts"] = scripts
+        data["zone_count"] = zone_count
         return cls(**data)
 
 
@@ -136,6 +175,8 @@ class MotionEventResponse(BaseModel):
     has_thumbnail: bool = False
     face_matches: list[FaceMatchInfo] = []
     face_unknown: bool = False
+    scripts_fired: list[str] = []
+    zones_triggered: list[str] = []
 
     model_config = {"from_attributes": True}
 
@@ -149,6 +190,24 @@ class MotionEventResponse(BaseModel):
                     matches.append(FaceMatchInfo(**m))
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
+        fired: list[str] = []
+        raw_fired = getattr(event, "scripts_fired", None)
+        if raw_fired:
+            try:
+                parsed = json.loads(raw_fired)
+                if isinstance(parsed, list):
+                    fired = [str(x) for x in parsed]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        zones: list[str] = []
+        raw_zones = getattr(event, "zones_triggered", None)
+        if raw_zones:
+            try:
+                parsed = json.loads(raw_zones)
+                if isinstance(parsed, list):
+                    zones = [str(x) for x in parsed]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
         return cls(
             id=event.id,
             camera_id=event.camera_id,
@@ -160,6 +219,8 @@ class MotionEventResponse(BaseModel):
             has_thumbnail=bool(event.thumbnail_path),
             face_matches=matches,
             face_unknown=bool(getattr(event, "face_unknown", False)),
+            scripts_fired=fired,
+            zones_triggered=zones,
         )
 
 
@@ -184,13 +245,36 @@ class FaceEmbeddingInfo(BaseModel):
 
 class FaceResponse(BaseModel):
     id: int
-    name: str
+    # Nullable: null = auto-clustered suggestion (unassigned person).
+    name: str | None = None
     notes: str | None = None
     embedding_count: int = 0
     latest_crop_path: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class FaceClusterResponse(BaseModel):
+    """Suggested person: an unnamed Face with its embedding count + sample crops."""
+    id: int
+    embedding_count: int
+    # Embedding IDs of up to 4 best-score crops. The UI fetches each via
+    # GET /api/faces/embeddings/{id}/crop to render the mosaic.
+    sample_embedding_ids: list[int] = []
+    latest_event_time: datetime | None = None
+    cameras_seen: list[str] = []  # distinct camera names from associated motion events
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FaceClusterNameRequest(BaseModel):
+    name: str
+
+
+class FaceClusterMergeRequest(BaseModel):
+    target_face_id: int
 
 
 class FaceEnrollRequest(BaseModel):

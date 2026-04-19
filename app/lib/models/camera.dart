@@ -1,4 +1,5 @@
 class MotionScriptConfig {
+  String? name;
   String? on;
   String? off;
   bool persons;
@@ -8,8 +9,10 @@ class MotionScriptConfig {
   int offDelay;
   List<int> faces;
   bool faceUnknown;
+  List<int> zoneIds;
 
   MotionScriptConfig({
+    this.name,
     this.on,
     this.off,
     this.persons = true,
@@ -19,10 +22,12 @@ class MotionScriptConfig {
     this.offDelay = 10,
     this.faces = const [],
     this.faceUnknown = false,
+    this.zoneIds = const [],
   });
 
   factory MotionScriptConfig.fromJson(Map<String, dynamic> json) =>
       MotionScriptConfig(
+        name: json['name'] as String?,
         on: json['on'] as String?,
         off: json['off'] as String?,
         persons: json['persons'] as bool? ?? true,
@@ -34,9 +39,13 @@ class MotionScriptConfig {
             .map((e) => e as int)
             .toList(),
         faceUnknown: json['face_unknown'] as bool? ?? false,
+        zoneIds: ((json['zone_ids'] as List<dynamic>?) ?? [])
+            .map((e) => e as int)
+            .toList(),
       );
 
   Map<String, dynamic> toJson() => {
+        'name': name,
         'on': on,
         'off': off,
         'persons': persons,
@@ -46,9 +55,11 @@ class MotionScriptConfig {
         'off_delay': offDelay,
         'faces': faces,
         'face_unknown': faceUnknown,
+        'zone_ids': zoneIds,
       };
 
   MotionScriptConfig copy() => MotionScriptConfig(
+        name: name,
         on: on,
         off: off,
         persons: persons,
@@ -58,6 +69,7 @@ class MotionScriptConfig {
         offDelay: offDelay,
         faces: List<int>.from(faces),
         faceUnknown: faceUnknown,
+        zoneIds: List<int>.from(zoneIds),
       );
 }
 
@@ -85,6 +97,7 @@ class Camera {
   final int aiConfidenceThreshold;
   final bool faceRecognition;
   final int faceMatchThreshold;
+  final int zoneCount;
   final String createdAt;
 
   Camera({
@@ -110,7 +123,8 @@ class Camera {
     this.aiDetectAnimals = false,
     this.aiConfidenceThreshold = 50,
     this.faceRecognition = false,
-    this.faceMatchThreshold = 50,
+    this.faceMatchThreshold = 60,
+    this.zoneCount = 0,
     required this.createdAt,
   });
 
@@ -140,7 +154,8 @@ class Camera {
         aiDetectAnimals: json['ai_detect_animals'] as bool? ?? false,
         aiConfidenceThreshold: json['ai_confidence_threshold'] as int? ?? 50,
         faceRecognition: json['face_recognition'] as bool? ?? false,
-        faceMatchThreshold: json['face_match_threshold'] as int? ?? 50,
+        faceMatchThreshold: json['face_match_threshold'] as int? ?? 60,
+        zoneCount: json['zone_count'] as int? ?? 0,
         createdAt: json['created_at'] as String,
       );
 

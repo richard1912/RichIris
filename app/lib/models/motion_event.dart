@@ -23,6 +23,8 @@ class MotionEvent {
   final bool hasThumbnail;
   final List<FaceMatch> faceMatches;
   final bool faceUnknown;
+  final List<String> scriptsFired;
+  final List<String> zonesTriggered;
 
   MotionEvent({
     required this.id,
@@ -35,6 +37,8 @@ class MotionEvent {
     this.hasThumbnail = false,
     this.faceMatches = const [],
     this.faceUnknown = false,
+    this.scriptsFired = const [],
+    this.zonesTriggered = const [],
   });
 
   factory MotionEvent.fromJson(Map<String, dynamic> json) => MotionEvent(
@@ -50,5 +54,11 @@ class MotionEvent {
             .map((e) => FaceMatch.fromJson(e as Map<String, dynamic>))
             .toList(),
         faceUnknown: json['face_unknown'] as bool? ?? false,
+        scriptsFired: ((json['scripts_fired'] as List<dynamic>?) ?? [])
+            .map((e) => e as String)
+            .toList(),
+        zonesTriggered: ((json['zones_triggered'] as List<dynamic>?) ?? [])
+            .map((e) => e as String)
+            .toList(),
       );
 }

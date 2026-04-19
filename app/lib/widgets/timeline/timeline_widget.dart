@@ -240,6 +240,8 @@ class _TimelineWidgetState extends State<TimelineWidget> {
     }
   }
 
+  static const double _maxThumbStalenessSecs = 120;
+
   String? _findNearestThumbUrl(double hour) {
     if (_thumbnails.isEmpty) return null;
     final targetSecs = hour * 3600;
@@ -258,7 +260,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
         best = t;
       }
     }
-    if (best == null) return null;
+    // Don't display a stale thumbnail when the camera had a capture gap —
+    // the old frame may show activity that isn't present at the hovered time.
+    if (best == null || bestDist > _maxThumbStalenessSecs) return null;
     return widget.recordingApi.getThumbnailUrl(best.url);
   }
 
@@ -295,7 +299,11 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       thumbUrl = _findNearestThumbUrl(scrubHour);
     }
 
-    if (thumbUrl == null) return;
+    if (thumbUrl == null) {
+      _thumbOverlay?.remove();
+      _thumbOverlay = null;
+      return;
+    }
     final box = _barKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.attached) return;
     final barPos = box.localToGlobal(Offset.zero);
@@ -333,81 +341,138 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       left: _thumbLeft,
       top: _thumbTop,
       child: IgnorePointer(
-        child: Container(
-          width: 320,
-          height: 180,
-          decoration: BoxDecoration(
-            color: Colors.black,
-            border: Border.all(color: borderColor, width: isMotion ? 2 : 1),
-            borderRadius: BorderRadius.circular(4),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Stack(
-            children: [
-              Image.network(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 320,
+              height: 180,
+              decoration: BoxDecoration(
+                color: Colors.black,
+                border: Border.all(color: borderColor, width: isMotion ? 2 : 1),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Image.network(
                 _thumbSrc,
-                fit: BoxFit.cover,
+                fit: BoxFit.fill,
                 width: 320,
                 height: 180,
                 gaplessPlayback: true,
                 errorBuilder: (_, __, ___) => const SizedBox.shrink(),
               ),
-              if (isMotion)
-                Positioned(
-                  bottom: 4,
-                  left: 4,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: const Color(0xCC000000),
-                      borderRadius: BorderRadius.circular(3),
-                      border: Border.all(
-                        color: motionColor,
-                        width: 0.5,
-                      ),
-                    ),
-                    child: Text(
-                      () {
-                        final e = _hoverMotionEvent!;
-                        final minSens = (101 - e.peakIntensity / 0.05).clamp(0, 100).round();
-                        // Prefer face identity over the raw detection label.
-                        // - Known face(s): "Richard 63%" (or "Richard, Alice" when multiple)
-                        // - Unknown face:  "Unknown face | person 92%"
-                        // - No face data:  "person 92%"
-                        String ai = '';
-                        if (e.faceMatches.isNotEmpty) {
-                          final names = e.faceMatches.map((m) => m.name).join(', ');
-                          final top = e.faceMatches
-                              .map((m) => m.confidence)
-                              .reduce((a, b) => a > b ? a : b);
-                          ai = '$names ${(top * 100).round()}% | ';
-                        } else if (e.faceUnknown) {
-                          final base = e.detectionLabel != null
-                              ? '${e.detectionLabel}${e.detectionConfidence != null ? ' ${(e.detectionConfidence! * 100).round()}%' : ''}'
-                              : 'person';
-                          ai = 'Unknown face | $base | ';
-                        } else if (e.detectionLabel != null) {
-                          ai = '${e.detectionLabel}${e.detectionConfidence != null ? ' ${(e.detectionConfidence! * 100).round()}%' : ''} | ';
-                        }
-                        final dt = DateTime.tryParse(e.startTime);
-                        final ts = dt != null
-                            ? '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}'
-                            : '';
-                        return '${ts.isNotEmpty ? '$ts | ' : ''}${ai}min sens $minSens';
-                      }(),
-                      style: TextStyle(
-                        color: motionColor,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
+            ),
+            if (isMotion) ...[
+              const SizedBox(width: 3),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xCC000000),
+                  borderRadius: BorderRadius.circular(3),
+                  border: Border.all(color: motionColor, width: 0.5),
+                ),
+                child: DefaultTextStyle(
+                  style: const TextStyle(decoration: TextDecoration.none),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: _buildThumbTooltipLines(_hoverMotionEvent!),
                   ),
                 ),
+              ),
             ],
-          ),
+          ],
         ),
       ),
     );
+  }
+
+  /// One row = one icon + text, matching the camera-card feature badges:
+  /// motion (amber), AI (blue), face (cyan), zone (violet), script (green).
+  Widget _tooltipRow(IconData icon, Color color, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 1),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 10, color: color),
+          const SizedBox(width: 3),
+          Flexible(
+            child: Text(
+              text,
+              style: TextStyle(
+                color: color,
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildThumbTooltipLines(MotionEvent e) {
+    const motionGrey = Color(0xFF6B7280);
+    const faceCyan = Color(0xFF06B6D4);
+    const zoneViolet = Color(0xFF8B5CF6);
+    const scriptGreen = Color(0xFF22C55E);
+
+    final minSens = (101 - e.peakIntensity / 0.05).clamp(0, 100).round();
+    final dt = DateTime.tryParse(e.startTime);
+    final ts = dt != null
+        ? '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}'
+        : '';
+
+    final lines = <Widget>[];
+
+    if (ts.isNotEmpty) {
+      lines.add(Text(
+        ts,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+        ),
+      ));
+    }
+
+    lines.add(_tooltipRow(
+        Icons.directions_run, motionGrey, 'sensitivity $minSens'));
+
+    if (e.detectionLabel != null) {
+      final conf = e.detectionConfidence != null
+          ? ' ${(e.detectionConfidence! * 100).round()}%'
+          : '';
+      // Tint by detection category (person=amber, vehicle=indigo, animal=emerald)
+      // so labels match their timeline bar and camera-card AI badge tint.
+      final aiColor = DetectionColors.forLabel(e.detectionLabel);
+      lines.add(_tooltipRow(Icons.psychology, aiColor, '${e.detectionLabel}$conf'));
+    }
+
+    if (e.faceMatches.isNotEmpty) {
+      final names = e.faceMatches.map((m) => m.name).join(', ');
+      final top = e.faceMatches
+          .map((m) => m.confidence)
+          .reduce((a, b) => a > b ? a : b);
+      lines.add(_tooltipRow(
+          Icons.face, faceCyan, '$names ${(top * 100).round()}%'));
+    } else if (e.faceUnknown) {
+      lines.add(_tooltipRow(
+          Icons.face, DetectionColors.faceUnknown, 'Unknown face'));
+    }
+
+    for (final zname in e.zonesTriggered) {
+      lines.add(_tooltipRow(Icons.hexagon_outlined, zoneViolet, zname));
+    }
+
+    for (final name in e.scriptsFired) {
+      lines.add(_tooltipRow(Icons.code, scriptGreen, name));
+    }
+
+    return lines;
   }
 
   void _startPlayheadTimer() {

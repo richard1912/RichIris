@@ -256,6 +256,42 @@ async def init_db() -> None:
             logger.info("Migration: added face_detected column to motion_events")
         except Exception:
             pass
+    # Migrate: add scripts_fired column to motion_events (JSON list of display-name
+    # snapshots captured at firing time; None for pre-migration events).
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE motion_events ADD COLUMN scripts_fired TEXT")
+            )
+            logger.info("Migration: added scripts_fired column to motion_events")
+        except Exception:
+            pass
+    # Migrate: add zones_triggered column to motion_events (JSON list of zone-name
+    # snapshots; None for events outside any zone or pre-migration rows).
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE motion_events ADD COLUMN zones_triggered TEXT")
+            )
+            logger.info("Migration: added zones_triggered column to motion_events")
+        except Exception:
+            pass
+    # Index the enrollment-picker query path so growth past 10k+ events doesn't
+    # drag the unlabeled-thumbs endpoint.
+    async with engine.begin() as conn:
+        for name, ddl in [
+            ("ix_motion_events_label_start",
+             "CREATE INDEX IF NOT EXISTS ix_motion_events_label_start "
+             "ON motion_events (detection_label, start_time)"),
+            ("ix_face_embeddings_source_path",
+             "CREATE INDEX IF NOT EXISTS ix_face_embeddings_source_path "
+             "ON face_embeddings (source_thumbnail_path)"),
+        ]:
+            try:
+                await conn.execute(text(ddl))
+                logger.info(f"Migration: ensured index {name}")
+            except Exception:
+                logger.exception(f"Migration: failed to create index {name}")
     # Migrate: add face_crop_path to face_embeddings (for existing deployments where table was created without it)
     async with engine.begin() as conn:
         try:
@@ -285,12 +321,93 @@ async def init_db() -> None:
         except Exception:
             logger.exception("Migration: failed to convert legacy motion scripts")
 
+    # Migrate face_embeddings: add clustering columns (source, detection_score, source_motion_event_id)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE face_embeddings ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'user_enrolled'")
+            )
+            logger.info("Migration: added source column to face_embeddings")
+        except Exception:
+            pass
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE face_embeddings ADD COLUMN detection_score FLOAT")
+            )
+            logger.info("Migration: added detection_score column to face_embeddings")
+        except Exception:
+            pass
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE face_embeddings ADD COLUMN source_motion_event_id INTEGER REFERENCES motion_events(id) ON DELETE SET NULL")
+            )
+            logger.info("Migration: added source_motion_event_id column to face_embeddings")
+        except Exception:
+            pass
+
     # Seed default settings into the settings table
     from app.config import get_bootstrap
-    from app.services.settings import seed_defaults
+    from app.services.settings import get_setting, seed_defaults, set_setting
     factory = get_session_factory()
     async with factory() as session:
         await seed_defaults(session, data_dir=get_bootstrap().data_dir)
+
+    # One-shot migration: bump cameras still on the old face_match_threshold
+    # default (50, cosine 0.50) up to the new default (60, cosine 0.60) once.
+    # Guarded by a settings marker so user tweaks post-migration are preserved.
+    MARKER = "migration_face_threshold_60_v1"
+    async with factory() as session:
+        if not await get_setting(session, MARKER):
+            res = await session.execute(
+                text("UPDATE cameras SET face_match_threshold = 60 WHERE face_match_threshold = 50")
+            )
+            await set_setting(session, MARKER, "1")
+            await session.commit()
+            if res.rowcount:
+                logger.info("Migration: bumped face_match_threshold 50→60 on %d cameras", res.rowcount)
+
+    # One-shot migration: rebuild `faces` table to make `name` nullable
+    # (SQLite can't ALTER COLUMN). Null name = auto-clustered suggestion.
+    # Partial unique index preserves uniqueness for named people.
+    FACES_MARKER = "migration_faces_nullable_name_v1"
+    async with factory() as session:
+        already = await get_setting(session, FACES_MARKER)
+    if not already:
+        async with engine.begin() as conn:
+            # Detect current nullability — skip if already migrated (fresh install)
+            info = (await conn.execute(text("PRAGMA table_info(faces)"))).fetchall()
+            name_col = next((r for r in info if r[1] == "name"), None)
+            needs_rebuild = name_col is not None and int(name_col[3]) == 1
+            if needs_rebuild:
+                await conn.execute(text("PRAGMA foreign_keys = OFF"))
+                await conn.execute(text("ALTER TABLE faces RENAME TO _faces_legacy"))
+                await conn.execute(text(
+                    "CREATE TABLE faces ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "name VARCHAR(100), "
+                    "notes VARCHAR(500), "
+                    "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+                    ")"
+                ))
+                await conn.execute(text(
+                    "INSERT INTO faces (id, name, notes, created_at) "
+                    "SELECT id, name, notes, created_at FROM _faces_legacy"
+                ))
+                await conn.execute(text("DROP TABLE _faces_legacy"))
+                await conn.execute(text("PRAGMA foreign_keys = ON"))
+                logger.info("Migration: rebuilt faces table with nullable name")
+            try:
+                await conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_faces_name_unique_non_null "
+                    "ON faces(name) WHERE name IS NOT NULL"
+                ))
+            except Exception:
+                logger.exception("Migration: failed to create partial unique index on faces.name")
+        async with factory() as session:
+            await set_setting(session, FACES_MARKER, "1")
+            await session.commit()
 
     logger.info("Database tables created")
 

@@ -2,15 +2,22 @@ import 'package:flutter/material.dart';
 import '../models/camera.dart';
 import '../models/camera_group.dart';
 import '../models/face.dart';
+import '../models/zone.dart';
 import '../services/api_client.dart';
 import '../services/camera_api.dart';
 import '../services/face_api.dart';
 import '../services/group_api.dart';
+import '../services/zone_api.dart';
 import '../utils/detection_colors.dart';
 import '../widgets/rtsp_wizard_dialog.dart';
 import '../widgets/script_wizard_dialog.dart';
+import 'zone_editor_screen.dart';
 
 class _ScriptEntry {
+  String? name;
+  bool editingName;
+  final TextEditingController nameCtrl;
+  final FocusNode nameFocus;
   final TextEditingController onCtrl;
   final TextEditingController offCtrl;
   bool persons;
@@ -20,8 +27,10 @@ class _ScriptEntry {
   int offDelay;
   List<int> faces;
   bool faceUnknown;
+  List<int> zoneIds;
 
   _ScriptEntry({
+    this.name,
     required this.onCtrl,
     required this.offCtrl,
     this.persons = true,
@@ -31,7 +40,12 @@ class _ScriptEntry {
     this.offDelay = 10,
     List<int>? faces,
     this.faceUnknown = false,
-  }) : faces = faces ?? [];
+    List<int>? zoneIds,
+  })  : editingName = false,
+        nameCtrl = TextEditingController(text: name ?? ''),
+        nameFocus = FocusNode(),
+        faces = faces ?? [],
+        zoneIds = zoneIds ?? [];
 }
 
 class CameraFormScreen extends StatefulWidget {
@@ -77,6 +91,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
   late bool _faceRecognition;
   late int _faceMatchThreshold;
   List<Face> _knownFaces = [];
+  List<Zone> _zones = [];
+  late final ZoneApi _zoneApi;
   int? _groupId;
   bool _saving = false;
   String? _error;
@@ -125,6 +141,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     // Build script entries from motionScripts list
     final scripts = widget.camera?.motionScripts ?? [];
     _scriptEntries = scripts.map((s) => _ScriptEntry(
+      name: s.name,
       onCtrl: TextEditingController(text: s.on ?? ''),
       offCtrl: TextEditingController(text: s.off ?? ''),
       persons: s.persons,
@@ -134,16 +151,19 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       offDelay: s.offDelay,
       faces: List<int>.from(s.faces),
       faceUnknown: s.faceUnknown,
+      zoneIds: List<int>.from(s.zoneIds),
     )).toList();
+    _zoneApi = ZoneApi(widget.apiClient);
     _aiDetection = widget.camera?.aiDetection ?? true;
     _aiDetectPersons = widget.camera?.aiDetectPersons ?? true;
     _aiDetectVehicles = widget.camera?.aiDetectVehicles ?? true;
     _aiDetectAnimals = widget.camera?.aiDetectAnimals ?? true;
     _aiConfidenceThreshold = widget.camera?.aiConfidenceThreshold ?? 50;
     _faceRecognition = widget.camera?.faceRecognition ?? false;
-    _faceMatchThreshold = widget.camera?.faceMatchThreshold ?? 50;
+    _faceMatchThreshold = widget.camera?.faceMatchThreshold ?? 60;
     _groupId = widget.camera?.groupId ?? widget.initialGroupId;
     _loadFaces();
+    _loadZones();
   }
 
   Future<void> _loadFaces() async {
@@ -153,6 +173,71 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       if (mounted) setState(() => _knownFaces = faces);
     } catch (_) {
       // Non-fatal: form still works without face filter UI
+    }
+  }
+
+  Future<void> _loadZones() async {
+    if (widget.camera == null) return; // zones require a persisted camera id
+    try {
+      final zones = await _zoneApi.listForCamera(widget.camera!.id);
+      if (!mounted) return;
+      setState(() {
+        _zones = zones;
+        // Drop any stale zone references from scripts (zone may have been
+        // deleted server-side since the camera was last loaded).
+        final validIds = zones.map((z) => z.id).toSet();
+        for (final e in _scriptEntries) {
+          e.zoneIds = e.zoneIds.where(validIds.contains).toList();
+        }
+      });
+    } catch (_) {
+      // Non-fatal: form still works without zones
+    }
+  }
+
+  Future<void> _openZoneEditor({Zone? zone}) async {
+    if (widget.camera == null) return;
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ZoneEditorScreen(
+          cameraApi: widget.cameraApi,
+          zoneApi: _zoneApi,
+          camera: widget.camera!,
+          zone: zone,
+        ),
+      ),
+    );
+    if (saved == true) await _loadZones();
+  }
+
+  Future<void> _deleteZone(Zone zone) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete "${zone.name}"?'),
+        content: const Text('Any scripts restricted to this zone will have the restriction removed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _zoneApi.delete(cameraId: widget.camera!.id, zoneId: zone.id);
+      if (mounted) {
+        setState(() {
+          _zones = _zones.where((z) => z.id != zone.id).toList();
+          for (final e in _scriptEntries) {
+            e.zoneIds = e.zoneIds.where((id) => id != zone.id).toList();
+          }
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')),
+      );
     }
   }
 
@@ -166,6 +251,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     for (final e in _scriptEntries) {
       e.onCtrl.dispose();
       e.offCtrl.dispose();
+      e.nameCtrl.dispose();
+      e.nameFocus.dispose();
     }
     super.dispose();
   }
@@ -188,7 +275,9 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
         final scriptsList = _scriptEntries
             .where((e) => e.onCtrl.text.trim().isNotEmpty || e.offCtrl.text.trim().isNotEmpty)
             .map((e) {
+              final trimmedName = e.name?.trim();
               return <String, dynamic>{
+                'name': (trimmedName == null || trimmedName.isEmpty) ? null : trimmedName,
                 'on': e.onCtrl.text.trim().isEmpty ? null : e.onCtrl.text.trim(),
                 'off': e.offCtrl.text.trim().isEmpty ? null : e.offCtrl.text.trim(),
                 'persons': e.persons,
@@ -198,6 +287,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 'off_delay': e.offDelay,
                 'faces': e.faces,
                 'face_unknown': e.faceUnknown,
+                'zone_ids': e.zoneIds,
               };
             })
             .toList();
@@ -361,6 +451,70 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     );
   }
 
+  Widget _buildZonesSection() {
+    if (!isEditing) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Text(
+          'Save the camera once to draw detection zones.',
+          style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('Detection Zones',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+            const Spacer(),
+            TextButton.icon(
+              icon: const Icon(Icons.add_location_alt, size: 18),
+              label: const Text('New Zone'),
+              onPressed: () => _openZoneEditor(),
+            ),
+          ],
+        ),
+        if (_zones.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'No zones drawn. A script with no zone restriction fires on the whole frame.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+            ),
+          )
+        else
+          for (final z in _zones)
+            Card(
+              margin: const EdgeInsets.only(bottom: 6),
+              child: ListTile(
+                dense: true,
+                leading: const Icon(Icons.hexagon_outlined, size: 20),
+                title: Text(z.name, style: const TextStyle(fontSize: 13)),
+                subtitle: Text('${z.points.length} points',
+                    style: const TextStyle(fontSize: 11)),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit_outlined, size: 18),
+                      tooltip: 'Edit zone',
+                      onPressed: () => _openZoneEditor(zone: z),
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.delete_outline, size: 18, color: Colors.red[400]),
+                      tooltip: 'Delete zone',
+                      onPressed: () => _deleteZone(z),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+      ],
+    );
+  }
+
   Widget _buildScriptsList() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -444,6 +598,66 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
     );
   }
 
+  void _commitScriptName(int index) {
+    final entry = _scriptEntries[index];
+    final typed = entry.nameCtrl.text.trim();
+    final defaultName = 'Script ${index + 1}';
+    setState(() {
+      entry.name = (typed.isEmpty || typed == defaultName) ? null : typed;
+      entry.editingName = false;
+    });
+  }
+
+  Widget _buildScriptNameEditor(int index) {
+    final entry = _scriptEntries[index];
+    final displayName = entry.name ?? 'Script ${index + 1}';
+    const style = TextStyle(fontSize: 13, fontWeight: FontWeight.w500);
+
+    if (entry.editingName) {
+      return TextField(
+        controller: entry.nameCtrl,
+        focusNode: entry.nameFocus,
+        autofocus: true,
+        style: style,
+        decoration: const InputDecoration(
+          isDense: true,
+          contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          border: OutlineInputBorder(),
+        ),
+        onSubmitted: (_) => _commitScriptName(index),
+        onTapOutside: (_) => _commitScriptName(index),
+      );
+    }
+
+    return InkWell(
+      onTap: () {
+        setState(() {
+          entry.nameCtrl.text = entry.name ?? '';
+          entry.editingName = true;
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          entry.nameFocus.requestFocus();
+          entry.nameCtrl.selection = TextSelection(
+            baseOffset: 0,
+            extentOffset: entry.nameCtrl.text.length,
+          );
+        });
+      },
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(child: Text(displayName, style: style, overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 4),
+            Icon(Icons.edit, size: 12, color: Colors.grey[500]),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildScriptEntry(int index) {
     final entry = _scriptEntries[index];
     return Card(
@@ -455,9 +669,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
           children: [
             Row(
               children: [
-                Text('Script ${index + 1}',
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                const Spacer(),
+                Expanded(child: _buildScriptNameEditor(index)),
                 IconButton(
                   icon: const Icon(Icons.delete_outline, size: 20),
                   padding: EdgeInsets.zero,
@@ -465,8 +677,11 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                   color: Colors.red[400],
                   onPressed: () {
                     setState(() {
-                      _scriptEntries[index].onCtrl.dispose();
-                      _scriptEntries[index].offCtrl.dispose();
+                      final e = _scriptEntries[index];
+                      e.onCtrl.dispose();
+                      e.offCtrl.dispose();
+                      e.nameCtrl.dispose();
+                      e.nameFocus.dispose();
                       _scriptEntries.removeAt(index);
                     });
                   },
@@ -559,7 +774,7 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                 children: [
                   for (final f in _knownFaces)
                     FilterChip(
-                      label: Text(f.name, style: const TextStyle(fontSize: 11)),
+                      label: Text(f.displayName, style: const TextStyle(fontSize: 11)),
                       selected: entry.faces.contains(f.id),
                       onSelected: (v) => setState(() {
                         if (v) {
@@ -593,6 +808,43 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                     _knownFaces.isEmpty
                         ? 'No faces enrolled yet — script fires for all persons.'
                         : 'No filter selected — script fires for all persons.',
+                    style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                  ),
+                ),
+            ],
+            if (_zones.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const Text('Restrict to zones (optional):',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 4,
+                runSpacing: 0,
+                children: [
+                  for (final z in _zones)
+                    FilterChip(
+                      label: Text(z.name, style: const TextStyle(fontSize: 11)),
+                      selected: entry.zoneIds.contains(z.id),
+                      onSelected: (v) => setState(() {
+                        if (v) {
+                          if (!entry.zoneIds.contains(z.id)) entry.zoneIds.add(z.id);
+                        } else {
+                          entry.zoneIds.remove(z.id);
+                        }
+                      }),
+                      selectedColor: const Color(0xFF3B82F6).withValues(alpha: 0.7),
+                      checkmarkColor: Colors.white,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+                ],
+              ),
+              if (entry.zoneIds.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    'No zone selected — script fires anywhere in the frame.',
                     style: TextStyle(fontSize: 11, color: Colors.grey[500]),
                   ),
                 ),
@@ -877,6 +1129,8 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
                     ),
                   ],
                 ],
+                const SizedBox(height: 6),
+                _buildZonesSection(),
                 const SizedBox(height: 6),
                 _buildScriptsList(),
               ],

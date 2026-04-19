@@ -66,12 +66,32 @@ class Camera(Base):
     ai_detect_animals: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     ai_confidence_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
     face_recognition: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    face_match_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
+    face_match_threshold: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
 
     group: Mapped["CameraGroup | None"] = relationship(back_populates="cameras")
     recordings: Mapped[list["Recording"]] = relationship(back_populates="camera")
     clip_exports: Mapped[list["ClipExport"]] = relationship(back_populates="camera")
     motion_events: Mapped[list["MotionEvent"]] = relationship(back_populates="camera")
+    zones: Mapped[list["Zone"]] = relationship(
+        back_populates="camera", cascade="all, delete-orphan"
+    )
+
+
+class Zone(Base):
+    __tablename__ = "zones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[int] = mapped_column(
+        ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    points_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    camera: Mapped["Camera"] = relationship(back_populates="zones")
 
 
 class Recording(Base):
@@ -119,6 +139,11 @@ class MotionEvent(Base):
     face_matches: Mapped[str | None] = mapped_column(Text, nullable=True)
     face_unknown: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     face_detected: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # JSON array of display-name snapshots for scripts that fired (e.g. ["porch light","Script 2"])
+    scripts_fired: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON array of zone-name snapshots whose polygon contained the detection at event start.
+    # Bbox anchor (feet/wheels) for AI events; motion-intersection for motion-only events.
+    zones_triggered: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     camera: Mapped["Camera"] = relationship(back_populates="motion_events")
 
@@ -127,7 +152,9 @@ class Face(Base):
     __tablename__ = "faces"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    # Nullable: null = auto-clustered suggestion (Immich-style "unassigned person").
+    # Uniqueness is enforced below via a partial index on non-null names.
+    name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -146,6 +173,42 @@ class FaceEmbedding(Base):
     embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     source_thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     face_crop_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # "user_enrolled" (tagged manually) or "auto_clustered" (added by background clusterer).
+    source: Mapped[str] = mapped_column(String(20), default="user_enrolled", server_default="user_enrolled")
+    # SCRFD score at embedding time; used to pick the sharpest thumbnail for cluster tiles.
+    detection_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_motion_event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("motion_events.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     face: Mapped["Face"] = relationship(back_populates="embeddings")
+
+
+class UnclusteredFace(Base):
+    """Queue of unknown-face embeddings awaiting background clustering.
+
+    Rows are written by the motion pipeline when a person is detected but no
+    named-face match passes the strict threshold. The face_clusterer worker
+    drains pending rows (processed_at IS NULL) and either attaches them to an
+    existing Face (named or unnamed) or creates a new unnamed Face cluster.
+    """
+
+    __tablename__ = "unclustered_faces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    motion_event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("motion_events.id", ondelete="CASCADE"), nullable=True
+    )
+    camera_id: Mapped[int | None] = mapped_column(
+        ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True
+    )
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    face_crop_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    detection_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # NULL = pending. Set when the clusterer has assigned this row to a Face.
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    assigned_face_id: Mapped[int | None] = mapped_column(
+        ForeignKey("faces.id", ondelete="SET NULL"), nullable=True
+    )

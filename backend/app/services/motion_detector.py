@@ -17,6 +17,7 @@ from app.services.ffmpeg import sanitize_camera_name
 from app.services.face_recognizer import get_face_recognizer
 from app.services.frame_broker import get_frame_broker
 from app.services.object_detector import get_object_detector
+from app.services.zone_mask import get_zone_mask_cache
 
 _VEHICLE_LABELS = {"bicycle", "car", "motorcycle", "bus", "truck"}
 
@@ -39,9 +40,9 @@ POLL_INTERVAL = 0.5       # Seconds between frame checks (broker runs at 2 fps)
 BLUR_SIZE = (21, 21)
 DIFF_THRESHOLD = 25
 # Once a known face matches at >= this cosine, skip further face inference
-# in the event. Well above the default 0.5 match threshold so we don't lock
+# in the event. Well above the default match threshold so we don't lock
 # in a marginal match and miss a clearer frame.
-FACE_LOCKIN_CONFIDENCE = 0.65
+FACE_LOCKIN_CONFIDENCE = 0.75
 MOTION_ALPHA = 0.01       # Slow running-average adaptation (steady state)
 MOTION_ALPHA_STARTUP = 0.2
 BASELINE_STARTUP_FRAMES = 25
@@ -394,6 +395,9 @@ class MotionDetector:
                                         detection_confidence=p_conf,
                                         frame=thumb_frame,
                                         face_info=face_info,
+                                        detection_bbox=p_bbox,
+                                        motion_mask=thresh,
+                                        motion_threshold_pct=threshold_pct,
                                     )
                             else:
                                 # Category not detected this frame — record miss
@@ -406,7 +410,10 @@ class MotionDetector:
                         if not any_confirmed:
                             await self._check_cooldown(cam_id)
                     else:
-                        await self._on_motion(cam_id, cam_name, changed_pct, scripts, frame=frame)
+                        await self._on_motion(
+                            cam_id, cam_name, changed_pct, scripts, frame=frame,
+                            motion_mask=thresh, motion_threshold_pct=threshold_pct,
+                        )
                 else:
                     await self._check_cooldown(cam_id)
 
@@ -508,10 +515,21 @@ class MotionDetector:
         matches: list[dict] = []
         seen_ids: set[int] = set()
         unknown = False
+        # Collect unknown-hit details for the clustering queue. We save crops
+        # immediately (cheap filesystem write) but defer DB inserts to the
+        # caller so we can stamp them with the created motion_event_id.
+        from app.services.face_crop import save_face_crop
+        unknown_hits: list[dict] = []
         for h in hits:
             m = recognizer.match(h.embedding, threshold)
             if m is None:
                 unknown = True
+                crop_path = save_face_crop(frame, (h.x1, h.y1, h.x2, h.y2))
+                unknown_hits.append({
+                    "embedding": h.embedding.tobytes(),
+                    "score": float(h.score),
+                    "crop_path": crop_path,
+                })
                 continue
             if m.face_id in seen_ids:
                 for existing in matches:
@@ -528,6 +546,7 @@ class MotionDetector:
             "matches": matches,
             "unknown": unknown,
             "face_detected": len(hits) > 0,
+            "unknown_hits": unknown_hits,
             # Return the main-stream frame we pulled so the caller can use it
             # as the saved detection thumbnail — future enrollments then have
             # a high-res source to extract a cleaner face crop from.
@@ -593,12 +612,120 @@ class MotionDetector:
             logger.exception("Failed to fetch main-stream snapshot for face recognition")
             return sub_frame, sub_bbox
 
+    async def _zones_triggered_for_event(
+        self,
+        cam_id: int,
+        shape: tuple[int, int] | None,
+        detection_bbox: tuple[int, int, int, int] | None,
+        motion_mask: np.ndarray | None,
+        motion_threshold_pct: float,
+    ) -> list[str]:
+        """Return names of all zones on this camera that contain the triggering event.
+
+        Bbox events: zone contains the bbox's bottom-center (feet/wheels anchor).
+        Motion-only events: motion intensity inside the zone exceeds sensitivity.
+        Returns [] when no shape is available or the camera has no zones.
+        """
+        if shape is None:
+            return []
+        from sqlalchemy import select
+        from app.models import Zone as ZoneModel
+        factory = get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                select(ZoneModel.id, ZoneModel.name).where(ZoneModel.camera_id == cam_id)
+            )
+            zones = list(result.all())
+        if not zones:
+            return []
+        cache = get_zone_mask_cache()
+        names: list[str] = []
+        for zid, zname in zones:
+            mask = await cache.get_mask(zid, shape)
+            if mask is None:
+                continue
+            if detection_bbox is not None:
+                if cache.bbox_in_mask(detection_bbox, mask):
+                    names.append(zname)
+            elif motion_mask is not None:
+                if cache.motion_in_mask(motion_mask, mask, motion_threshold_pct):
+                    names.append(zname)
+        return names
+
+    async def _filter_firing_by_zone(
+        self,
+        firing: list[dict],
+        shape: tuple[int, int],
+        detection_bbox: tuple[int, int, int, int] | None,
+        motion_mask: np.ndarray | None,
+        motion_threshold_pct: float,
+    ) -> list[dict]:
+        """Drop scripts whose zone_ids don't contain the triggering bbox/motion.
+
+        - Script with empty zone_ids → always passes (current behavior).
+        - Script with zone_ids + a detection_bbox → passes if bbox's bottom-center
+          falls inside the union of its zones.
+        - Script with zone_ids + motion-only (no bbox) → passes if motion pixels
+          inside the union zone exceed the camera's sensitivity threshold.
+        - If the union mask can't be built (zones missing/invalid), the script
+          is skipped — fail-safe: a broken zone doesn't accidentally fire.
+        """
+        out: list[dict] = []
+        cache = get_zone_mask_cache()
+        h, w = shape
+        for s in firing:
+            zids = s.get("zone_ids") or []
+            if not zids:
+                out.append(s)
+                continue
+            union = await cache.get_union_mask(zids, shape)
+            if union is None:
+                logger.info(
+                    "Zone filter: no valid union mask — skipping script",
+                    extra={"zone_ids": zids, "shape": shape},
+                )
+                continue
+            if detection_bbox is not None:
+                x1, y1, x2, y2 = detection_bbox
+                cx = int((x1 + x2) / 2.0)
+                cy = int(y2)
+                passed = cache.bbox_in_mask(detection_bbox, union)
+                logger.info(
+                    "Zone filter: bbox " + ("PASS" if passed else "REJECT"),
+                    extra={
+                        "zone_ids": zids,
+                        "bbox": [x1, y1, x2, y2],
+                        "anchor_xy": [cx, cy],
+                        "shape_wh": [w, h],
+                        "anchor_norm": [round(cx / max(w, 1), 3), round(cy / max(h, 1), 3)],
+                    },
+                )
+                if passed:
+                    out.append(s)
+            elif motion_mask is not None:
+                passed = cache.motion_in_mask(motion_mask, union, motion_threshold_pct)
+                logger.info(
+                    "Zone filter: motion " + ("PASS" if passed else "REJECT"),
+                    extra={"zone_ids": zids, "threshold_pct": motion_threshold_pct},
+                )
+                if passed:
+                    out.append(s)
+            else:
+                logger.info(
+                    "Zone filter: no signal — skipping script",
+                    extra={"zone_ids": zids},
+                )
+        return out
+
     async def _on_motion(
         self, cam_id: int, cam_name: str, intensity: float,
         scripts: list[dict],
         detection_label: str | None = None, detection_confidence: float | None = None,
         frame: np.ndarray | None = None,
         face_info: dict | None = None,
+        detection_bbox: tuple[int, int, int, int] | None = None,
+        motion_mask: np.ndarray | None = None,
+        motion_threshold_pct: float = 0.0,
     ) -> None:
         now = datetime.now()
         category = _label_category(detection_label)
@@ -633,6 +760,36 @@ class MotionDetector:
             if frame is not None:
                 thumb_path = self._save_detection_thumbnail(cam_name, frame, now)
 
+            # Resolve firing scripts BEFORE inserting the event so we can
+            # snapshot their display names onto the row. Firing items are
+            # references drawn from `scripts`, so identity lookup is safe.
+            matching = self._scripts_for_category(scripts, category)
+            firing = [s for s in matching if self._scripts_match_face(s, matched_face_ids, face_unknown)]
+            # Compute shape once — used for both zone resolution and per-script
+            # zone filtering. Frames come from the FrameBroker (sub-stream), so
+            # shape == frame.shape[:2] when available; fall back to motion_mask.
+            shape_hw: tuple[int, int] | None = None
+            if frame is not None:
+                shape_hw = (int(frame.shape[0]), int(frame.shape[1]))
+            elif motion_mask is not None:
+                shape_hw = (int(motion_mask.shape[0]), int(motion_mask.shape[1]))
+            if firing and shape_hw is not None:
+                firing = await self._filter_firing_by_zone(
+                    firing, shape_hw, detection_bbox, motion_mask, motion_threshold_pct,
+                )
+            # Snapshot display names (custom name if set, else "Script N" using
+            # the script's 1-based index in the camera's scripts list at this moment).
+            name_by_id = {
+                id(s): (s.get("name") or "").strip() or f"Script {i + 1}"
+                for i, s in enumerate(scripts)
+            }
+            fired_names = [name_by_id[id(s)] for s in firing if id(s) in name_by_id]
+            # Snapshot zone names the detection fell inside (camera-wide, not
+            # restricted to the scripts' zone_ids).
+            zone_names = await self._zones_triggered_for_event(
+                cam_id, shape_hw, detection_bbox, motion_mask, motion_threshold_pct,
+            )
+
             factory = get_session_factory()
             async with factory() as session:
                 event = MotionEvent(
@@ -642,15 +799,31 @@ class MotionDetector:
                     face_matches=json.dumps(face_matches) if face_matches else None,
                     face_unknown=face_unknown and not face_matches,
                     face_detected=face_detected,
+                    scripts_fired=json.dumps(fired_names) if fired_names else None,
+                    zones_triggered=json.dumps(zone_names) if zone_names else None,
                 )
                 session.add(event)
                 await session.commit()
                 await session.refresh(event)
                 self._active_events[key] = event.id
                 self._event_start[key] = now
+
+                # Queue unknown-face embeddings for the background clusterer.
+                # Only done at event-creation to avoid flooding the queue when
+                # the same unknown person stands in view across many frames.
+                unknown_hits = (face_info or {}).get("unknown_hits") or []
+                if unknown_hits and not face_matches:
+                    from app.models import UnclusteredFace
+                    for uh in unknown_hits:
+                        session.add(UnclusteredFace(
+                            motion_event_id=event.id,
+                            camera_id=cam_id,
+                            embedding=uh["embedding"],
+                            face_crop_path=uh.get("crop_path"),
+                            detection_score=uh.get("score"),
+                        ))
+                    await session.commit()
                 # Store off-scripts with their delays for _finalize_event
-                matching = self._scripts_for_category(scripts, category)
-                firing = [s for s in matching if self._scripts_match_face(s, matched_face_ids, face_unknown)]
                 self._script_off[key] = [
                     (s.get("off"), s.get("off_delay", COOLDOWN_SECONDS))
                     for s in firing if s.get("off")
