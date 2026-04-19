@@ -265,7 +265,7 @@ async def get_playback_file(
     is_growing = bool(
         session.streaming and session.process and session.process.returncode is None
     )
-    file_size = output_path.stat().st_size
+    file_size = (await asyncio.to_thread(output_path.stat)).st_size
     parsed = _parse_range(range)
 
     if bench_id:
@@ -280,13 +280,19 @@ async def get_playback_file(
     # We can't honor Range because we can't promise an end byte for a file whose
     # final size is unknown, and libmpv strictly enforces 206 Content-Range bounds.
     # Once ffmpeg finishes the segment becomes seekable via the path below.
+    #
+    # File reads are offloaded to a thread via asyncio.to_thread so concurrent
+    # streams (grid view, multiple clients) can't starve the event loop — a
+    # single slow disk read used to block all other handlers including
+    # /api/health, which caused the watchdog to restart the service.
     if is_growing:
         async def stream_growing():
             sent = 0
-            with open(output_path, "rb") as f:
+            f = await asyncio.to_thread(open, output_path, "rb")
+            try:
                 stalls = 0
                 while True:
-                    chunk = f.read(65536)
+                    chunk = await asyncio.to_thread(f.read, 65536)
                     if chunk:
                         stalls = 0
                         if sent == 0 and bench_id:
@@ -304,6 +310,8 @@ async def get_playback_file(
                             await asyncio.sleep(0.05)
                         else:
                             break
+            finally:
+                await asyncio.to_thread(f.close)
 
         return StreamingResponse(
             stream_growing(), media_type="video/mp4",
@@ -329,11 +337,12 @@ async def get_playback_file(
 
     async def stream_range():
         sent = 0
-        with open(output_path, "rb") as f:
-            f.seek(start)
+        f = await asyncio.to_thread(open, output_path, "rb")
+        try:
+            await asyncio.to_thread(f.seek, start)
             remaining = length
             while remaining > 0:
-                chunk = f.read(min(65536, remaining))
+                chunk = await asyncio.to_thread(f.read, min(65536, remaining))
                 if not chunk:
                     break
                 if sent == 0 and bench_id:
@@ -344,6 +353,8 @@ async def get_playback_file(
                 sent += len(chunk)
                 remaining -= len(chunk)
                 yield chunk
+        finally:
+            await asyncio.to_thread(f.close)
 
     return StreamingResponse(
         stream_range(), status_code=206, media_type="video/mp4",

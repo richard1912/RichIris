@@ -10,12 +10,12 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
 from app.database import get_db
-from app.models import Camera, ClipExport, MotionEvent, Recording
+from app.models import Camera, ClipExport, MotionEvent, Recording, Zone
 from app.schemas import CameraCreate, CameraResponse, CameraUpdate, TestScriptRequest, TestScriptResponse
 from app.services.ffmpeg import sanitize_camera_name
 from app.services.motion_detector import get_motion_detector
@@ -565,8 +565,13 @@ async def list_cameras(db: AsyncSession = Depends(get_db)):
     """List all cameras."""
     result = await db.execute(select(Camera).order_by(Camera.sort_order, Camera.id))
     cameras = result.scalars().all()
+    # Zone counts in one aggregate query keyed by camera_id
+    zc_rows = (await db.execute(
+        select(Zone.camera_id, func.count(Zone.id)).group_by(Zone.camera_id)
+    )).all()
+    zone_counts = {cid: cnt for cid, cnt in zc_rows}
     logger.debug("Listed cameras", extra={"count": len(cameras)})
-    return [CameraResponse.from_camera(c) for c in cameras]
+    return [CameraResponse.from_camera(c, zone_count=zone_counts.get(c.id, 0)) for c in cameras]
 
 
 @router.get("/{camera_id}", response_model=CameraResponse)
@@ -575,7 +580,10 @@ async def get_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
-    return CameraResponse.from_camera(camera)
+    zc = (await db.execute(
+        select(func.count(Zone.id)).where(Zone.camera_id == camera_id)
+    )).scalar_one()
+    return CameraResponse.from_camera(camera, zone_count=zc)
 
 
 @router.post("", response_model=CameraResponse, status_code=201)
@@ -625,7 +633,7 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         except Exception:
             logger.exception("Failed to start stream for new camera", extra={"camera_id": camera.id})
 
-    return CameraResponse.from_camera(camera)
+    return CameraResponse.from_camera(camera, zone_count=0)
 
 
 @router.put("/{camera_id}", response_model=CameraResponse)
@@ -694,6 +702,7 @@ async def update_camera(
         await _rename_camera_folder(db, camera.id, old_name, data.name)
 
     from app.services.frame_broker import get_frame_broker
+    from app.services.go2rtc_client import get_go2rtc_client
     broker = get_frame_broker()
     if not camera.enabled:
         await mgr.stop_stream(camera.id)
@@ -701,6 +710,18 @@ async def update_camera(
     elif needs_restart:
         await mgr.stop_stream(camera.id)
         await broker.remove_camera(camera.id)
+        # Re-register the camera's streams with go2rtc under the (possibly
+        # new) name. The startup config in go2rtc.yaml is baked at launch,
+        # so a rename leaves go2rtc without the new stream key → keepalive
+        # 404s. Registering via HTTP adds the new variants in-memory;
+        # harmless if names happen to match (PUT is idempotent).
+        try:
+            await get_go2rtc_client().register_stream(
+                camera.name, camera.rtsp_url, camera.sub_stream_url,
+            )
+        except Exception:
+            logger.exception("Failed to re-register go2rtc streams after update",
+                             extra={"camera_id": camera.id, "camera_name": camera.name})
         await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
         await broker.add_camera(camera)
 
@@ -708,7 +729,10 @@ async def update_camera(
     detector = get_motion_detector()
     await detector.update_camera(camera)
 
-    return CameraResponse.from_camera(camera)
+    zc = (await db.execute(
+        select(func.count(Zone.id)).where(Zone.camera_id == camera.id)
+    )).scalar_one()
+    return CameraResponse.from_camera(camera, zone_count=zc)
 
 
 @router.post("/test-script", response_model=TestScriptResponse)

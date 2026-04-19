@@ -13,7 +13,7 @@ from app.config import get_app_dir, get_config
 from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
-from app.routers import backup, cameras, clips, faces, groups, motion, recordings, settings, storage, streams, system
+from app.routers import backup, cameras, clips, faces, groups, motion, recordings, settings, storage, streams, system, zones
 from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
@@ -116,9 +116,15 @@ async def lifespan(app: FastAPI):
 
     # Start face recognizer if any camera has face_recognition enabled
     face_recognizer = get_face_recognizer()
+    face_clusterer = None
     if any(getattr(cam, 'face_recognition', False) for cam in cameras_list):
         await face_recognizer.start()
         await face_recognizer.reload_cache()
+        # Background clusterer: drains unknown faces from the queue and turns
+        # them into Immich-style "suggested people" the user can name later.
+        from app.services.face_clusterer import get_face_clusterer
+        face_clusterer = get_face_clusterer()
+        face_clusterer.start()
 
     motion_detector = get_motion_detector()
     await motion_detector.start(cameras_list)
@@ -130,13 +136,21 @@ async def lifespan(app: FastAPI):
 
     scan_task = asyncio.create_task(_periodic_scan())
     retention_task = asyncio.create_task(_periodic_retention())
+
+    from app.config import get_bootstrap
+    from app.services.self_watchdog import run_self_watchdog
+    watchdog_task = asyncio.create_task(run_self_watchdog(get_bootstrap().port))
+
     yield
     scan_task.cancel()
     retention_task.cancel()
+    watchdog_task.cancel()
 
     logger.info("RichIris NVR shutting down")
     await update_checker.stop()
     await motion_detector.stop()
+    if face_clusterer is not None:
+        await face_clusterer.stop()
     await face_recognizer.stop()
     await obj_detector.stop()
     await thumb_capture.stop()
@@ -266,6 +280,7 @@ def create_app() -> FastAPI:
     app.include_router(storage.router)
     app.include_router(streams.router)
     app.include_router(system.router)
+    app.include_router(zones.router)
 
     @app.get("/api/health")
     async def health():

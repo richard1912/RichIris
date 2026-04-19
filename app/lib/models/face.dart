@@ -1,6 +1,7 @@
 class Face {
   final int id;
-  final String name;
+  // Nullable: null = unnamed cluster (suggested person).
+  final String? name;
   final String? notes;
   final int embeddingCount;
   final String? latestCropPath;
@@ -8,7 +9,7 @@ class Face {
 
   Face({
     required this.id,
-    required this.name,
+    this.name,
     this.notes,
     this.embeddingCount = 0,
     this.latestCropPath,
@@ -17,10 +18,45 @@ class Face {
 
   factory Face.fromJson(Map<String, dynamic> json) => Face(
         id: json['id'] as int,
-        name: json['name'] as String,
+        name: json['name'] as String?,
         notes: json['notes'] as String?,
         embeddingCount: json['embedding_count'] as int? ?? 0,
         latestCropPath: json['latest_crop_path'] as String?,
+        createdAt: json['created_at'] as String,
+      );
+
+  /// Guaranteed-non-null label for UI. Clusters have no name; a caller that
+  /// already filtered to named faces can still use `name!`.
+  String get displayName => name ?? 'Unnamed';
+}
+
+class FaceCluster {
+  final int id;
+  final int embeddingCount;
+  final List<int> sampleEmbeddingIds;
+  final String? latestEventTime;
+  final List<String> camerasSeen;
+  final String createdAt;
+
+  FaceCluster({
+    required this.id,
+    required this.embeddingCount,
+    required this.sampleEmbeddingIds,
+    this.latestEventTime,
+    required this.camerasSeen,
+    required this.createdAt,
+  });
+
+  factory FaceCluster.fromJson(Map<String, dynamic> json) => FaceCluster(
+        id: json['id'] as int,
+        embeddingCount: json['embedding_count'] as int,
+        sampleEmbeddingIds: ((json['sample_embedding_ids'] as List<dynamic>?) ?? [])
+            .map((e) => e as int)
+            .toList(),
+        latestEventTime: json['latest_event_time'] as String?,
+        camerasSeen: ((json['cameras_seen'] as List<dynamic>?) ?? [])
+            .map((e) => e as String)
+            .toList(),
         createdAt: json['created_at'] as String,
       );
 }

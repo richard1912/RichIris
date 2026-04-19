@@ -127,15 +127,23 @@ class PlaybackManager:
                 bench.mark("session_cache_hit", session_id=session_id)
             return session
 
-        # Kill old sessions for the same camera to prevent ffmpeg accumulation
+        # Kill old sessions for the same camera to prevent ffmpeg accumulation.
+        # The new session has its own session_id (and output dir), so the old
+        # one's teardown — process.wait + shutil.rmtree — can happen in the
+        # background. Awaiting it here would block the event loop for ~1s when
+        # multiple cameras evict at once (stop_session is partly synchronous).
         if camera_id is not None:
             stale = [
                 sid for sid, s in self._sessions.items()
                 if s.camera_id == camera_id and sid != session_id
             ]
+            # Detach stale sessions from the registry immediately so they don't
+            # match future lookups; cleanup runs as a background task.
             for sid in stale:
                 logger.info("Evicting old playback session", extra={"session_id": sid, "camera_id": camera_id})
-                await self.stop_session(sid)
+                detached = self._sessions.pop(sid, None)
+                if detached:
+                    asyncio.create_task(self._teardown(detached))
             if bench and stale:
                 bench.mark("evicted_old_sessions", count=len(stale))
 
@@ -146,7 +154,11 @@ class PlaybackManager:
 
         session = PlaybackSession(session_id=session_id, output_dir=output_dir, camera_id=camera_id)
         session._bench = bench
-        self._sessions[session_id] = session
+        # NOTE: intentionally NOT registered in self._sessions yet. A concurrent
+        # start_session for the same camera would otherwise find this entry via
+        # the stale-scan below and schedule its teardown (which rmtree's the
+        # output dir), breaking our own ffmpeg spawn with "No such file or
+        # directory". Registration happens after ffmpeg is running.
 
         config = get_config()
         output_path = output_dir / "playback.mp4"
@@ -225,6 +237,9 @@ class PlaybackManager:
             stderr=asyncio.subprocess.PIPE,
         )
         assign_to_job(session.process.pid)
+        # ffmpeg is live and owns the output dir — safe to publish the session
+        # to the registry where future eviction scans can find it.
+        self._sessions[session_id] = session
         if bench:
             bench.mark("ffmpeg_spawned", pid=session.process.pid, streaming=session.streaming)
 
@@ -316,15 +331,25 @@ class PlaybackManager:
         session = self._sessions.pop(session_id, None)
         if not session:
             return
+        await self._teardown(session)
+
+    async def _teardown(self, session: PlaybackSession) -> None:
+        """Kill the ffmpeg process and remove the output dir.
+
+        Safe to call after the session has already been popped from the registry
+        (used by the eviction fast-path in start_session).
+        """
         if session.process and session.process.returncode is None:
-            session.process.terminate()
+            session.process.kill()
             try:
                 await asyncio.wait_for(session.process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                session.process.kill()
+                pass
         if session.output_dir.exists():
-            shutil.rmtree(session.output_dir, ignore_errors=True)
-        logger.info("Playback session cleaned up", extra={"session_id": session_id})
+            await asyncio.to_thread(
+                shutil.rmtree, session.output_dir, ignore_errors=True
+            )
+        logger.info("Playback session cleaned up", extra={"session_id": session.session_id})
 
     async def stop_all(self) -> None:
         for sid in list(self._sessions.keys()):

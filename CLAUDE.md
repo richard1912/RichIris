@@ -2,6 +2,11 @@
 update claude md as needed for code changes
 ## Quick Reference
 - **Backend**: Windows service `RichIris` via NSSM (FastAPI on port 8700). Restart: `nssm restart RichIris`
+- **Health watchdog (3 layers)**:
+  1. **In-process self-watchdog** (`backend/app/services/self_watchdog.py`): probes `127.0.0.1:{port}/api/health` every 30s (60s startup grace, 5s timeout). 3 consecutive failures → `os._exit(1)` → NSSM restarts (AppExit=Restart, throttle 1500ms). Catches the silent-listener-death failure mode where uvicorn's socket dies but the asyncio loop keeps running.
+  2. **External scheduled-task watchdog** (`scripts/watchdog.ps1`, Scheduled Task `RichIris Watchdog` runs as SYSTEM every 60s via `pwsh.exe`): probes health; on failure calls `Restart-Service RichIris` and pushes ntfy (`https://ntfy.richardferretti.com/richiris`, auth via gitignored `scripts/watchdog.config.psd1`). Fallback for full event-loop deadlocks the in-process watchdog can't catch. Logs to `{data_dir}/logs/watchdog.log`. **Requires PowerShell 7 (pwsh) — PS 5.1 parser chokes on the script.**
+  3. **Uptimer HTTP monitor** (`C:\01-Self-Hosting\Uptimer\config\services.js` entry `richiris` → `http://host.docker.internal:8700/api/health`): 60s polling, Gmail alerts on state change. Dashboard: http://localhost:4000.
+  - ntfy user `richiris` has write-only access to topic `richiris` (created via `docker exec immich_ntfy ntfy user add` + `ntfy access`). Subscribe at https://ntfy.richardferretti.com/richiris with credentials.
 - **go2rtc**: Child process on fixed ports (API 18700, RTSP 18554). Ports reported via `/api/system/status` → `go2rtc_rtsp_port`.
 - **Config**: `bootstrap.yaml` (data_dir + port only). All other settings in SQLite `settings` table via GUI or `GET/PUT /api/settings`. Legacy `config.yaml` migrated to DB on first startup.
 - **Data directory** (`data_dir` from bootstrap.yaml):
@@ -38,6 +43,11 @@ Flutter App → RTSP → go2rtc :18554 (live) | HTTP MP4 → FastAPI:8700 → FF
 ### Motion + AI Detection
 Snapshot pipeline reading FrameBroker every 0.5s. Motion: running weighted-avg baseline, GaussianBlur(21,21), threshold(25). Sensitivity 0-100 → area threshold `(101-s)*0.05%`. AI: RT-DETR-L ONNX via `onnxruntime-directml` (~11ms GPU inference, CPU fallback). Multi-frame confirmation: 2 detections in 3 frames + bbox movement ≥1.5% diagonal. Categories: persons (COCO 0), vehicles (1,2,3,5,7), animals (14-23). Per-camera toggles + confidence threshold. `motion_scripts` JSON array with per-category triggers. Events: MotionEvent rows, 10s cooldown. Env vars: MOTION_CAMERA, MOTION_TIME, MOTION_INTENSITY, DETECTION_LABEL, DETECTION_CONFIDENCE, FACE_NAMES. Scripts need full python.exe path (NSSM PATH differs).
 
+### Detection Zones
+Per-camera polygon masks that scripts can opt into via `zone_ids: [int,...]` on a `MotionScriptConfig`. Empty `zone_ids` = whole frame (unchanged behavior) — one script can be zone-restricted while another on the same camera is not. Points stored normalized [0,1] in the `zones` table so they survive sub-stream resolution changes. Rasterized masks are cached per (zone_id, frame_shape) by `services/zone_mask.py`; union masks for multi-zone scripts cached by sorted tuple. CRUD invalidates the cache. **Filter point**: applied inside `_on_motion` after category + face filters build `firing`; motion-only scripts use `motion_in_mask` (thresh ∩ zone ≥ sensitivity_pct), detection scripts use `bbox_in_mask` on the bbox's bottom-center pixel (ground anchor — feet/wheels). If a zone-restricted script's union mask is unavailable (deleted zone), the script fails closed. Zone deletion prunes any `zone_ids` references from the owning camera's scripts. Flutter editor: tap to add vertex, drag to move, long-press to remove; snapshot via `POST /api/cameras/snapshot`. `CameraResponse` exposes `zone_count` (aggregated in one COUNT query on list) so the grid can show a badge without fetching each camera's zones.
+
+**Do not use `name` as a logger `extra={}` key** — it collides with LogRecord's reserved attribute and raises `KeyError: "Attempt to overwrite 'name' in LogRecord"`. Use `zone_name`, `camera_name`, etc.
+
 ### Facial Recognition
 Runs only when RT-DETR confirms a `person`. Pipeline: SCRFD (`dependencies/models/det_10g.onnx`, from InsightFace buffalo_l) detects faces within the cropped person bbox → ArcFace (`w600k_r50.onnx`, 512-D) embeddings → cosine match against in-memory cache from `face_embeddings` table. Match ≥ per-camera threshold (default 0.5) → writes `face_matches` JSON on MotionEvent; else sets `face_unknown=true`. Models run on the same `onnxruntime-directml` pipeline as RT-DETR. Per-camera toggles: `face_recognition`, `face_match_threshold`. Per-script filters: `faces: [id,...]` (AND trigger) and `face_unknown: bool`. Enrollment: tag faces from past person-detection thumbnails via `POST /api/faces/{id}/embeddings` — multi-face images return `multiple_faces` with candidate bboxes so the UI can disambiguate. `reload_cache()` is called on any embedding mutation so the matcher stays fresh. Timeline tints person events cyan (known) or rose (unknown).
 
@@ -56,11 +66,11 @@ Recordings stored as **local time without timezone**. Configurable via Settings 
 RichIris/
 ├── backend/app/
 │   ├── main.py, config.py, logging_config.py, database.py, models.py, schemas.py
-│   ├── routers/  (backup, cameras, clips, groups, recordings, settings, storage, streams, system, motion)
+│   ├── routers/  (backup, cameras, clips, groups, recordings, settings, storage, streams, system, motion, zones)
 │   └── services/ (backup, ffmpeg, stream_manager, go2rtc_client, go2rtc_manager, recorder,
 │                   clip_exporter, playback, settings, thumbnail_capture, retention,
 │                   storage_migration, motion_detector, object_detector, update_checker,
-│                   frame_broker, benchmark)
+│                   frame_broker, benchmark, zone_mask)
 ├── app/lib/      # Flutter (main, app, theme, config/, models/, services/, screens/, widgets/, utils/)
 ├── installer/    (richiris.iss, richiris_client.iss, download_deps.ps1)
 ├── dependencies/ # gitignored: ffmpeg, ffprobe, nssm, go2rtc, models/rtdetr-l.onnx (~388MB)
@@ -83,11 +93,12 @@ RichIris/
 **Backup**: `GET preview` | `POST create` | `GET {id}/progress` | `POST {id}/cancel` | `POST inspect` | `POST restore` | `GET restore/{id}/progress` | `POST restore/{id}/cancel`
 **Clips**: `POST /api/clips` | `GET list` | `GET {id}` | `GET {id}/download` | `DELETE {id}`
 **Motion**: `GET /api/motion/{id}/events?date=`
+**Zones**: `GET/POST /api/cameras/{id}/zones` | `PUT/DELETE /api/cameras/{id}/zones/{zone_id}` — body: `{name, points: [[x,y],...]}` with x,y in [0,1]. Scripts reference via `zone_ids` in `MotionScriptConfig`.
 **Storage**: `POST validate` | `POST migrate` | `GET migrate/{id}/progress` | `POST migrate/{id}/cancel` | `POST migrate/{id}/finalize` | `POST update-path`
 **Health**: `GET /api/health` (returns `{app: "richiris", version}`)
 
 ## App UI Flow
-- **Grid**: Click camera → select (blue ring + drag hint icon) + timeline. Click again → fullscreen. Long-press drag to reorder. Group chip bar above grid filters by camera group. Inline transitions (no Navigator.push).
+- **Grid**: Click camera → select (blue ring + drag hint icon) + timeline. Click again → fullscreen. Long-press drag to reorder. Group chip bar above grid filters by camera group. Inline transitions (no Navigator.push). Feature badges under each card's gear icon summarize enabled detection features (motion/AI/face/zones/scripts) via `_FeatureBadges` in `widgets/camera_card.dart`.
 - **Fullscreen**: Video + timeline + speed controls (-4x to 32x). Stats bar (codec/res/FPS/bitrate). Refresh + bug report buttons.
 - **Timeline**: CustomPainter, scroll/pinch zoom (1h-24h), minimap. Hover shows trickplay thumbnail via OverlayEntry. Red playhead from player position. 3s hold after taps. Motion events color-coded (person=amber, vehicle=indigo, animal=emerald, motion=gray).
 - **Clip export**: Timeline mode (tap start/end) or Wizard (dialog with pickers).

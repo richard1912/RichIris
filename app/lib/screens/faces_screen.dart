@@ -3,8 +3,12 @@ import '../models/camera.dart';
 import '../models/face.dart';
 import '../services/face_api.dart';
 import '../services/motion_api.dart';
+import '../widgets/face_cluster_card.dart';
 import 'face_enrollment_screen.dart';
 import 'face_detail_screen.dart';
+
+// TEMP FACE-DIAG
+void _diag(String msg) => debugPrint('[FACE-DIAG] $msg');
 
 class FacesScreen extends StatefulWidget {
   final FaceApi faceApi;
@@ -24,41 +28,58 @@ class FacesScreen extends StatefulWidget {
   State<FacesScreen> createState() => _FacesScreenState();
 }
 
-class _FacesScreenState extends State<FacesScreen> {
+class _FacesScreenState extends State<FacesScreen> with SingleTickerProviderStateMixin {
+  late final TabController _tabs;
   List<Face> _faces = [];
-  bool _loading = true;
-  String? _error;
+  List<FaceCluster> _clusters = [];
+  int _suggestionMinSize = 3;
+  bool _loadingFaces = true;
+  bool _loadingClusters = true;
+  String? _facesError;
+  String? _clustersError;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _tabs = TabController(length: 2, vsync: this);
+    _loadFaces();
+    _loadClusters();
   }
 
-  Future<void> _load() async {
+  @override
+  void dispose() {
+    _tabs.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadFaces() async {
     setState(() {
-      _loading = true;
-      _error = null;
+      _loadingFaces = true;
+      _facesError = null;
     });
     try {
       final faces = await widget.faceApi.fetchAll();
-      if (mounted) {
-        setState(() {
-          _faces = faces;
-          _loading = false;
-        });
-      }
+      if (mounted) setState(() { _faces = faces; _loadingFaces = false; });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = '$e';
-          _loading = false;
-        });
-      }
+      if (mounted) setState(() { _facesError = '$e'; _loadingFaces = false; });
+    }
+  }
+
+  Future<void> _loadClusters() async {
+    setState(() {
+      _loadingClusters = true;
+      _clustersError = null;
+    });
+    try {
+      final clusters = await widget.faceApi.listClusters(minSize: _suggestionMinSize);
+      if (mounted) setState(() { _clusters = clusters; _loadingClusters = false; });
+    } catch (e) {
+      if (mounted) setState(() { _clustersError = '$e'; _loadingClusters = false; });
     }
   }
 
   Future<void> _openEnrollment({Face? seedFace}) async {
+    _diag('FLOW START: Enroll-from-detections (seed=${seedFace?.id})');
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => FaceEnrollmentScreen(
@@ -68,10 +89,11 @@ class _FacesScreenState extends State<FacesScreen> {
         ),
       ),
     );
-    if (mounted) _load();
+    if (mounted) { _loadFaces(); _loadClusters(); }
   }
 
   Future<void> _openDetail(Face face) async {
+    _diag('FLOW START: Face detail id=${face.id} name=${face.name}');
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => FaceDetailScreen(
@@ -81,7 +103,149 @@ class _FacesScreenState extends State<FacesScreen> {
         ),
       ),
     );
-    if (mounted) _load();
+    if (mounted) { _loadFaces(); _loadClusters(); }
+  }
+
+  Future<void> _nameCluster(FaceCluster c) async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Name this person'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'e.g. Richard'),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+    try {
+      await widget.faceApi.nameCluster(c.id, name);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Named cluster #${c.id} → "$name"')),
+        );
+        _loadFaces();
+        _loadClusters();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to name cluster: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _mergeCluster(FaceCluster c) async {
+    final named = _faces.where((f) => f.id != c.id).toList();
+    if (named.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No named people yet — use "Name this person" first.')),
+        );
+      }
+      return;
+    }
+    final targetId = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Merge cluster into…'),
+        children: named
+            .map((f) => SimpleDialogOption(
+                  onPressed: () => Navigator.of(ctx).pop(f.id),
+                  child: Text(f.displayName),
+                ))
+            .toList(),
+      ),
+    );
+    if (targetId == null) return;
+    try {
+      await widget.faceApi.mergeCluster(c.id, targetId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Cluster merged')),
+        );
+        _loadFaces();
+        _loadClusters();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Merge failed: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _discardCluster(FaceCluster c) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Discard cluster?'),
+        content: Text('This deletes the suggested person (${c.embeddingCount} faces).'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await widget.faceApi.discardCluster(c.id);
+      if (mounted) _loadClusters();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Discard failed: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _recluster() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Re-run clustering?'),
+        content: const Text(
+          'Deletes all auto-clustered suggestions and rebuilds them from the queue. '
+          'Named people and their user-enrolled samples are preserved.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Re-cluster')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await widget.faceApi.recluster();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Re-clustering started — refresh in a minute.')),
+        );
+        _loadClusters();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Re-cluster failed: $e')),
+        );
+      }
+    }
   }
 
   @override
@@ -92,10 +256,25 @@ class _FacesScreenState extends State<FacesScreen> {
             ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack)
             : null,
         title: const Text('Faces', style: TextStyle(fontSize: 16)),
+        bottom: TabBar(
+          controller: _tabs,
+          tabs: [
+            const Tab(text: 'People'),
+            Tab(text: 'Suggestions (${_clusters.length})'),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _load,
+            onPressed: () { _loadFaces(); _loadClusters(); },
+          ),
+          PopupMenuButton<String>(
+            onSelected: (v) {
+              if (v == 'recluster') _recluster();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'recluster', child: Text('Re-run clustering')),
+            ],
           ),
         ],
       ),
@@ -104,17 +283,19 @@ class _FacesScreenState extends State<FacesScreen> {
         label: const Text('Enroll from detections'),
         onPressed: () => _openEnrollment(),
       ),
-      body: _buildBody(),
+      body: TabBarView(
+        controller: _tabs,
+        children: [
+          _buildPeopleTab(),
+          _buildSuggestionsTab(),
+        ],
+      ),
     );
   }
 
-  Widget _buildBody() {
-    if (_loading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_error != null) {
-      return Center(child: Text('Error: $_error'));
-    }
+  Widget _buildPeopleTab() {
+    if (_loadingFaces) return const Center(child: CircularProgressIndicator());
+    if (_facesError != null) return Center(child: Text('Error: $_facesError'));
     if (_faces.isEmpty) {
       return const Center(
         child: Padding(
@@ -145,7 +326,7 @@ class _FacesScreenState extends State<FacesScreen> {
                   ? const Icon(Icons.person, color: Color(0xFF9CA3AF))
                   : null,
             ),
-            title: Text(f.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+            title: Text(f.displayName, style: const TextStyle(fontWeight: FontWeight.w600)),
             subtitle: Text(
               '${f.embeddingCount} sample${f.embeddingCount == 1 ? '' : 's'}'
               '${f.notes != null && f.notes!.isNotEmpty ? '  —  ${f.notes}' : ''}',
@@ -156,6 +337,75 @@ class _FacesScreenState extends State<FacesScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildSuggestionsTab() {
+    if (_loadingClusters) return const Center(child: CircularProgressIndicator());
+    if (_clustersError != null) return Center(child: Text('Error: $_clustersError'));
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Row(
+            children: [
+              const Text('Min faces:', style: TextStyle(fontSize: 12, color: Color(0xFF737373))),
+              const SizedBox(width: 8),
+              DropdownButton<int>(
+                value: _suggestionMinSize,
+                isDense: true,
+                items: const [1, 2, 3, 5, 10]
+                    .map((v) => DropdownMenuItem(value: v, child: Text('$v')))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) {
+                    setState(() => _suggestionMinSize = v);
+                    _loadClusters();
+                  }
+                },
+              ),
+              const Spacer(),
+              Text('${_clusters.length} cluster${_clusters.length == 1 ? '' : 's'}',
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF737373))),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _clusters.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Text(
+                      'No cluster suggestions yet.\n\n'
+                      'Unknown faces from your cameras will group here as the clusterer runs.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xFF737373)),
+                    ),
+                  ),
+                )
+              : GridView.builder(
+                  padding: const EdgeInsets.all(16),
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 280,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 0.78,
+                  ),
+                  itemCount: _clusters.length,
+                  itemBuilder: (context, i) {
+                    final c = _clusters[i];
+                    return FaceClusterCard(
+                      cluster: c,
+                      faceApi: widget.faceApi,
+                      onName: () => _nameCluster(c),
+                      onMerge: () => _mergeCluster(c),
+                      onDiscard: () => _discardCluster(c),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }

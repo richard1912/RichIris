@@ -30,6 +30,7 @@ config.yaml
 bootstrap.yaml
 go2rtc/go2rtc.yaml
 go2rtc/go2rtc.exe
+scripts/watchdog.config.psd1
 
 # Build cache (auto-downloaded dependencies)
 .build-cache/

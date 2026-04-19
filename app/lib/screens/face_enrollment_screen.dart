@@ -3,6 +3,9 @@ import '../models/camera.dart';
 import '../models/face.dart';
 import '../services/face_api.dart';
 
+// TEMP FACE-DIAG
+void _diag(String msg) => debugPrint('[FACE-DIAG] $msg');
+
 class FaceEnrollmentScreen extends StatefulWidget {
   final FaceApi faceApi;
   final List<Camera> cameras;
@@ -33,13 +36,19 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
   }
 
   Future<void> _load() async {
+    final sw = Stopwatch()..start(); // TEMP FACE-DIAG
+    _diag('enrollment._load start seedFace=${widget.seedFace?.id} cameraFilter=$_cameraFilter'); // TEMP FACE-DIAG
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
+      // TEMP FACE-DIAG: these run sequentially — note gap between the two
+      // API calls in the backend bench traces. Could be parallelised.
       final thumbs = await widget.faceApi.unlabeledThumbnails(cameraId: _cameraFilter);
+      final swFaces = Stopwatch()..start(); // TEMP FACE-DIAG
       final faces = await widget.faceApi.fetchAll();
+      _diag('enrollment._load thumbs=${thumbs.length} faces=${faces.length} faces_only=${swFaces.elapsedMilliseconds}ms total=${sw.elapsedMilliseconds}ms'); // TEMP FACE-DIAG
       if (mounted) {
         setState(() {
           _thumbs = thumbs;
@@ -58,6 +67,7 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
   }
 
   Future<void> _onThumbTap(UnlabeledThumb t) async {
+    _diag('onThumbTap event=${t.eventId} camera=${t.cameraName} seedFace=${widget.seedFace?.id}'); // TEMP FACE-DIAG
     // When the caller already chose a face ("Add samples" from face detail),
     // skip the assign dialog entirely and enroll straight into that face.
     if (widget.seedFace != null) {
@@ -83,7 +93,7 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
         // Reuse an existing face with the same name (e.g. after a prior
         // no_face attempt that already created the record)
         final existing = _faces.where(
-          (f) => f.name.toLowerCase() == name.toLowerCase(),
+          (f) => (f.name ?? '').toLowerCase() == name.toLowerCase(),
         ).firstOrNull;
         if (existing != null) {
           faceId = existing.id;
@@ -92,7 +102,7 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
           try {
             final faces = await widget.faceApi.fetchAll();
             final match = faces.where(
-              (f) => f.name.toLowerCase() == name.toLowerCase(),
+              (f) => (f.name ?? '').toLowerCase() == name.toLowerCase(),
             ).firstOrNull;
             if (match != null) {
               faceId = match.id;
@@ -117,15 +127,21 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
   }
 
   Future<void> _enrollForFace(UnlabeledThumb t, int faceId) async {
+    final sw = Stopwatch()..start(); // TEMP FACE-DIAG
+    _diag('enrollForFace event=${t.eventId} -> face=$faceId'); // TEMP FACE-DIAG
     try {
       final path = await widget.faceApi.eventThumbnailPath(t.eventId);
+      final swEnroll = Stopwatch()..start(); // TEMP FACE-DIAG
       final result = await widget.faceApi.enroll(faceId, path);
+      _diag('enrollForFace first-try status=${result.status} ${swEnroll.elapsedMilliseconds}ms'); // TEMP FACE-DIAG
       if (!mounted) return;
       if (result.status == 'enrolled') {
         _markAssigned(t, faceId);
       } else if (result.status == 'no_face') {
         _showError('No face detected in that thumbnail');
       } else if (result.status == 'multiple_faces') {
+        _diag('enrollForFace multiple_faces candidates=${result.candidates.length} waiting on user pick'); // TEMP FACE-DIAG
+        final pickSw = Stopwatch()..start(); // TEMP FACE-DIAG
         final candidate = await showDialog<FaceEnrollCandidate>(
           context: context,
           builder: (ctx) => _CandidatePickerDialog(
@@ -133,8 +149,11 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
             candidates: result.candidates,
           ),
         );
+        _diag('enrollForFace candidate picked=${candidate?.bbox} pick_ms=${pickSw.elapsedMilliseconds}'); // TEMP FACE-DIAG
         if (candidate == null) return;
+        final swAgain = Stopwatch()..start(); // TEMP FACE-DIAG
         final again = await widget.faceApi.enroll(faceId, path, bbox: candidate.bbox);
+        _diag('enrollForFace retry status=${again.status} ${swAgain.elapsedMilliseconds}ms'); // TEMP FACE-DIAG
         if (!mounted) return;
         if (again.status == 'enrolled') {
           _markAssigned(t, faceId);
@@ -143,7 +162,10 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
         }
       }
     } catch (e) {
+      _diag('enrollForFace ERROR $e'); // TEMP FACE-DIAG
       _showError('Enroll failed: $e');
+    } finally {
+      _diag('enrollForFace DONE event=${t.eventId} face=$faceId total=${sw.elapsedMilliseconds}ms'); // TEMP FACE-DIAG
     }
   }
 
@@ -356,7 +378,7 @@ class _AssignDialogState extends State<_AssignDialog> {
                 value: _selected,
                 hint: const Text('— pick —'),
                 items: widget.faces
-                    .map((f) => DropdownMenuItem(value: f.id, child: Text(f.name)))
+                    .map((f) => DropdownMenuItem(value: f.id, child: Text(f.displayName)))
                     .toList(),
                 onChanged: (v) => setState(() {
                   _selected = v;

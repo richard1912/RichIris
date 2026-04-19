@@ -4,6 +4,9 @@ import '../models/face.dart';
 import '../services/face_api.dart';
 import 'face_enrollment_screen.dart';
 
+// TEMP FACE-DIAG
+void _diag(String msg) => debugPrint('[FACE-DIAG] $msg');
+
 class FaceDetailScreen extends StatefulWidget {
   final Face face;
   final FaceApi faceApi;
@@ -23,7 +26,7 @@ class FaceDetailScreen extends StatefulWidget {
 class _FaceDetailScreenState extends State<FaceDetailScreen> {
   List<FaceEmbeddingInfo> _embeddings = [];
   bool _loading = true;
-  late String _name = widget.face.name;
+  late String _name = widget.face.displayName;
 
   @override
   void initState() {
@@ -32,9 +35,12 @@ class _FaceDetailScreenState extends State<FaceDetailScreen> {
   }
 
   Future<void> _load() async {
+    final sw = Stopwatch()..start(); // TEMP FACE-DIAG
+    _diag('detail._load face=${widget.face.id} name=${widget.face.name}'); // TEMP FACE-DIAG
     setState(() => _loading = true);
     try {
       final emb = await widget.faceApi.listEmbeddings(widget.face.id);
+      _diag('detail._load done count=${emb.length} ${sw.elapsedMilliseconds}ms'); // TEMP FACE-DIAG
       if (mounted) {
         setState(() {
           _embeddings = emb;
@@ -42,6 +48,7 @@ class _FaceDetailScreenState extends State<FaceDetailScreen> {
         });
       }
     } catch (e) {
+      _diag('detail._load ERROR $e'); // TEMP FACE-DIAG
       if (mounted) setState(() => _loading = false);
     }
   }
@@ -69,7 +76,7 @@ class _FaceDetailScreenState extends State<FaceDetailScreen> {
     if (result == null || result.isEmpty || result == _name) return;
     try {
       final updated = await widget.faceApi.update(widget.face.id, name: result);
-      if (mounted) setState(() => _name = updated.name);
+      if (mounted) setState(() => _name = updated.displayName);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -109,6 +116,8 @@ class _FaceDetailScreenState extends State<FaceDetailScreen> {
   }
 
   Future<void> _addSamples() async {
+    _diag('addSamples push enrollment seedFace=${widget.face.id}'); // TEMP FACE-DIAG
+    final sw = Stopwatch()..start(); // TEMP FACE-DIAG
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => FaceEnrollmentScreen(
@@ -122,6 +131,7 @@ class _FaceDetailScreenState extends State<FaceDetailScreen> {
         ),
       ),
     );
+    _diag('addSamples returned in_screen_ms=${sw.elapsedMilliseconds} reloading detail'); // TEMP FACE-DIAG
     if (mounted) _load();
   }
 

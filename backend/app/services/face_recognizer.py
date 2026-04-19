@@ -8,6 +8,7 @@ RT-DETR confirms a person — we crop the person bbox and then run face detectio
 
 import asyncio
 import logging
+import time  # TEMP FACE-DIAG
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +21,11 @@ logger = logging.getLogger(__name__)
 SCRFD_INPUT = 640
 SCRFD_STRIDES = (8, 16, 32)
 SCRFD_ANCHORS_PER_CELL = 2
-SCRFD_SCORE_THRESHOLD = 0.5
+SCRFD_SCORE_THRESHOLD = 0.6
 SCRFD_NMS_IOU = 0.4
+# Drop detections smaller than this (shortest side, in the crop's native pixels).
+# Below ~40px the 5-landmark regression gets too noisy for a reliable ArcFace embedding.
+SCRFD_MIN_FACE_SIZE = 40
 
 ARCFACE_INPUT = 112
 
@@ -160,9 +164,39 @@ def _scrfd_postprocess(
     return [(boxes[i], float(scores[i]), kps[i]) for i in keep]
 
 
+def _umeyama_similarity(src: np.ndarray, dst: np.ndarray) -> np.ndarray | None:
+    """Least-squares similarity transform (rotation + uniform scale + translation).
+
+    This is the alignment InsightFace/skimage use (`SimilarityTransform.estimate`)
+    and what ArcFace was trained with. LMEDS on only 5 points is noisier.
+    Returns a 2x3 affine matrix in OpenCV's [R|t] format.
+    """
+    src = src.astype(np.float64)
+    dst = dst.astype(np.float64)
+    n = src.shape[0]
+    src_mean = src.mean(axis=0)
+    dst_mean = dst.mean(axis=0)
+    src_c = src - src_mean
+    dst_c = dst - dst_mean
+    H = dst_c.T @ src_c / n
+    U, S, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(U @ Vt))
+    D = np.diag([1.0, d])
+    R = U @ D @ Vt
+    var_src = (src_c ** 2).sum() / n
+    if var_src < 1e-12:
+        return None
+    scale = (S * np.array([1.0, d])).sum() / var_src
+    t = dst_mean - scale * R @ src_mean
+    M = np.zeros((2, 3), dtype=np.float32)
+    M[:, :2] = scale * R
+    M[:, 2] = t
+    return M
+
+
 def _align_face(frame: np.ndarray, landmarks: np.ndarray) -> np.ndarray:
-    """Warp face to 112x112 canonical via 5-point affine."""
-    tform = cv2.estimateAffinePartial2D(landmarks.astype(np.float32), _ARCFACE_DST, method=cv2.LMEDS)[0]
+    """Warp face to 112x112 canonical via 5-point similarity transform."""
+    tform = _umeyama_similarity(landmarks, _ARCFACE_DST)
     if tform is None:
         return cv2.resize(frame, (ARCFACE_INPUT, ARCFACE_INPUT))
     return cv2.warpAffine(frame, tform, (ARCFACE_INPUT, ARCFACE_INPUT), borderValue=0.0)
@@ -264,6 +298,7 @@ class FaceRecognizer:
 
         from app.database import get_session_factory
         from app.models import Face, FaceEmbedding
+        _t0 = time.monotonic()  # TEMP FACE-DIAG
         factory = get_session_factory()
         async with factory() as session:
             result = await session.execute(
@@ -271,6 +306,7 @@ class FaceRecognizer:
                 .join(Face, Face.id == FaceEmbedding.face_id)
             )
             rows = result.all()
+        _t_query = time.monotonic()  # TEMP FACE-DIAG
         cache: list[tuple[int, str, np.ndarray]] = []
         for face_id, name, blob in rows:
             vec = np.frombuffer(blob, dtype=np.float32)
@@ -279,7 +315,14 @@ class FaceRecognizer:
             cache.append((int(face_id), str(name), vec))
         self._enrollment = cache
         self._loaded = True
-        logger.info("Face embedding cache loaded", extra={"count": len(cache)})
+        _t_done = time.monotonic()  # TEMP FACE-DIAG
+        logger.info(  # TEMP FACE-DIAG (replaced simple info log)
+            "[FACE-DIAG] reload_cache rows=%d cached=%d query=%dms parse=%dms",
+            len(rows), len(cache),
+            int((_t_query - _t0) * 1000),
+            int((_t_done - _t_query) * 1000),
+            extra={"count": len(cache), "rows": len(rows)},
+        )
 
     async def detect_and_embed(
         self, frame_bgr: np.ndarray, person_bbox: tuple[int, int, int, int] | None = None,
@@ -289,14 +332,29 @@ class FaceRecognizer:
             return []
         from app.services._onnx_lock import get_onnx_lock
         loop = asyncio.get_event_loop()
+        t0 = time.monotonic()  # TEMP FACE-DIAG
         async with get_onnx_lock():
-            return await loop.run_in_executor(
+            t1 = time.monotonic()  # TEMP FACE-DIAG
+            hits = await loop.run_in_executor(
                 self._executor, self._detect_and_embed_sync, frame_bgr, person_bbox,
             )
+            t2 = time.monotonic()  # TEMP FACE-DIAG
+            logger.info(  # TEMP FACE-DIAG
+                "[FACE-DIAG] detect_and_embed lock_wait=%dms infer=%dms hits=%d person_bbox=%s",
+                int((t1 - t0) * 1000), int((t2 - t1) * 1000), len(hits), person_bbox is not None,
+                extra={
+                    "lock_wait_ms": int((t1 - t0) * 1000),
+                    "infer_ms": int((t2 - t1) * 1000),
+                    "hits": len(hits),
+                    "cropped": person_bbox is not None,
+                },
+            )
+            return hits
 
     def _detect_and_embed_sync(
         self, frame: np.ndarray, person_bbox: tuple[int, int, int, int] | None,
     ) -> list[FaceHit]:
+        _diag_t0 = time.monotonic()  # TEMP FACE-DIAG
         if person_bbox is not None:
             x1, y1, x2, y2 = person_bbox
             # Pad the bbox slightly in case the head extends above the torso bbox
@@ -319,20 +377,39 @@ class FaceRecognizer:
         blob = canvas[:, :, ::-1].astype(np.float32)
         blob = (blob - 127.5) / 128.0
         blob = blob.transpose(2, 0, 1)[None, ...]
+        _t_pre = time.monotonic()  # TEMP FACE-DIAG
 
         try:
             outputs = self._detector.run(None, {self._detector_input: blob})
         except Exception:
             logger.exception("SCRFD inference failed")
             return []
+        _t_scrfd = time.monotonic()  # TEMP FACE-DIAG
 
         h, w = crop.shape[:2]
         raw = _scrfd_postprocess(outputs, scale, pad_x, pad_yy, h, w)
+        _t_post = time.monotonic()  # TEMP FACE-DIAG
         if not raw:
+            logger.info(  # TEMP FACE-DIAG
+                "[FACE-DIAG] sync_no_raw crop=%dx%d pre=%dms scrfd=%dms post=%dms",
+                w, h,
+                int((_t_pre - _diag_t0) * 1000),
+                int((_t_scrfd - _t_pre) * 1000),
+                int((_t_post - _t_scrfd) * 1000),
+            )
             return []
 
         hits: list[FaceHit] = []
+        _arc_total_ms = 0  # TEMP FACE-DIAG
+        _skipped_small = 0  # TEMP FACE-DIAG
         for box, score, landmarks in raw:
+            # Gate out tiny faces: embeddings are unstable below ~40px shortest side.
+            box_w = float(box[2] - box[0])
+            box_h = float(box[3] - box[1])
+            if min(box_w, box_h) < SCRFD_MIN_FACE_SIZE:
+                _skipped_small += 1
+                continue
+            _t_arc0 = time.monotonic()  # TEMP FACE-DIAG
             try:
                 aligned = _align_face(crop, landmarks)
                 emb_blob = _arcface_preprocess(aligned)
@@ -341,6 +418,7 @@ class FaceRecognizer:
             except Exception:
                 logger.exception("ArcFace embedding failed")
                 continue
+            _arc_total_ms += int((time.monotonic() - _t_arc0) * 1000)  # TEMP FACE-DIAG
             # Translate box + landmarks back to full-frame coords if we cropped
             fbx1 = int(box[0]) + offset[0]
             fby1 = int(box[1]) + offset[1]
@@ -353,6 +431,23 @@ class FaceRecognizer:
                 x1=fbx1, y1=fby1, x2=fbx2, y2=fby2,
                 score=score, landmarks=full_lm, embedding=emb,
             ))
+        logger.info(  # TEMP FACE-DIAG
+            "[FACE-DIAG] sync crop=%dx%d pre=%dms scrfd=%dms post=%dms arc_total=%dms raw=%d kept=%d small=%d",
+            w, h,
+            int((_t_pre - _diag_t0) * 1000),
+            int((_t_scrfd - _t_pre) * 1000),
+            int((_t_post - _t_scrfd) * 1000),
+            _arc_total_ms, len(raw), len(hits), _skipped_small,
+            extra={
+                "crop_w": w, "crop_h": h,
+                "pre_ms": int((_t_pre - _diag_t0) * 1000),
+                "scrfd_ms": int((_t_scrfd - _t_pre) * 1000),
+                "post_ms": int((_t_post - _t_scrfd) * 1000),
+                "arc_total_ms": _arc_total_ms,
+                "raw_hits": len(raw), "kept_hits": len(hits),
+                "skipped_small": _skipped_small,
+            },
+        )
         return hits
 
     def match(self, embedding: np.ndarray, threshold: float) -> FaceMatch | None:

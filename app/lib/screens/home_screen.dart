@@ -278,41 +278,46 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
 
-    // Fetch sessions sequentially to avoid launching all ffmpeg transcode
-    // processes simultaneously (which can freeze the GPU/system).
-    // Check _generation and fullscreen state each iteration so entering
-    // fullscreen cancels remaining requests without breaking segment
-    // continuation for already-playing cameras.
-    final sessions = <int, PlaybackSession>{};
-    for (var i = 0; i < enabledCameras.length; i++) {
+    // Concurrency tuning: 7 cameras × `-c copy` ffmpeg saturates the disk, but
+    // strictly serial accumulates running ffmpegs (each one keeps writing to
+    // feed its libmpv buffer) so later cameras hit growing contention. Sweet
+    // spot empirically is ~3 in flight at a time for direct quality. Transcoded
+    // qualities are GPU-bound (NVENC) so we cap at 2.
+    final isDirect = widget.quality == Quality.direct;
+    final batchSize = isDirect ? 3 : 2;
+
+    Future<void> fetchAndOpen(Camera cam) async {
       if (_generation != gen || widget.fullscreenCameraId != null) return;
-      final cam = enabledCameras[i];
       try {
         bench.mark('api_request_start', extra: {'camera': cam.id});
         final session = await widget.recordingApi.startPlayback(
           cam.id, start, widget.quality.param,
           benchId: bench.id,
         );
+        if (_generation != gen || !mounted) return;
         bench.mark('api_response_received',
             extra: {'camera': cam.id, 'seek_s': session.seekSeconds.toStringAsFixed(2)});
-        sessions[cam.id] = session;
+        // Anchor the master wall clock on the first session that resolves.
+        _playbackWallStartMs ??= DateTime.now().millisecondsSinceEpoch;
+        if (mounted) {
+          setState(() => _pbLoading.remove(cam.id));
+        }
+        _openCameraSession(cam.id, session, gen);
       } catch (_) {
         if (_generation == gen && mounted) {
-          _pbFailed.add(cam.id);
+          setState(() {
+            _pbLoading.remove(cam.id);
+            _pbFailed.add(cam.id);
+          });
         }
       }
     }
-    if (_generation != gen || widget.fullscreenCameraId != null) return;
 
-    // Set wall clock for accurate master time tracking
-    _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
-
-    bench.mark('opening_players');
-    for (final entry in sessions.entries) {
-      _pbLoading.remove(entry.key);
-      _openCameraSession(entry.key, entry.value, gen);
+    for (var i = 0; i < enabledCameras.length; i += batchSize) {
+      if (_generation != gen || widget.fullscreenCameraId != null) return;
+      final batch = enabledCameras.skip(i).take(batchSize).toList();
+      await Future.wait(batch.map(fetchAndOpen));
     }
-    if (mounted) setState(() {});
   }
 
   /// Opens a player for a single camera session and wires up segment continuation.

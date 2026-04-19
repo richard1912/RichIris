@@ -1,6 +1,8 @@
 """Face enrollment and CRUD API."""
 
+import asyncio
 import logging
+import uuid  # TEMP FACE-DIAG
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,8 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
 from app.database import get_db
-from app.models import Camera, Face, FaceEmbedding, MotionEvent
+from app.models import Camera, Face, FaceEmbedding, MotionEvent, UnclusteredFace
 from app.schemas import (
+    FaceClusterMergeRequest,
+    FaceClusterNameRequest,
+    FaceClusterResponse,
     FaceCreate,
     FaceEmbeddingInfo,
     FaceEnrollCandidate,
@@ -24,12 +29,18 @@ from app.schemas import (
     FaceUpdate,
     UnlabeledThumb,
 )
+from app.services.benchmark import BenchmarkTrace  # TEMP FACE-DIAG
+from app.services.face_crop import FACE_CROP_MARGIN, FACE_CROP_OUTPUT, save_face_crop
 from app.services.face_recognizer import get_face_recognizer
 from app.services.ffmpeg import sanitize_camera_name
 from app.services.object_detector import build_class_list, get_object_detector
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/faces", tags=["faces"])
+
+
+def _diag_id(prefix: str) -> str:  # TEMP FACE-DIAG
+    return f"face-{prefix}-{uuid.uuid4().hex[:6]}"
 
 
 async def _latest_crop(db: AsyncSession, face_id: int) -> str | None:
@@ -45,9 +56,11 @@ async def _latest_crop(db: AsyncSession, face_id: int) -> str | None:
 
 @router.get("", response_model=list[FaceResponse])
 async def list_faces(db: AsyncSession = Depends(get_db)):
+    # Named people only. Unnamed clusters live under /api/faces/clusters.
     result = await db.execute(
         select(Face, func.count(FaceEmbedding.id).label("cnt"))
         .outerjoin(FaceEmbedding, FaceEmbedding.face_id == Face.id)
+        .where(Face.name.isnot(None))
         .group_by(Face.id)
         .order_by(Face.name)
     )
@@ -120,75 +133,214 @@ async def delete_face(face_id: int, db: AsyncSession = Depends(get_db)):
     logger.info("Face deleted", extra={"face_id": face_id})
 
 
+# --- Clustering ("suggested people") endpoints -----------------------------
+# Immich-style: the background clusterer creates unnamed Face rows; these
+# endpoints let the UI list them, name them (promote to a person), merge two
+# clusters, or discard noise. The re-cluster endpoint wipes auto-clustered
+# state and lets the worker rebuild from the queue.
+
+@router.get("/clusters", response_model=list[FaceClusterResponse])
+async def list_clusters(
+    min_size: int = Query(1, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return unnamed face clusters with at least `min_size` embeddings.
+
+    Sorted by embedding count descending so the most confidently-formed
+    clusters surface first. Each cluster returns up to 4 sample crop paths
+    (highest detection_score first) for the UI mosaic, plus aggregated info
+    about which cameras the person appeared on and when.
+    """
+    rows = (await db.execute(
+        select(Face, func.count(FaceEmbedding.id).label("cnt"))
+        .join(FaceEmbedding, FaceEmbedding.face_id == Face.id)
+        .where(Face.name.is_(None))
+        .group_by(Face.id)
+        .having(func.count(FaceEmbedding.id) >= min_size)
+        .order_by(desc("cnt"))
+        .limit(limit)
+    )).all()
+
+    out: list[FaceClusterResponse] = []
+    for face, cnt in rows:
+        # Sample embeddings: best-score first, cap 4. UI fetches crops by id.
+        sample_ids = (await db.execute(
+            select(FaceEmbedding.id)
+            .where(FaceEmbedding.face_id == face.id)
+            .where(FaceEmbedding.face_crop_path.isnot(None))
+            .order_by(desc(FaceEmbedding.detection_score), desc(FaceEmbedding.id))
+            .limit(4)
+        )).scalars().all()
+        # Aggregate camera names + latest event time via the motion_event fk.
+        cam_rows = (await db.execute(
+            select(Camera.name, func.max(MotionEvent.start_time))
+            .join(MotionEvent, MotionEvent.camera_id == Camera.id)
+            .join(FaceEmbedding, FaceEmbedding.source_motion_event_id == MotionEvent.id)
+            .where(FaceEmbedding.face_id == face.id)
+            .group_by(Camera.name)
+        )).all()
+        cam_names = [r[0] for r in cam_rows]
+        latest = max((r[1] for r in cam_rows if r[1] is not None), default=None)
+        out.append(FaceClusterResponse(
+            id=face.id,
+            embedding_count=int(cnt),
+            sample_embedding_ids=[int(i) for i in sample_ids],
+            latest_event_time=latest,
+            cameras_seen=cam_names,
+            created_at=face.created_at,
+        ))
+    return out
+
+
+@router.post("/clusters/{cluster_id}/name", response_model=FaceResponse)
+async def name_cluster(
+    cluster_id: int, data: FaceClusterNameRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Promote an unnamed cluster to a named person."""
+    face = await db.get(Face, cluster_id)
+    if not face:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    if face.name is not None:
+        raise HTTPException(status_code=409, detail="Cluster is already named")
+    # Name must be unique among named faces.
+    clash = await db.execute(
+        select(Face).where(Face.name == data.name, Face.id != cluster_id)
+    )
+    if clash.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Face name already exists")
+    face.name = data.name
+    await db.commit()
+    await db.refresh(face)
+    cnt = (await db.execute(
+        select(func.count(FaceEmbedding.id)).where(FaceEmbedding.face_id == cluster_id)
+    )).scalar() or 0
+    latest = await _latest_crop(db, cluster_id)
+    recognizer = get_face_recognizer()
+    await recognizer.reload_cache()
+    logger.info("Cluster promoted to named face", extra={
+        "face_id": cluster_id, "face_name": data.name, "embedding_count": cnt,
+    })
+    return FaceResponse(
+        id=face.id, name=face.name, notes=face.notes,
+        embedding_count=cnt, latest_crop_path=latest, created_at=face.created_at,
+    )
+
+
+@router.post("/clusters/{cluster_id}/merge", response_model=FaceResponse)
+async def merge_cluster(
+    cluster_id: int, data: FaceClusterMergeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reparent all embeddings of `cluster_id` into `target_face_id`, then delete the source."""
+    if cluster_id == data.target_face_id:
+        raise HTTPException(status_code=400, detail="Cannot merge a cluster into itself")
+    src = await db.get(Face, cluster_id)
+    tgt = await db.get(Face, data.target_face_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="Source cluster not found")
+    if not tgt:
+        raise HTTPException(status_code=404, detail="Target face not found")
+    from sqlalchemy import update as sa_update
+    await db.execute(
+        sa_update(FaceEmbedding)
+        .where(FaceEmbedding.face_id == cluster_id)
+        .values(face_id=data.target_face_id)
+    )
+    # UnclusteredFace.assigned_face_id needs to follow the reparent so history
+    # stays coherent (e.g., re-cluster operations depend on it).
+    await db.execute(
+        sa_update(UnclusteredFace)
+        .where(UnclusteredFace.assigned_face_id == cluster_id)
+        .values(assigned_face_id=data.target_face_id)
+    )
+    await db.delete(src)
+    await db.commit()
+    await db.refresh(tgt)
+    cnt = (await db.execute(
+        select(func.count(FaceEmbedding.id)).where(FaceEmbedding.face_id == data.target_face_id)
+    )).scalar() or 0
+    latest = await _latest_crop(db, data.target_face_id)
+    recognizer = get_face_recognizer()
+    await recognizer.reload_cache()
+    logger.info("Cluster merged", extra={
+        "source_face_id": cluster_id, "target_face_id": data.target_face_id,
+    })
+    return FaceResponse(
+        id=tgt.id, name=tgt.name, notes=tgt.notes,
+        embedding_count=cnt, latest_crop_path=latest, created_at=tgt.created_at,
+    )
+
+
+@router.delete("/clusters/{cluster_id}", status_code=204)
+async def discard_cluster(cluster_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete an unnamed cluster (user says 'not a real person / noise')."""
+    face = await db.get(Face, cluster_id)
+    if not face:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    if face.name is not None:
+        raise HTTPException(status_code=409, detail="Named faces must use DELETE /api/faces/{id}")
+    await db.delete(face)
+    await db.commit()
+    recognizer = get_face_recognizer()
+    await recognizer.reload_cache()
+    logger.info("Cluster discarded", extra={"face_id": cluster_id})
+
+
+@router.post("/clusters/recluster", status_code=202)
+async def recluster(db: AsyncSession = Depends(get_db)):
+    """Delete all auto-clustered embeddings + all unnamed clusters, then
+    re-queue every processed UnclusteredFace row so the background worker
+    rebuilds clustering state from scratch.
+
+    User-enrolled embeddings on named faces are preserved.
+    """
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
+    # Drop auto-clustered embeddings (leaves user-enrolled ones intact).
+    await db.execute(
+        sa_delete(FaceEmbedding).where(FaceEmbedding.source == "auto_clustered")
+    )
+    # Drop unnamed Face rows (their embeddings were deleted above or cascade).
+    await db.execute(sa_delete(Face).where(Face.name.is_(None)))
+    # Re-queue all UnclusteredFace rows: clear processed_at so the worker
+    # re-processes them, and clear assigned_face_id since those IDs may be gone.
+    await db.execute(
+        sa_update(UnclusteredFace).values(processed_at=None, assigned_face_id=None)
+    )
+    await db.commit()
+    recognizer = get_face_recognizer()
+    await recognizer.reload_cache()
+    # Kick the worker so the user doesn't wait for the next tick.
+    from app.services.face_clusterer import get_face_clusterer
+    clusterer = get_face_clusterer()
+    asyncio.create_task(clusterer.drain_once())
+    logger.info("Re-cluster triggered")
+    return {"status": "queued"}
+
+
 @router.get("/{face_id}/embeddings", response_model=list[FaceEmbeddingInfo])
 async def list_embeddings(face_id: int, db: AsyncSession = Depends(get_db)):
+    trace = BenchmarkTrace(_diag_id("list-emb"), face_id=face_id)  # TEMP FACE-DIAG
     face = await db.get(Face, face_id)
     if not face:
         raise HTTPException(status_code=404, detail="Face not found")
     result = await db.execute(
         select(FaceEmbedding).where(FaceEmbedding.face_id == face_id).order_by(desc(FaceEmbedding.id))
     )
-    return list(result.scalars().all())
+    rows = list(result.scalars().all())  # TEMP FACE-DIAG (was return list(...))
+    trace.mark("embeddings_query", count=len(rows))  # TEMP FACE-DIAG
+    trace.summary()  # TEMP FACE-DIAG
+    return rows
 
 
-FACE_CROP_MARGIN = 0.5    # Expand bbox by 50% each side so we include hair/chin/ears
-FACE_CROP_OUTPUT = 192    # Final square thumbnail size
-
-def _save_face_crop(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> str | None:
-    """Save a padded, square face thumbnail suitable for the Faces UI.
-
-    The raw SCRFD bbox is tight on the face; expanding it and centering on a
-    square canvas gives a much more recognisable avatar. Small crops are
-    upscaled with cubic interpolation so the stored image is always
-    FACE_CROP_OUTPUT × FACE_CROP_OUTPUT regardless of how far away the subject
-    was from the camera.
-    """
-    try:
-        config = get_config()
-        thumb_root = Path(config.storage.thumbnails_dir)
-        face_dir = thumb_root / "_faces"
-        face_dir.mkdir(parents=True, exist_ok=True)
-        x1, y1, x2, y2 = bbox
-        h, w = frame.shape[:2]
-
-        # Expand bbox by margin and clamp to frame
-        bw = x2 - x1
-        bh = y2 - y1
-        pad_x = int(bw * FACE_CROP_MARGIN)
-        pad_y = int(bh * FACE_CROP_MARGIN)
-        x1 = max(0, x1 - pad_x)
-        y1 = max(0, y1 - pad_y)
-        x2 = min(w, x2 + pad_x)
-        y2 = min(h, y2 + pad_y)
-        if x2 <= x1 or y2 <= y1:
-            return None
-
-        # Make the crop square (around the center) so upscale doesn't stretch
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-        side = max(x2 - x1, y2 - y1)
-        half = side // 2
-        sx1 = max(0, cx - half)
-        sy1 = max(0, cy - half)
-        sx2 = min(w, cx + half)
-        sy2 = min(h, cy + half)
-        crop = frame[sy1:sy2, sx1:sx2]
-        if crop.size == 0:
-            return None
-
-        # Resize to standard output. Upscale small crops with cubic for
-        # smoother edges; downscale large ones with area for sharpness.
-        ch, cw = crop.shape[:2]
-        interp = cv2.INTER_CUBIC if max(ch, cw) < FACE_CROP_OUTPUT else cv2.INTER_AREA
-        out = cv2.resize(crop, (FACE_CROP_OUTPUT, FACE_CROP_OUTPUT), interpolation=interp)
-
-        filename = f"face_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-        path = face_dir / filename
-        cv2.imwrite(str(path), out, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        return str(path)
-    except Exception:
-        logger.exception("Failed to save enrollment face crop")
-        return None
+def _save_face_crop(frame: np.ndarray, bbox: tuple[int, int, int, int], trace: BenchmarkTrace | None = None) -> str | None:  # TEMP FACE-DIAG
+    """Thin wrapper around services.face_crop.save_face_crop for enrollment trace hooks."""
+    path = save_face_crop(frame, bbox)
+    if trace is not None and path is not None:  # TEMP FACE-DIAG
+        trace.mark("save_crop_done", out_path=path)
+    return path
 
 
 @router.post("/{face_id}/embeddings", response_model=FaceEnrollResponse)
@@ -196,13 +348,17 @@ async def enroll_embedding(
     face_id: int, data: FaceEnrollRequest, db: AsyncSession = Depends(get_db),
 ):
     """Run SCRFD+ArcFace on a thumbnail, store the matching face embedding."""
+    # TEMP FACE-DIAG: end-to-end trace for enrollment
+    trace = BenchmarkTrace(_diag_id("enroll"), face_id=face_id, has_bbox=data.bbox is not None)
     face = await db.get(Face, face_id)
+    trace.mark("face_lookup", found=bool(face))
     if not face:
         raise HTTPException(status_code=404, detail="Face not found")
 
     recognizer = get_face_recognizer()
     if not recognizer.available:
         raise HTTPException(status_code=503, detail="Face recognizer not ready")
+    trace.mark("recognizer_ready")
 
     src = Path(data.source_thumbnail_path)
     if not src.exists():
@@ -211,6 +367,7 @@ async def enroll_embedding(
     frame = cv2.imread(str(src))
     if frame is None:
         raise HTTPException(status_code=400, detail="Could not read source image")
+    trace.mark("imread", path=str(src), shape=f"{frame.shape[1]}x{frame.shape[0]}", bytes=src.stat().st_size)  # TEMP FACE-DIAG
 
     # Mirror the live pipeline's two-stage approach: full-frame SCRFD first
     # (catches close-up or obvious faces), then fall back to running SCRFD
@@ -219,16 +376,19 @@ async def enroll_embedding(
     # downscaled into oblivion when SCRFD letterboxes to 640×640 and are
     # missed entirely.
     hits = await recognizer.detect_and_embed(frame, person_bbox=None)
+    trace.mark("scrfd_fullframe", hits=len(hits))  # TEMP FACE-DIAG
     if not hits:
         detector = get_object_detector()
         if detector and detector._started:
             persons = await detector.detect_objects(
                 frame, 0.5, classes=build_class_list(True, False, False),
             )
+            trace.mark("rtdetr_persons", count=len(persons))  # TEMP FACE-DIAG
             seen_boxes: list[tuple[int, int, int, int]] = []
-            for p in persons:
+            for idx, p in enumerate(persons):  # TEMP FACE-DIAG: idx
                 bbox = (p.x1, p.y1, p.x2, p.y2)
                 crop_hits = await recognizer.detect_and_embed(frame, person_bbox=bbox)
+                trace.mark(f"scrfd_person_{idx}", bbox=f"{p.x1},{p.y1},{p.x2},{p.y2}", hits=len(crop_hits))  # TEMP FACE-DIAG
                 for h in crop_hits:
                     # Dedupe: skip faces that overlap ones we've already kept
                     key = (h.x1, h.y1, h.x2, h.y2)
@@ -237,7 +397,11 @@ async def enroll_embedding(
                         continue
                     seen_boxes.append(key)
                     hits.append(h)
+        else:
+            trace.mark("rtdetr_unavailable")  # TEMP FACE-DIAG
     if not hits:
+        trace.mark("no_face_return")  # TEMP FACE-DIAG
+        trace.summary()  # TEMP FACE-DIAG
         return FaceEnrollResponse(status="no_face")
 
     chosen = None
@@ -257,6 +421,8 @@ async def enroll_embedding(
         chosen = hits[0]
     else:
         # Multiple faces — let the caller pick
+        trace.mark("multiple_faces_return", candidates=len(hits))  # TEMP FACE-DIAG
+        trace.summary()  # TEMP FACE-DIAG
         return FaceEnrollResponse(
             status="multiple_faces",
             candidates=[
@@ -266,9 +432,12 @@ async def enroll_embedding(
         )
 
     if chosen is None:
+        trace.mark("no_face_after_pick")  # TEMP FACE-DIAG
+        trace.summary()  # TEMP FACE-DIAG
         return FaceEnrollResponse(status="no_face")
+    trace.mark("face_chosen", score=chosen.score)  # TEMP FACE-DIAG
 
-    crop_path = _save_face_crop(frame, (chosen.x1, chosen.y1, chosen.x2, chosen.y2))
+    crop_path = _save_face_crop(frame, (chosen.x1, chosen.y1, chosen.x2, chosen.y2), trace=trace)  # TEMP FACE-DIAG trace arg
     blob = chosen.embedding.astype(np.float32).tobytes()
     emb = FaceEmbedding(
         face_id=face_id,
@@ -279,10 +448,13 @@ async def enroll_embedding(
     db.add(emb)
     await db.commit()
     await db.refresh(emb)
+    trace.mark("db_commit", embedding_id=emb.id)  # TEMP FACE-DIAG
     await recognizer.reload_cache()
+    trace.mark("cache_reload")  # TEMP FACE-DIAG
     logger.info("Face embedding enrolled", extra={
         "face_id": face_id, "embedding_id": emb.id, "score": chosen.score,
     })
+    trace.summary()  # TEMP FACE-DIAG
     return FaceEnrollResponse(status="enrolled", embedding_id=emb.id, crop_path=crop_path)
 
 
@@ -314,6 +486,7 @@ async def unlabeled_thumbnails(
     every person event (useful for cameras where Face Recognition is disabled,
     so nothing populates `face_matches`/`face_unknown`).
     """
+    trace = BenchmarkTrace(_diag_id("unlabeled"), date=date, camera_id=camera_id, limit=limit, with_face_only=with_face_only)  # TEMP FACE-DIAG
     query = (
         select(MotionEvent, Camera)
         .join(Camera, Camera.id == MotionEvent.camera_id)
@@ -341,6 +514,7 @@ async def unlabeled_thumbnails(
     query = query.order_by(desc(MotionEvent.start_time)).limit(limit)
     result = await db.execute(query)
     events = result.all()
+    trace.mark("motion_query", event_count=len(events))  # TEMP FACE-DIAG
 
     # Bulk-lookup: which thumbs have already been enrolled to which faces.
     # Done as a single join keyed on source_thumbnail_path.
@@ -354,6 +528,7 @@ async def unlabeled_thumbnails(
         )
         for path, name in rows.all():
             assigned.setdefault(path, []).append(name)
+    trace.mark("assigned_lookup", assigned_count=len(assigned), thumb_paths=len(thumb_paths))  # TEMP FACE-DIAG
 
     out: list[UnlabeledThumb] = []
     for event, camera in events:
@@ -370,15 +545,24 @@ async def unlabeled_thumbnails(
             detection_label=event.detection_label,
             assigned_face_names=unique_names,
         ))
+    trace.mark("build_response", returned=len(out))  # TEMP FACE-DIAG
+    trace.summary()  # TEMP FACE-DIAG
     return out
 
 
 @router.get("/thumbnails/event/{event_id}/path")
 async def resolve_event_thumbnail_path(event_id: int, db: AsyncSession = Depends(get_db)):
     """Resolve a motion-event id to the on-disk thumbnail path (used for enrollment)."""
+    trace = BenchmarkTrace(_diag_id("resolve"), event_id=event_id)  # TEMP FACE-DIAG
     event = await db.get(MotionEvent, event_id)
     if not event or not event.thumbnail_path:
+        trace.mark("not_found")  # TEMP FACE-DIAG
+        trace.summary()  # TEMP FACE-DIAG
         raise HTTPException(status_code=404, detail="Thumbnail not found")
+    # TEMP FACE-DIAG: verify file actually exists on disk + report size
+    p = Path(event.thumbnail_path)
+    trace.mark("resolved", path=event.thumbnail_path, exists=p.exists(), bytes=(p.stat().st_size if p.exists() else -1))
+    trace.summary()  # TEMP FACE-DIAG
     return {"source_thumbnail_path": event.thumbnail_path}
 
 
