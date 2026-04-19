@@ -32,6 +32,10 @@ go2rtc/go2rtc.yaml
 go2rtc/go2rtc.exe
 scripts/watchdog.config.psd1
 
+# Dev-only scripts with developer-specific absolute paths (not redistributable).
+rebuild.bat
+service-install.bat
+
 # Build cache (auto-downloaded dependencies)
 .build-cache/
 
