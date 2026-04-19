@@ -2,9 +2,7 @@
 update claude md as needed for code changes
 ## Quick Reference
 - **Backend**: Windows service `RichIris` via NSSM (FastAPI on port 8700). Restart: `nssm restart RichIris`
-- **Health watchdog (2 layers)**:
-  1. **In-process self-watchdog** (`backend/app/services/self_watchdog.py`): probes `127.0.0.1:{port}/api/health` every 30s (60s startup grace, 5s timeout). 3 consecutive failures → `os._exit(1)` → NSSM restarts (AppExit=Restart, throttle 1500ms). Catches the silent-listener-death failure mode where uvicorn's socket dies but the asyncio loop keeps running.
-  2. **External scheduled-task watchdog** (`scripts/watchdog.ps1`, Scheduled Task runs as SYSTEM every 60s via `pwsh.exe`): probes health; on failure calls `Restart-Service RichIris` and optionally pushes an ntfy notification. Fallback for full event-loop deadlocks the in-process watchdog can't catch. Logs to `{data_dir}/logs/watchdog.log`. **Requires PowerShell 7 (pwsh) — PS 5.1 parser chokes on the script.** User-specific ntfy URL + credentials live in `scripts/watchdog.config.psd1` (gitignored; template: `scripts/watchdog.config.psd1.template`).
+- **Health watchdog** — `backend/app/services/self_watchdog.py`: probes `127.0.0.1:{port}/api/health` every 30s (60s startup grace, 5s timeout). 3 consecutive failures → `os._exit(1)` → NSSM restarts (AppExit=Restart, throttle 1500ms). Catches the silent-listener-death failure mode where uvicorn's socket dies but the asyncio loop keeps running.
 - **go2rtc**: Child process on fixed ports (API 18700, RTSP 18554). Ports reported via `/api/system/status` → `go2rtc_rtsp_port`.
 - **Config**: `bootstrap.yaml` (data_dir + port only). All other settings in SQLite `settings` table via GUI or `GET/PUT /api/settings`. Legacy `config.yaml` migrated to DB on first startup.
 - **Data directory** (`data_dir` from bootstrap.yaml):
