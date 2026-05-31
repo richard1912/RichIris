@@ -279,6 +279,10 @@ class MotionDetector:
                     await asyncio.sleep(1.0)
                     continue
 
+                # Wall-clock of this frame's arrival — used as MotionEvent.start_time
+                # so events align with when the object was actually visible, not
+                # when the multi-frame-confirmation + face-fetch pipeline finished.
+                captured_at = datetime.now()
                 consecutive_failures = 0
 
                 # Heartbeat
@@ -398,6 +402,7 @@ class MotionDetector:
                                         detection_bbox=p_bbox,
                                         motion_mask=thresh,
                                         motion_threshold_pct=threshold_pct,
+                                        captured_at=captured_at,
                                     )
                             else:
                                 # Category not detected this frame — record miss
@@ -726,8 +731,14 @@ class MotionDetector:
         detection_bbox: tuple[int, int, int, int] | None = None,
         motion_mask: np.ndarray | None = None,
         motion_threshold_pct: float = 0.0,
+        captured_at: datetime | None = None,
     ) -> None:
         now = datetime.now()
+        # event_start = when the triggering frame was captured (AI path), falling
+        # back to now for motion-only events that fire immediately. Using the
+        # capture time makes timeline dots align with the actual video moment
+        # rather than the pipeline-completion moment.
+        event_start = captured_at or now
         category = _label_category(detection_label)
         key = (cam_id, category)
         self._last_motion[key] = now
@@ -790,10 +801,20 @@ class MotionDetector:
                 cam_id, shape_hw, detection_bbox, motion_mask, motion_threshold_pct,
             )
 
+            logger.info(
+                "Event timing",
+                extra={
+                    "camera": cam_name, "category": category,
+                    "captured_at": event_start.isoformat(),
+                    "pipeline_now": now.isoformat(),
+                    "lag_s": round((now - event_start).total_seconds(), 2),
+                },
+            )
+
             factory = get_session_factory()
             async with factory() as session:
                 event = MotionEvent(
-                    camera_id=cam_id, start_time=now, peak_intensity=intensity,
+                    camera_id=cam_id, start_time=event_start, peak_intensity=intensity,
                     detection_label=detection_label, detection_confidence=detection_confidence,
                     thumbnail_path=thumb_path,
                     face_matches=json.dumps(face_matches) if face_matches else None,
@@ -806,7 +827,7 @@ class MotionDetector:
                 await session.commit()
                 await session.refresh(event)
                 self._active_events[key] = event.id
-                self._event_start[key] = now
+                self._event_start[key] = event_start
 
                 # Queue unknown-face embeddings for the background clusterer.
                 # Only done at event-creation to avoid flooding the queue when

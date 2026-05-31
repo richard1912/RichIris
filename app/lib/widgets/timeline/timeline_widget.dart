@@ -35,6 +35,8 @@ class TimelineWidget extends StatefulWidget {
   final VoidCallback onLive;
   final int? speed;
   final ValueChanged<int>? onSpeedChanged;
+  final bool? isPlaying;
+  final VoidCallback? onPlayPauseToggle;
   /// Called periodically to get the current NVR time in ms.
   /// Returns null if unknown.
   final int Function()? getNvrTime;
@@ -58,6 +60,8 @@ class TimelineWidget extends StatefulWidget {
     required this.onLive,
     this.speed,
     this.onSpeedChanged,
+    this.isPlaying,
+    this.onPlayPauseToggle,
     this.getNvrTime,
     this.initialDate,
     this.cameras,
@@ -567,7 +571,10 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       final padHours = 8.0 / barWidth * _ctrl.visibleHours;
       final hitEvent = _ctrl.motionEventAtHour(hour, padHours: padHours, category: tappedCat);
       if (hitEvent != null) {
-        targetHour = isoToHour(hitEvent.startTime);
+        // Small safety lead. The backend now stamps start_time at frame
+        // capture (not pipeline completion), so residual lag is only
+        // sub-stream buffering + 2fps quantization — ~0.5s max.
+        targetHour = math.max(0.0, isoToHour(hitEvent.startTime) - (0.5 / 3600.0));
       }
     }
 
@@ -752,26 +759,47 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               padding: const EdgeInsets.only(top: 4),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
-                children: kSpeeds.map((speed) {
-                  final isActive = widget.speed == speed;
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                    child: SizedBox(
-                      height: 26,
-                      child: TextButton(
-                        onPressed: () => widget.onSpeedChanged!(speed),
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 5),
-                          minimumSize: Size.zero,
-                          backgroundColor: isActive ? const Color(0xFF3B82F6) : Colors.transparent,
-                          foregroundColor: isActive ? Colors.white : const Color(0xFF737373),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                children: [
+                  for (final speed in kSpeeds) ...[
+                    if (speed == 1 && widget.onPlayPauseToggle != null)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        child: SizedBox(
+                          height: 26,
+                          child: TextButton(
+                            onPressed: widget.onPlayPauseToggle,
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 5),
+                              minimumSize: Size.zero,
+                              foregroundColor: const Color(0xFFA3A3A3),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                            ),
+                            child: Icon(
+                              (widget.isPlaying ?? true) ? Icons.pause : Icons.play_arrow,
+                              size: 16,
+                            ),
+                          ),
                         ),
-                        child: Text('${speed}x', style: const TextStyle(fontSize: 10)),
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2),
+                      child: SizedBox(
+                        height: 26,
+                        child: TextButton(
+                          onPressed: () => widget.onSpeedChanged!(speed),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 5),
+                            minimumSize: Size.zero,
+                            backgroundColor: widget.speed == speed ? const Color(0xFF3B82F6) : Colors.transparent,
+                            foregroundColor: widget.speed == speed ? Colors.white : const Color(0xFF737373),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                          ),
+                          child: Text('${speed}x', style: const TextStyle(fontSize: 10)),
+                        ),
                       ),
                     ),
-                  );
-                }).toList(),
+                  ],
+                ],
               ),
             ),
           // Clips panel (action buttons + clips list)
@@ -1207,9 +1235,15 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   final pct = details.localPosition.dx / width;
                   final yFrac = details.localPosition.dy / barHeight;
                   _onTimelineTap(pct, yFraction: yFrac);
-                  // Clean up scrubHour for pure tap / long-press-without-drag
-                  // (onScaleEnd won't fire in those cases)
+                  // Clean up scrubHour + thumbnail overlay for pure tap /
+                  // long-press-without-drag (onScaleEnd won't fire in those
+                  // cases). The overlay is a separate OverlayEntry, so
+                  // setState alone won't remove it — must call
+                  // _updateThumbOverlay explicitly.
                   _ctrl.setScrubHour(null);
+                  _hoverMotionEvent = null;
+                  setState(() => _hoverTime = null);
+                  _updateThumbOverlay();
                 },
                 onScaleStart: (details) {
                   _lastScale = 1.0;

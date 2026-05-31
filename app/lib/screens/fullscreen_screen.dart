@@ -316,6 +316,22 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     });
   }
 
+  bool get _isPlayingNow {
+    if (_isLive) return !_paused;
+    return _pbPlayer?.state.playing ?? false;
+  }
+
+  void _togglePlayPause() {
+    if (_isLive) {
+      setState(() => _paused = !_paused);
+    } else {
+      final p = _pbPlayer;
+      if (p == null) return;
+      p.state.playing ? p.pause() : p.play();
+      setState(() {});
+    }
+  }
+
   void _onSpeedChanged(int newSpeed) {
     _clearSpeedTimer();
     setState(() => _speed = newSpeed);
@@ -686,8 +702,19 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
             _buildHeader(running),
             // Video stats
             if (_showStats) _buildStatsBar(),
-            // Video area
-            Expanded(child: _buildVideoArea(running, rot)),
+            // Video area — chips overlay top-right, matching grid card layout.
+            Expanded(
+              child: Stack(
+                children: [
+                  Positioned.fill(child: _buildVideoArea(running, rot)),
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: _buildVideoOverlayChips(),
+                  ),
+                ],
+              ),
+            ),
             // Timeline
             TimelineWidget(
               cameraId: widget.camera.id,
@@ -703,6 +730,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               onLive: _goLive,
               speed: _speed,
               onSpeedChanged: _onSpeedChanged,
+              isPlaying: _isPlayingNow,
+              onPlayPauseToggle: _togglePlayPause,
               getNvrTime: _getNvrTime,
               initialDate: widget.initialPlaybackTime?.substring(0, 10),
               cameras: widget.cameras.where((c) => c.enabled).toList(),
@@ -713,47 +742,51 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     );
   }
 
-  /// Top-right chip cluster — matches the grid camera card's styling 1:1.
-  /// Order mirrors the grid layout: action icons (stats/bug/refresh/settings/+)
-  /// first, then the feature badges column at the end.
-  List<Widget> _buildHeaderChips() {
-    return [
-      IconChip(
-        icon: Icons.bar_chart,
-        tooltip: 'Video Stats',
-        onTap: _toggleStats,
-      ),
-      const SizedBox(width: 3),
-      IconChip(
-        icon: Icons.bug_report,
-        tooltip: 'Report a Bug',
-        onTap: () => _showBugReportDialog(context),
-      ),
-      const SizedBox(width: 3),
-      IconChip(
-        icon: Icons.refresh,
-        tooltip: 'Refresh feed',
-        onTap: _refreshFeed,
-      ),
-      if (widget.onEditCamera != null) ...[
-        const SizedBox(width: 3),
+  /// Top-right chip cluster — rendered as a floating vertical overlay inside
+  /// the video Stack so it matches the grid camera card 1:1 (chips sit on the
+  /// video, not in the surrounding chrome).
+  Widget _buildVideoOverlayChips() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
         IconChip(
-          icon: Icons.settings,
-          tooltip: 'Edit camera settings',
-          onTap: () => widget.onEditCamera!(widget.camera),
+          icon: Icons.bar_chart,
+          tooltip: 'Video Stats',
+          onTap: _toggleStats,
         ),
-      ],
-      if (widget.onAddToGroup != null) ...[
-        const SizedBox(width: 3),
+        const SizedBox(height: 3),
         IconChip(
-          icon: Icons.add,
-          tooltip: 'Add to group',
-          onTap: widget.onAddToGroup,
+          icon: Icons.bug_report,
+          tooltip: 'Report a Bug',
+          onTap: () => _showBugReportDialog(context),
         ),
+        const SizedBox(height: 3),
+        IconChip(
+          icon: Icons.refresh,
+          tooltip: 'Refresh feed',
+          onTap: _refreshFeed,
+        ),
+        if (widget.onEditCamera != null) ...[
+          const SizedBox(height: 3),
+          IconChip(
+            icon: Icons.settings,
+            tooltip: 'Edit camera settings',
+            onTap: () => widget.onEditCamera!(widget.camera),
+          ),
+        ],
+        if (widget.onAddToGroup != null) ...[
+          const SizedBox(height: 3),
+          IconChip(
+            icon: Icons.add,
+            tooltip: 'Add to group',
+            onTap: widget.onAddToGroup,
+          ),
+        ],
+        const SizedBox(height: 3),
+        FeatureBadges(camera: widget.camera),
       ],
-      const SizedBox(width: 3),
-      FeatureBadges(camera: widget.camera),
-    ];
+    );
   }
 
   Widget _buildHeader(bool running) {
@@ -820,9 +853,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                     onChanged: widget.onQualityChanged,
                     isLive: _isLive,
                   ),
-                  const SizedBox(width: 6),
                 ],
-                ..._buildHeaderChips(),
               ],
             ),
             if (isAndroid)
@@ -1073,14 +1104,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       final idx = kSpeeds.indexOf(_speed);
       if (idx > 0) _onSpeedChanged(kSpeeds[idx - 1]);
     } else if (key == LogicalKeyboardKey.space) {
-      if (_isLive) {
-        setState(() => _paused = !_paused);
-      } else {
-        final p = _pbPlayer;
-        if (p != null) {
-          p.state.playing ? p.pause() : p.play();
-        }
-      }
+      _togglePlayPause();
     }
   }
 }
