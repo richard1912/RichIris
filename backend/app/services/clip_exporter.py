@@ -1,7 +1,9 @@
 """Clip export service - extracts time ranges from recordings into MP4 files."""
 
 import asyncio
+import json
 import logging
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +16,11 @@ from app.services.ffmpeg import sanitize_camera_name
 from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
+
+# Per-cell size for grid composites (16:9). Sources are downscaled into cells.
+GRID_CELL_W = 960
+GRID_CELL_H = 540
+GRID_FPS = 15
 
 def get_exports_dir() -> Path:
     """Return and ensure the exports directory exists under data_dir."""
@@ -64,6 +71,200 @@ async def find_overlapping_segments(
             overlapping.append(seg)
 
     return overlapping
+
+
+async def _build_camera_concat(
+    session: AsyncSession,
+    camera_id: int,
+    start: datetime,
+    end: datetime,
+    exports_dir: Path,
+    tag: str,
+) -> tuple[Path, float] | None:
+    """Build a concat list file for one camera's overlapping segments.
+
+    Returns (concat_file_path, ss_offset_seconds) or None if no footage exists.
+    The caller owns the concat file and must unlink it when done.
+    """
+    segments = await find_overlapping_segments(session, camera_id, start, end)
+    if not segments:
+        return None
+
+    concat_lines = []
+    for seg in segments:
+        seg_path = Path(seg.file_path)
+        if seg_path.exists():
+            concat_lines.append(f"file '{seg_path.as_posix()}'")
+    if not concat_lines:
+        return None
+
+    concat_file = exports_dir / f"_concat_{tag}.txt"
+    concat_file.write_text("\n".join(concat_lines), encoding="utf-8")
+    ss_offset = max(0.0, (start - segments[0].start_time).total_seconds())
+    return concat_file, ss_offset
+
+
+async def _run_ffmpeg(cmd: list[str]) -> tuple[int, str]:
+    """Run an ffmpeg command, returning (returncode, last_stderr_tail)."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assign_to_job(proc.pid)
+    _, stderr = await proc.communicate()
+    return proc.returncode, stderr.decode(errors="replace")[-800:]
+
+
+async def export_grid_clip(clip_id: int, session_factory) -> None:
+    """Export a synchronized side-by-side grid composite from several cameras.
+
+    Each selected camera is downscaled into a cell of a tiled canvas; all cells
+    share the same time window so the footage plays back in sync. Cameras with
+    no footage in the window render as black cells so the grid stays consistent
+    with the user's selection. Re-encodes to HEVC (NVENC, with libx264 fallback).
+    """
+    config = get_config()
+
+    async with session_factory() as session:
+        clip = await session.get(ClipExport, clip_id)
+        if not clip:
+            logger.error("Clip not found", extra={"clip_id": clip_id})
+            return
+
+        clip.status = "processing"
+        await session.commit()
+
+        concat_files: list[Path] = []
+        try:
+            camera_ids: list[int] = json.loads(clip.camera_ids or "[]")
+            if not camera_ids:
+                clip.status = "failed"
+                await session.commit()
+                logger.warning("Grid clip has no cameras", extra={"clip_id": clip_id})
+                return
+
+            exports_dir = get_exports_dir()
+            clip_duration = (clip.end_time - clip.start_time).total_seconds()
+
+            # Build one cell per selected camera (real footage or black placeholder)
+            cells = []  # each: {"concat": Path|None, "ss": float, "name": str}
+            for idx, cam_id in enumerate(camera_ids):
+                camera = await session.get(Camera, cam_id)
+                cam_name = camera.name if camera else f"Camera {cam_id}"
+                prepared = await _build_camera_concat(
+                    session, cam_id, clip.start_time, clip.end_time,
+                    exports_dir, f"{clip_id}_{idx}",
+                )
+                if prepared:
+                    concat_files.append(prepared[0])
+                    cells.append({"concat": prepared[0], "ss": prepared[1], "name": cam_name})
+                else:
+                    cells.append({"concat": None, "ss": 0.0, "name": cam_name})
+
+            if all(c["concat"] is None for c in cells):
+                clip.status = "failed"
+                await session.commit()
+                logger.warning("No footage for any grid camera", extra={"clip_id": clip_id})
+                return
+
+            n = len(cells)
+            cols = math.ceil(math.sqrt(n))
+            rows = math.ceil(n / cols)
+            canvas_w = cols * GRID_CELL_W
+            canvas_h = rows * GRID_CELL_H
+
+            # Input 0 is the black base canvas; cells follow.
+            cmd_inputs: list[str] = [
+                "-f", "lavfi", "-t", f"{clip_duration:.3f}",
+                "-i", f"color=c=black:s={canvas_w}x{canvas_h}:r={GRID_FPS}",
+            ]
+            filters: list[str] = []
+            overlay_chain = "[0:v]"
+            input_index = 1
+            for k, cell in enumerate(cells):
+                if cell["concat"] is not None:
+                    cmd_inputs += [
+                        "-f", "concat", "-safe", "0",
+                        "-ss", f"{cell['ss']:.3f}",
+                        "-i", str(cell["concat"]),
+                    ]
+                    filters.append(
+                        f"[{input_index}:v]scale={GRID_CELL_W}:{GRID_CELL_H}:"
+                        f"force_original_aspect_ratio=decrease,"
+                        f"pad={GRID_CELL_W}:{GRID_CELL_H}:(ow-iw)/2:(oh-ih)/2,"
+                        f"setsar=1,fps={GRID_FPS}[c{k}]"
+                    )
+                else:
+                    cmd_inputs += [
+                        "-f", "lavfi", "-t", f"{clip_duration:.3f}",
+                        "-i", f"color=c=black:s={GRID_CELL_W}x{GRID_CELL_H}:r={GRID_FPS}",
+                    ]
+                    filters.append(f"[{input_index}:v]setsar=1[c{k}]")
+                col = k % cols
+                row = k // cols
+                x = col * GRID_CELL_W
+                y = row * GRID_CELL_H
+                out_label = "[bg]" if k == n - 1 else f"[s{k}]"
+                filters.append(f"{overlay_chain}[c{k}]overlay={x}:{y}{out_label}")
+                overlay_chain = out_label
+                input_index += 1
+            filters.append("[bg]format=yuv420p[out]")
+            filter_complex = ";".join(filters)
+
+            date_str = clip.start_time.strftime("%Y-%m-%d")
+            start_str = clip.start_time.strftime("%H.%M")
+            end_str = clip.end_time.strftime("%H.%M")
+            output_file = exports_dir / f"Grid {len(camera_ids)}cam {date_str} {start_str} - {end_str}.mp4"
+
+            base_cmd = [
+                config.ffmpeg.path, "-y",
+                *cmd_inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[out]",
+                "-t", f"{clip_duration:.3f}",
+                "-an",
+            ]
+            nvenc_cmd = base_cmd + [
+                "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "26",
+                "-movflags", "+faststart", str(output_file),
+            ]
+            x264_cmd = base_cmd + [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", str(output_file),
+            ]
+
+            logger.info(
+                "Starting grid clip export",
+                extra={"clip_id": clip_id, "cameras": n, "grid": f"{cols}x{rows}", "output": str(output_file)},
+            )
+
+            rc, err = await _run_ffmpeg(nvenc_cmd)
+            if rc != 0:
+                logger.warning(
+                    "NVENC grid export failed, retrying with libx264",
+                    extra={"clip_id": clip_id, "stderr": err},
+                )
+                rc, err = await _run_ffmpeg(x264_cmd)
+
+            if rc != 0:
+                logger.error("Grid clip export failed", extra={"clip_id": clip_id, "stderr": err})
+                clip.status = "failed"
+                await session.commit()
+                return
+
+            clip.status = "done"
+            clip.file_path = str(output_file)
+            await session.commit()
+            logger.info("Grid clip export completed", extra={"clip_id": clip_id, "file": str(output_file)})
+
+        except Exception:
+            logger.exception("Grid clip export error", extra={"clip_id": clip_id})
+            clip.status = "failed"
+            await session.commit()
+        finally:
+            for cf in concat_files:
+                cf.unlink(missing_ok=True)
 
 
 async def export_clip(clip_id: int, session_factory) -> None:

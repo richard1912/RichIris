@@ -1,6 +1,7 @@
 """Clip export API endpoints."""
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -11,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, get_session_factory
 from app.models import Camera, ClipExport
-from app.schemas import ClipExportCreate, ClipExportResponse
-from app.services.clip_exporter import export_clip
+from app.schemas import ClipCompositeCreate, ClipExportCreate, ClipExportResponse
+from app.services.clip_exporter import export_clip, export_grid_clip
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/clips", tags=["clips"])
@@ -45,6 +46,66 @@ async def create_clip(body: ClipExportCreate, db: AsyncSession = Depends(get_db)
     asyncio.create_task(export_clip(clip.id, factory))
 
     return clip
+
+
+@router.post("/composite", response_model=list[ClipExportResponse], status_code=201)
+async def create_composite(body: ClipCompositeCreate, db: AsyncSession = Depends(get_db)):
+    """Export the same time range from one or more cameras.
+
+    join=False → one separate clip per camera (mode="single").
+    join=True  → a single synchronized side-by-side grid composite (mode="grid").
+    """
+    if not body.camera_ids:
+        raise HTTPException(status_code=400, detail="camera_ids must not be empty")
+    if body.end_time <= body.start_time:
+        raise HTTPException(status_code=400, detail="end_time must be after start_time")
+
+    # Validate cameras exist, preserving the requested order (deduplicated)
+    seen: set[int] = set()
+    ordered_ids: list[int] = []
+    for cid in body.camera_ids:
+        if cid in seen:
+            continue
+        if not await db.get(Camera, cid):
+            raise HTTPException(status_code=404, detail=f"Camera {cid} not found")
+        seen.add(cid)
+        ordered_ids.append(cid)
+
+    factory = get_session_factory()
+    created: list[ClipExport] = []
+
+    if body.join and len(ordered_ids) > 1:
+        clip = ClipExport(
+            camera_id=ordered_ids[0],
+            camera_ids=json.dumps(ordered_ids),
+            mode="grid",
+            start_time=body.start_time,
+            end_time=body.end_time,
+            status="pending",
+        )
+        db.add(clip)
+        await db.commit()
+        await db.refresh(clip)
+        created.append(clip)
+        logger.info("Grid clip export created", extra={"clip_id": clip.id, "cameras": ordered_ids})
+        asyncio.create_task(export_grid_clip(clip.id, factory))
+    else:
+        for cid in ordered_ids:
+            clip = ClipExport(
+                camera_id=cid,
+                mode="single",
+                start_time=body.start_time,
+                end_time=body.end_time,
+                status="pending",
+            )
+            db.add(clip)
+            await db.commit()
+            await db.refresh(clip)
+            created.append(clip)
+            logger.info("Clip export created", extra={"clip_id": clip.id, "camera_id": cid})
+            asyncio.create_task(export_clip(clip.id, factory))
+
+    return created
 
 
 @router.get("", response_model=list[ClipExportResponse])

@@ -87,7 +87,7 @@ RichIris/
 **System**: `GET status` | `GET storage` | `GET logs?minutes=` | `POST client-event` | `POST retention/run` | `GET/POST data-dir` | `POST data-dir/validate` | `GET version` | `GET/POST update`
 **Settings**: `GET/PUT /api/settings`
 **Backup**: `GET preview` | `POST create` | `GET {id}/progress` | `POST {id}/cancel` | `POST inspect` | `POST restore` | `GET restore/{id}/progress` | `POST restore/{id}/cancel`
-**Clips**: `POST /api/clips` | `GET list` | `GET {id}` | `GET {id}/download` | `DELETE {id}`
+**Clips**: `POST /api/clips` (single camera) | `POST /api/clips/composite` `{camera_ids:[int], start_time, end_time, join}` (multi-camera: `join=false` → one clip per camera; `join=true` → single synchronized side-by-side grid composite, `mode="grid"`, re-encoded HEVC NVENC w/ libx264 fallback, 960×540 cells, cameras w/o footage render as black cells) | `GET list` | `GET {id}` | `GET {id}/download` | `DELETE {id}`. `ClipExport` rows carry `mode` ("single"|"grid") + `camera_ids` JSON; grid clips set `camera_id` to the first camera so they still surface on its timeline.
 **Motion**: `GET /api/motion/{id}/events?date=`
 **Zones**: `GET/POST /api/cameras/{id}/zones` | `PUT/DELETE /api/cameras/{id}/zones/{zone_id}` — body: `{name, points: [[x,y],...]}` with x,y in [0,1]. Scripts reference via `zone_ids` in `MotionScriptConfig`.
 **Storage**: `POST validate` | `POST migrate` | `GET migrate/{id}/progress` | `POST migrate/{id}/cancel` | `POST migrate/{id}/finalize` | `POST update-path`
@@ -97,7 +97,7 @@ RichIris/
 - **Grid**: Click camera → select (blue ring + drag hint icon) + timeline. Click again → fullscreen. Long-press drag to reorder. Group chip bar above grid filters by camera group. Inline transitions (no Navigator.push). Feature badges under each card's gear icon summarize enabled detection features (motion/AI/face/zones/scripts) via `_FeatureBadges` in `widgets/camera_card.dart`.
 - **Fullscreen**: Video + timeline + speed controls (-4x to 32x). Stats bar (codec/res/FPS/bitrate). Refresh + bug report buttons.
 - **Timeline**: CustomPainter, scroll/pinch zoom (1h-24h), minimap. Hover shows trickplay thumbnail via OverlayEntry. Red playhead from player position. 3s hold after taps. Motion events color-coded (person=amber, vehicle=indigo, animal=emerald, motion=gray).
-- **Clip export**: Timeline mode (tap start/end) or Wizard (dialog with pickers).
+- **Clip export**: Timeline mode (tap start/end) or Wizard (dialog with pickers). Wizard supports multi-camera selection (checkbox list + select-all) and a "Join into one video" toggle (shown when >1 camera) that produces a synced side-by-side grid composite; otherwise exports one clip per camera. Post-export clip list polls just the clips it created.
 
 ## Key Dependencies
 - **Backend**: fastapi, uvicorn, sqlalchemy, aiosqlite, pyyaml, structlog, httpx, opencv-python-headless, numpy, onnxruntime-directml

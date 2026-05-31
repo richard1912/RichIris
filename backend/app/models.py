@@ -118,6 +118,12 @@ class ClipExport(Base):
     end_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    # "single" = one camera; "grid" = synchronized side-by-side composite of
+    # several cameras. For grid clips, camera_id holds the first camera (so the
+    # clip still surfaces when filtering a camera's timeline) and camera_ids
+    # holds the full JSON list of participating camera IDs.
+    mode: Mapped[str] = mapped_column(String(20), default="single")
+    camera_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

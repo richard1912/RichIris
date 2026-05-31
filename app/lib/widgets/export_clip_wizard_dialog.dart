@@ -23,7 +23,8 @@ class ExportClipWizardDialog extends StatefulWidget {
 }
 
 class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
-  late int _selectedCameraId;
+  final Set<int> _selectedCameraIds = {};
+  bool _join = false;
   late String _startDate;
   int _startH = 0, _startM = 0, _startS = 0;
   late String _endDate;
@@ -33,6 +34,7 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
 
   // Clips list state
   bool _exported = false;
+  final Set<int> _exportedClipIds = {};
   List<ClipExport> _clips = [];
   Timer? _clipPollTimer;
 
@@ -46,8 +48,9 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
   void initState() {
     super.initState();
     final enabledCameras = widget.cameras.where((c) => c.enabled).toList();
-    _selectedCameraId = widget.initialCameraId ??
+    final initial = widget.initialCameraId ??
         (enabledCameras.isNotEmpty ? enabledCameras.first.id : widget.cameras.first.id);
+    _selectedCameraIds.add(initial);
 
     final now = DateTime.now();
     _startDate = _fmtDateISO(now);
@@ -62,6 +65,9 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
     _clipPollTimer?.cancel();
     super.dispose();
   }
+
+  String _cameraName(int id) =>
+      widget.cameras.firstWhere((c) => c.id == id, orElse: () => widget.cameras.first).name;
 
   String _fmtDateISO(DateTime dt) =>
       '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
@@ -92,7 +98,7 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
       lastDate: DateTime.now().add(const Duration(days: 1)),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.dark(primary: _blue, surface: const Color(0xFF1E1E1E), onSurface: Colors.white),
+          colorScheme: const ColorScheme.dark(primary: _blue, surface: Color(0xFF1E1E1E), onSurface: Colors.white),
         ),
         child: child!,
       ),
@@ -137,6 +143,11 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
   }
 
   Future<void> _export() async {
+    if (_selectedCameraIds.isEmpty) {
+      setState(() => _error = 'Select at least one camera');
+      return;
+    }
+
     final startISO = _buildISO(_startDate, _startH, _startM, _startS);
     final endISO = _buildISO(_endDate, _endH, _endM, _endS);
 
@@ -147,10 +158,20 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
       return;
     }
 
+    // Preserve camera display order when sending IDs
+    final ids = widget.cameras
+        .where((c) => _selectedCameraIds.contains(c.id))
+        .map((c) => c.id)
+        .toList();
+    final join = _join && ids.length > 1;
+
     setState(() { _exporting = true; _error = null; });
     try {
-      await widget.clipApi.create(_selectedCameraId, startISO, endISO);
+      final created = await widget.clipApi.createComposite(ids, startISO, endISO, join: join);
       if (mounted) {
+        _exportedClipIds
+          ..clear()
+          ..addAll(created.map((c) => c.id));
         setState(() {
           _exporting = false;
           _exported = true;
@@ -167,7 +188,8 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
 
   Future<void> _fetchClips() async {
     try {
-      final clips = await widget.clipApi.fetchAll(cameraId: _selectedCameraId);
+      final all = await widget.clipApi.fetchAll();
+      final clips = all.where((c) => _exportedClipIds.contains(c.id)).toList();
       if (mounted) setState(() => _clips = clips);
       if (clips.any((c) => c.status == 'pending' || c.status == 'processing')) {
         _startClipPolling();
@@ -201,6 +223,7 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
   Future<void> _deleteClip(ClipExport clip) async {
     try {
       await widget.clipApi.delete(clip.id);
+      _exportedClipIds.remove(clip.id);
       _fetchClips();
     } catch (err) {
       if (mounted) {
@@ -214,6 +237,7 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
   @override
   Widget build(BuildContext context) {
     final enabledCameras = widget.cameras.where((c) => c.enabled).toList();
+    final multi = _selectedCameraIds.length > 1;
 
     return Dialog(
       backgroundColor: _bg,
@@ -231,40 +255,95 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
                 // Title
                 Row(
                   children: [
-                    Icon(Icons.content_cut, size: 18, color: _accent),
+                    const Icon(Icons.content_cut, size: 18, color: _accent),
                     const SizedBox(width: 8),
                     const Text('Export Clip', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
                   ],
                 ),
                 const SizedBox(height: 20),
 
-                // Camera selector
-                const Text('Camera', style: TextStyle(fontSize: 11, color: _dimText)),
+                // Camera multi-selector
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('Cameras', style: TextStyle(fontSize: 11, color: _dimText)),
+                    if (!_exported && enabledCameras.length > 1)
+                      GestureDetector(
+                        onTap: () => setState(() {
+                          if (_selectedCameraIds.length == enabledCameras.length) {
+                            _selectedCameraIds
+                              ..clear()
+                              ..add(enabledCameras.first.id);
+                          } else {
+                            _selectedCameraIds
+                              ..clear()
+                              ..addAll(enabledCameras.map((c) => c.id));
+                          }
+                          _error = null;
+                        }),
+                        child: Text(
+                          _selectedCameraIds.length == enabledCameras.length ? 'Clear' : 'Select all',
+                          style: const TextStyle(fontSize: 11, color: _blue),
+                        ),
+                      ),
+                  ],
+                ),
                 const SizedBox(height: 6),
                 Container(
                   decoration: BoxDecoration(
                     color: _cardBg,
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<int>(
-                      value: _selectedCameraId,
-                      isExpanded: true,
-                      dropdownColor: _cardBg,
-                      style: const TextStyle(fontSize: 13, color: Colors.white),
-                      icon: const Icon(Icons.expand_more, size: 18, color: _dimText),
-                      items: enabledCameras.map((c) => DropdownMenuItem(
-                        value: c.id,
-                        child: Text(c.name),
-                      )).toList(),
-                      onChanged: _exported ? null : (v) {
-                        if (v != null) setState(() { _selectedCameraId = v; _error = null; });
-                      },
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 168),
+                    child: ListView(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      children: enabledCameras.map(_buildCameraCheckRow).toList(),
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 12),
+
+                // Join toggle (only meaningful with >1 camera)
+                if (multi) ...[
+                  GestureDetector(
+                    onTap: _exported ? null : () => setState(() => _join = !_join),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: _cardBg,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.grid_view_rounded, size: 16, color: _join ? _accent : _dimText),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Join into one video', style: TextStyle(fontSize: 13, color: Color(0xFFD4D4D4))),
+                                SizedBox(height: 2),
+                                Text('Synced side-by-side grid', style: TextStyle(fontSize: 10, color: _dimText)),
+                              ],
+                            ),
+                          ),
+                          Switch(
+                            value: _join,
+                            onChanged: _exported ? null : (v) => setState(() => _join = v),
+                            activeThumbColor: _accent,
+                            activeTrackColor: _accent.withValues(alpha: 0.4),
+                            inactiveThumbColor: _dimText,
+                            inactiveTrackColor: const Color(0xFF333333),
+                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
 
                 // Start time
                 const Text('Start', style: TextStyle(fontSize: 11, color: _dimText)),
@@ -346,7 +425,7 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
                                     width: 16, height: 16,
                                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                                   )
-                                : const Text('Export', style: TextStyle(fontWeight: FontWeight.w600)),
+                                : Text(_exportButtonLabel(multi), style: const TextStyle(fontWeight: FontWeight.w600)),
                           ),
                         ),
                       ),
@@ -364,6 +443,7 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
                               setState(() {
                                 _exported = false;
                                 _clips = [];
+                                _exportedClipIds.clear();
                                 _error = null;
                               });
                             },
@@ -405,11 +485,61 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
     );
   }
 
+  String _exportButtonLabel(bool multi) {
+    if (!multi) return 'Export';
+    return _join ? 'Export Grid' : 'Export ${_selectedCameraIds.length}';
+  }
+
+  Widget _buildCameraCheckRow(Camera cam) {
+    final selected = _selectedCameraIds.contains(cam.id);
+    return InkWell(
+      onTap: _exported
+          ? null
+          : () => setState(() {
+                if (selected) {
+                  // Keep at least one selected
+                  if (_selectedCameraIds.length > 1) _selectedCameraIds.remove(cam.id);
+                } else {
+                  _selectedCameraIds.add(cam.id);
+                }
+                _error = null;
+              }),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        child: Row(
+          children: [
+            Container(
+              width: 16,
+              height: 16,
+              decoration: BoxDecoration(
+                color: selected ? _accent : Colors.transparent,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: selected ? _accent : const Color(0xFF555555), width: 1.5),
+              ),
+              child: selected ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                cam.name,
+                style: TextStyle(fontSize: 13, color: selected ? Colors.white : const Color(0xFFA3A3A3)),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildClipRow(ClipExport clip) {
     final startDt = DateTime.parse(clip.startTime);
     final endDt = DateTime.parse(clip.endTime);
     final timeStr = '${_fmtClipTime(startDt)} - ${_fmtClipTime(endDt)}';
     final dateStr = '${startDt.month}/${startDt.day}';
+    final label = clip.isGrid
+        ? 'Grid · ${clip.cameraIds?.length ?? 0} cam'
+        : _cameraName(clip.cameraId);
 
     Color statusColor;
     String statusText;
@@ -422,7 +552,7 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
         break;
       case 'processing':
         statusColor = const Color(0xFF3B82F6);
-        statusText = 'Processing';
+        statusText = clip.isGrid ? 'Composing' : 'Processing';
         break;
       case 'done':
         statusColor = const Color(0xFF22C55E);
@@ -462,10 +592,14 @@ class _ExportClipWizardDialogState extends State<ExportClipWizardDialog> {
                 child: CircularProgressIndicator(strokeWidth: 1.5, color: Color(0xFF3B82F6)),
               ),
             ),
-          // Time range
+          if (clip.isGrid) ...[
+            const Icon(Icons.grid_view_rounded, size: 11, color: Color(0xFF22C55E)),
+            const SizedBox(width: 4),
+          ],
+          // Label + time range
           Expanded(
             child: Text(
-              '$dateStr  $timeStr',
+              '$label  ·  $dateStr $timeStr',
               style: const TextStyle(fontSize: 10, color: Color(0xFFA3A3A3)),
               overflow: TextOverflow.ellipsis,
             ),

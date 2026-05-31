@@ -15,6 +15,26 @@ class ClipApi {
     return ClipExport.fromJson(resp.data as Map<String, dynamic>);
   }
 
+  /// Export the same time range from one or more cameras.
+  /// [join] true with multiple cameras produces a single synchronized
+  /// side-by-side grid composite; otherwise one clip per camera.
+  Future<List<ClipExport>> createComposite(
+    List<int> cameraIds,
+    String startTime,
+    String endTime, {
+    bool join = false,
+  }) async {
+    final resp = await _client.dio.post('/api/clips/composite', data: {
+      'camera_ids': cameraIds,
+      'start_time': startTime,
+      'end_time': endTime,
+      'join': join,
+    });
+    return (resp.data as List)
+        .map((e) => ClipExport.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<List<ClipExport>> fetchAll({int? cameraId}) async {
     final resp = await _client.dio.get('/api/clips',
         queryParameters: cameraId != null ? {'camera_id': cameraId} : null);

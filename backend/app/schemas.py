@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class MotionScriptConfig(BaseModel):
@@ -372,9 +372,23 @@ class ClipExportCreate(BaseModel):
     end_time: datetime
 
 
+class ClipCompositeCreate(BaseModel):
+    """Export the same time range from one or more cameras.
+
+    join=False → one separate clip per camera.
+    join=True  → a single synchronized side-by-side grid composite.
+    """
+    camera_ids: list[int]
+    start_time: datetime
+    end_time: datetime
+    join: bool = False
+
+
 class ClipExportResponse(BaseModel):
     id: int
     camera_id: int
+    camera_ids: list[int] | None = None
+    mode: str = "single"
     start_time: datetime
     end_time: datetime
     file_path: str | None = None
@@ -382,6 +396,20 @@ class ClipExportResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_validator("camera_ids", mode="before")
+    @classmethod
+    def _parse_camera_ids(cls, v):
+        """Accept the JSON string stored in the DB column or an actual list."""
+        if v is None or isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            import json
+            try:
+                return json.loads(v)
+            except Exception:
+                return None
+        return None
 
 
 class TestScriptRequest(BaseModel):

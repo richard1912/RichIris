@@ -347,6 +347,24 @@ async def init_db() -> None:
         except Exception:
             pass
 
+    # Migrate clip_exports: add multi-camera composite columns (mode, camera_ids)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE clip_exports ADD COLUMN mode VARCHAR(20) NOT NULL DEFAULT 'single'")
+            )
+            logger.info("Migration: added mode column to clip_exports")
+        except Exception:
+            pass
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE clip_exports ADD COLUMN camera_ids TEXT")
+            )
+            logger.info("Migration: added camera_ids column to clip_exports")
+        except Exception:
+            pass
+
     # Seed default settings into the settings table
     from app.config import get_bootstrap
     from app.services.settings import get_setting, seed_defaults, set_setting
