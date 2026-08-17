@@ -65,6 +65,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   String? _serverUrl;
   String _appVersion = '';
   bool _loading = true;
+  bool _connectionFailed = false;
   Quality _liveQuality = Quality.direct;
   Quality _playbackQuality = Quality.direct;
   Quality get _quality => _isLive ? _liveQuality : _playbackQuality;
@@ -195,6 +196,7 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
           final status = results[2] as SystemStatus;
           _streamApi?.updateRtspPort(status.go2rtcRtspPort);
           setState(() {
+            _connectionFailed = false;
             _tzOffsetMs = results[0] as int;
             _cameras = results[1] as List<Camera>;
             _systemStatus = status;
@@ -219,6 +221,11 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
           if (!mounted) return;
         }
       }
+    }
+    // Backend never answered — surface the connection-error screen (with a
+    // "Change Server" path) instead of leaving an empty grid forever.
+    if (mounted && _systemStatus == null) {
+      setState(() => _connectionFailed = true);
     }
   }
 
@@ -247,8 +254,19 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
   void _onServerUrlSet(String url) {
     setState(() {
       _serverUrl = url;
+      _connectionFailed = false;
+      // Drop data from the previous server so the grid doesn't briefly show
+      // stale cameras against the new backend.
+      _cameras = [];
+      _groups = [];
+      _systemStatus = null;
       _initApi(url);
     });
+  }
+
+  Future<void> _retryConnection() async {
+    setState(() => _connectionFailed = false);
+    await _fetchInitialData();
   }
 
   void _onQualityChanged(Quality q) async {
@@ -284,7 +302,14 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
               ? const Scaffold(body: SizedBox.shrink())
               : _serverUrl == null
               ? SettingsScreen(onSaved: _onServerUrlSet)
+              : _connectionFailed && _systemStatus == null
+              ? _ConnectionErrorScreen(
+                  serverUrl: _serverUrl!,
+                  onRetry: _retryConnection,
+                  onServerUrlChanged: _onServerUrlSet,
+                )
               : _MainNav(
+                  key: ValueKey(_serverUrl),
                   cameraApi: _cameraApi!,
                   faceApi: _faceApi!,
                   groupApi: _groupApi!,
@@ -315,6 +340,77 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
                   onServerUrlChanged: _onServerUrlSet,
                   serverUrl: _serverUrl,
                 ),
+    );
+  }
+}
+
+class _ConnectionErrorScreen extends StatelessWidget {
+  final String serverUrl;
+  final Future<void> Function() onRetry;
+  final ValueChanged<String> onServerUrlChanged;
+
+  const _ConnectionErrorScreen({
+    required this.serverUrl,
+    required this.onRetry,
+    required this.onServerUrlChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cloud_off, size: 56, color: Colors.grey[600]),
+              const SizedBox(height: 16),
+              const Text(
+                "Can't reach the RichIris server",
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                serverUrl,
+                style: TextStyle(color: Colors.grey[500], fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'The server may be offline, or it may have moved to a new address.',
+                style: TextStyle(color: Colors.grey[500], fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: onRetry,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('Retry'),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => SettingsScreen(
+                          initialUrl: serverUrl,
+                          onSaved: onServerUrlChanged,
+                        ),
+                      ));
+                    },
+                    icon: const Icon(Icons.dns, size: 18),
+                    label: const Text('Change Server'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -351,6 +447,7 @@ class _MainNav extends StatefulWidget {
   final String? serverUrl;
 
   const _MainNav({
+    super.key,
     required this.cameraApi,
     required this.faceApi,
     required this.groupApi,
@@ -866,6 +963,14 @@ class _MainNavState extends State<_MainNav> {
                 builder: (_) => SystemSettingsScreen(
                   settingsApi: widget.settingsApi,
                   backupApi: widget.backupApi,
+                ),
+              ));
+            },
+            onOpenServerSettings: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => SettingsScreen(
+                  initialUrl: widget.serverUrl,
+                  onSaved: widget.onServerUrlChanged,
                 ),
               ));
             },

@@ -63,6 +63,7 @@ class HomeScreen extends StatefulWidget {
   final ValueChanged<StreamSource> onStreamSourceChanged;
   final VoidCallback onOpenSystem;
   final VoidCallback onOpenSystemSettings;
+  final VoidCallback? onOpenServerSettings;
   final VoidCallback? onOpenFaces;
   final VoidCallback onAddCamera;
   final ValueChanged<Camera> onEditCamera;
@@ -108,6 +109,7 @@ class HomeScreen extends StatefulWidget {
     required this.onStreamSourceChanged,
     required this.onOpenSystem,
     required this.onOpenSystemSettings,
+    this.onOpenServerSettings,
     this.onOpenFaces,
     required this.onAddCamera,
     required this.onEditCamera,
@@ -586,6 +588,12 @@ class _HomeScreenState extends State<HomeScreen> {
             tooltip: 'System Status',
             onPressed: widget.onOpenSystem,
           ),
+          if (widget.onOpenServerSettings != null)
+            IconButton(
+              icon: const Icon(Icons.dns, size: 20),
+              tooltip: 'Server connection',
+              onPressed: widget.onOpenServerSettings,
+            ),
           IconButton(
             icon: const Icon(Icons.settings, size: 20),
             tooltip: 'Settings',
