@@ -358,6 +358,48 @@ class RetentionResult(BaseModel):
     freed_bytes: int
 
 
+# --- Two-tier storage ------------------------------------------------------
+
+class DriveInfo(BaseModel):
+    letter: str                  # "E:"
+    label: str = ""
+    total_bytes: int = 0
+    free_bytes: int = 0
+    media_type: str = "Unknown"  # SSD / HDD / SCM / Unknown
+    health: str = "Unknown"      # Healthy / Warning / Unhealthy / Unknown
+
+
+class StorageConfigValidation(BaseModel):
+    valid: bool
+    error: str = ""               # blocking problem (empty when valid)
+    warning: str = ""             # non-blocking advisory (e.g. SMART Warning, not an SSD)
+    free_space_gb: float = 0.0
+    drive: DriveInfo | None = None
+
+
+class TierUsage(BaseModel):
+    path: str
+    online: bool
+    disk_total_bytes: int = 0
+    disk_free_bytes: int = 0
+    recorded_bytes: int = 0       # bytes of registered segments on this tier
+    segment_count: int = 0
+    drive: DriveInfo | None = None
+
+
+class TwoTierStatus(BaseModel):
+    enabled: bool
+    hot: TierUsage
+    archive: TierUsage
+    flush_backlog: int = 0        # finalized HOT segments past the retention window
+    last_flush_at: float | None = None
+    last_flushed_count: int = 0
+    degraded: bool = False        # archive drive unreachable/slow
+    last_error: str = ""
+    hot_retention_minutes: int = 60
+    hot_max_gb: int = 0
+
+
 class ThumbnailInfo(BaseModel):
     timestamp: str       # "HH:MM:SS"
     url: str             # "/api/recordings/{camera_id}/thumb/{date}/{filename}"

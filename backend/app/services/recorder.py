@@ -31,15 +31,28 @@ def _is_in_progress(seg_path: Path) -> bool:
 
 
 async def cleanup_missing_recordings(session: AsyncSession) -> int:
-    """Remove DB recordings whose files no longer exist on disk."""
+    """Remove DB recordings whose files no longer exist on disk.
+
+    Safety valve: if a large fraction of files is "missing", the far more
+    likely cause is an offline/unmounted storage tier (archive drive, network
+    share, loop image) — refuse to mass-delete the index in that case.
+    """
     result = await session.execute(select(Recording))
     recordings = result.scalars().all()
+    missing = [rec for rec in recordings if not Path(rec.file_path).exists()]
+
+    if recordings and len(missing) > max(50, int(0.05 * len(recordings))):
+        logger.error(
+            "Refusing to delete recording rows — storage tier likely offline",
+            extra={"missing": len(missing), "total": len(recordings)},
+        )
+        return 0
+
     deleted = 0
-    for rec in recordings:
-        if not Path(rec.file_path).exists():
-            await session.delete(rec)
-            deleted += 1
-            logger.debug("Removed orphan recording", extra={"id": rec.id, "path": rec.file_path})
+    for rec in missing:
+        await session.delete(rec)
+        deleted += 1
+        logger.debug("Removed orphan recording", extra={"id": rec.id, "path": rec.file_path})
     if deleted > 0:
         await session.commit()
         logger.info("Cleaned up missing recordings", extra={"deleted": deleted})

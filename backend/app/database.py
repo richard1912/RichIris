@@ -81,6 +81,15 @@ async def init_db() -> None:
             logger.info("Migration: added in_progress column to recordings")
         except Exception:
             pass  # Column already exists
+    # Migrate: add tier column to recordings (two-tier storage: hot/archive)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE recordings ADD COLUMN tier VARCHAR(10) NOT NULL DEFAULT 'hot'")
+            )
+            logger.info("Migration: added tier column to recordings")
+        except Exception:
+            pass  # Column already exists
     # Migrate: add sub_stream_url column if missing
     async with engine.begin() as conn:
         try:

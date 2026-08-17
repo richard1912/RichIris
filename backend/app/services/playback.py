@@ -51,12 +51,17 @@ async def _probe_file(path: str) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _build_playback_preset(quality: str, source_kbps: int, source_codec: str = "hevc") -> dict:
+def _build_playback_preset(
+    quality: str, source_kbps: int, source_codec: str = "hevc",
+    hwaccel: str = "cuda",
+) -> dict:
     """Build a playback quality preset.
 
     High = HEVC re-encode at source bitrate.
     Low = 1/8 of source bitrate.
     Ultra-low = 1/16 of source bitrate, 15fps, no B-frames, short GOP.
+
+    hwaccel: "cuda" (NVENC), "vaapi" (Intel iGPU), anything else = software x264.
     """
     if quality == "direct":
         return {
@@ -69,21 +74,32 @@ def _build_playback_preset(quality: str, source_kbps: int, source_codec: str = "
     low_br = f"{max(source_kbps // 8, 500)}k"
     ultralow_br = f"{max(source_kbps // 16, 300)}k"
 
-    if quality == "ultralow":
-        return {
-            "pre_input": ["-hwaccel", "cuda"],
-            "codec": ["-c:v", "hevc_nvenc", "-preset", "p4",
-                      "-b:v", ultralow_br, "-r", "15", "-bf", "0", "-g", "30",
-                      "-c:a", "copy"],
-            "movflags": "frag_keyframe+empty_moov",
-            "streaming": True,
-        }
+    bitrate = {"high": high_br, "low": low_br, "ultralow": ultralow_br}.get(quality, low_br)
+    rate_extra = ["-r", "15", "-bf", "0", "-g", "30"] if quality == "ultralow" else []
 
-    bitrate = high_br if quality == "high" else low_br
+    if hwaccel == "cuda":
+        pre_input = ["-hwaccel", "cuda"]
+        codec = ["-c:v", "hevc_nvenc", "-preset", "p4",
+                 "-b:v", bitrate, *rate_extra, "-c:a", "copy"]
+    elif hwaccel == "vaapi":
+        # Full-GPU path: decode output stays as vaapi surfaces, scale_vaapi
+        # normalizes the surface format for the encoder without a download.
+        pre_input = ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128",
+                     "-hwaccel_output_format", "vaapi"]
+        codec = ["-vf", "scale_vaapi=format=nv12",
+                 "-c:v", "hevc_vaapi", "-rc_mode", "VBR",
+                 "-b:v", bitrate, "-maxrate", bitrate,
+                 "-bufsize", f"{2 * int(bitrate[:-1])}k",
+                 *rate_extra, "-c:a", "copy"]
+    else:
+        pre_input = []
+        codec = ["-c:v", "libx264", "-preset", "veryfast",
+                 "-b:v", bitrate, "-pix_fmt", "yuv420p",
+                 *rate_extra, "-c:a", "copy"]
+
     return {
-        "pre_input": ["-hwaccel", "cuda"],
-        "codec": ["-c:v", "hevc_nvenc", "-preset", "p4",
-                  "-b:v", bitrate, "-c:a", "copy"],
+        "pre_input": pre_input,
+        "codec": codec,
         "movflags": "frag_keyframe+empty_moov",
         "streaming": True,
     }
@@ -176,7 +192,8 @@ class PlaybackManager:
             if bench:
                 bench.mark("probe_done", kbps=source_kbps, codec=source_codec)
 
-        preset = _build_playback_preset(quality, source_kbps, source_codec)
+        preset = _build_playback_preset(quality, source_kbps, source_codec,
+                                        hwaccel=config.ffmpeg.hwaccel)
         pre_input = preset["pre_input"]
         codec_args = preset["codec"]
         movflags = preset.get("movflags", "+faststart")

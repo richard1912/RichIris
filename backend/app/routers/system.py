@@ -196,8 +196,15 @@ def _read_recent_logs(minutes: int) -> PlainTextResponse:
 
 
 def _get_process_memory_mb() -> float:
-    """Get current process memory usage (RSS) in MB using Windows API."""
+    """Get current process memory usage (RSS) in MB."""
     if sys.platform != "win32":
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return round(int(line.split()[1]) / 1024, 1)
+        except Exception:
+            pass
         return 0.0
     try:
         # PROCESS_MEMORY_COUNTERS_EX
@@ -228,7 +235,22 @@ def _get_process_memory_mb() -> float:
 def _count_child_processes(name_filter: str) -> tuple[int, list[int]]:
     """Count child processes matching a name filter. Returns (count, pids)."""
     if sys.platform != "win32":
-        return 0, []
+        # /proc scan by process name (display-only diagnostic count)
+        name = name_filter[:-4] if name_filter.endswith(".exe") else name_filter
+        pids = []
+        try:
+            from pathlib import Path as _Path
+            for p in _Path("/proc").iterdir():
+                if not p.name.isdigit():
+                    continue
+                try:
+                    if (p / "comm").read_text().strip() == name:
+                        pids.append(int(p.name))
+                except OSError:
+                    continue
+            return len(pids), pids
+        except Exception:
+            return 0, []
     try:
         result = subprocess.run(
             ["tasklist", "/fi", f"imagename eq {name_filter}", "/fo", "csv", "/nh"],

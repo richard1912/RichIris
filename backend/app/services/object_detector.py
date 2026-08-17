@@ -177,15 +177,33 @@ class ObjectDetector:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detector")
         self._started = False
         self._provider = "cpu"
+        self._load_attempted = False
+        self._load_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        """Load the ONNX model."""
+        """Load the ONNX model (deferred while remote inference is configured)."""
         if self._started:
             return
 
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(self._executor, self._load_model)
+        from app.services.remote_inference import get_remote_inference
+        if get_remote_inference().enabled:
+            # Remote inference serves detections; keep the local model unloaded
+            # (saves ~0.5-1 GB RAM) and lazy-load it only on remote failure.
+            logger.info("Remote inference configured — deferring local detection model load")
+        else:
+            await self._ensure_local_loaded()
         self._started = True
+
+    async def _ensure_local_loaded(self) -> None:
+        """Load the local ONNX model once (lazy fallback path)."""
+        if self._session is not None or self._load_attempted:
+            return
+        async with self._load_lock:
+            if self._session is not None or self._load_attempted:
+                return
+            self._load_attempted = True
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self._executor, self._load_model)
 
     def _load_model(self) -> None:
         """Blocking model load (runs in executor)."""
@@ -253,8 +271,23 @@ class ObjectDetector:
         self, frame: np.ndarray, confidence_threshold: float = 0.5,
         classes: list[int] | None = None,
     ) -> list[Detection]:
-        """Run object detection on a frame. Returns detections above threshold."""
-        if not self._started or self._session is None:
+        """Run object detection on a frame. Returns detections above threshold.
+
+        Tries the remote inference server first (if configured); falls back to
+        the local in-process ONNX session on failure.
+        """
+        if not self._started:
+            return []
+
+        from app.services.remote_inference import get_remote_inference
+        remote = get_remote_inference()
+        if remote.enabled:
+            result = await remote.detect(frame, confidence_threshold, classes)
+            if result is not None:
+                return result
+            await self._ensure_local_loaded()
+
+        if self._session is None:
             return []
 
         from app.services._onnx_lock import get_onnx_lock

@@ -105,6 +105,10 @@ class Recording(Base):
     file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     in_progress: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Two-tier storage bookkeeping: "hot" (fast SSD / data_dir) or "archive"
+    # (large HDD). The background flusher flips this to "archive" and rewrites
+    # file_path in the same transaction; reads always use the absolute file_path.
+    tier: Mapped[str] = mapped_column(String(10), default="hot", server_default="hot")
 
     camera: Mapped["Camera"] = relationship(back_populates="recordings")
 

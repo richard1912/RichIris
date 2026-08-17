@@ -228,17 +228,43 @@ class FaceRecognizer:
         # Matcher cache: list of (face_id, name, 512-D vector)
         self._enrollment: list[tuple[int, str, np.ndarray]] = []
         self._loaded = False
+        self._load_attempted = False
+        self._load_lock = asyncio.Lock()
 
     @property
     def available(self) -> bool:
-        return self._started and self._detector is not None and self._embedder is not None
+        if not self._started:
+            return False
+        if self._detector is not None and self._embedder is not None:
+            return True
+        # Remote inference can serve faces without local models loaded
+        from app.services.remote_inference import get_remote_inference
+        return get_remote_inference().enabled
+
+    @property
+    def _local_available(self) -> bool:
+        return self._detector is not None and self._embedder is not None
 
     async def start(self) -> None:
         if self._started:
             return
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(self._executor, self._load_models)
+        from app.services.remote_inference import get_remote_inference
+        if get_remote_inference().enabled:
+            logger.info("Remote inference configured — deferring local face model load")
+        else:
+            await self._ensure_local_loaded()
         self._started = True
+
+    async def _ensure_local_loaded(self) -> None:
+        """Load the local ONNX models once (lazy fallback path)."""
+        if self._local_available or self._load_attempted:
+            return
+        async with self._load_lock:
+            if self._local_available or self._load_attempted:
+                return
+            self._load_attempted = True
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self._executor, self._load_models)
 
     def _find_model(self, filenames: list[str]) -> Path | None:
         from app.config import get_app_dir, get_bootstrap
@@ -327,9 +353,25 @@ class FaceRecognizer:
     async def detect_and_embed(
         self, frame_bgr: np.ndarray, person_bbox: tuple[int, int, int, int] | None = None,
     ) -> list[FaceHit]:
-        """Run SCRFD + ArcFace. If person_bbox given, crop first and report coords in the full frame."""
+        """Run SCRFD + ArcFace. If person_bbox given, crop first and report coords in the full frame.
+
+        Tries the remote inference server first (if configured); falls back to
+        the local in-process ONNX sessions on failure.
+        """
         if not self.available:
             return []
+
+        from app.services.remote_inference import get_remote_inference
+        remote = get_remote_inference()
+        if remote.enabled:
+            hits = await remote.faces(frame_bgr, person_bbox)
+            if hits is not None:
+                return hits
+            await self._ensure_local_loaded()
+
+        if not self._local_available:
+            return []
+
         from app.services._onnx_lock import get_onnx_lock
         loop = asyncio.get_event_loop()
         t0 = time.monotonic()  # TEMP FACE-DIAG

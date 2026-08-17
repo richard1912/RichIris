@@ -1,6 +1,7 @@
 """Settings service — DB-backed key-value store for all app configuration."""
 
 import logging
+import sys
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,9 +20,15 @@ REQUIRES_STREAM_RESTART: set[str] = set()
 # These are seeded into the DB on first run.
 DEFAULTS: dict[str, dict[str, str]] = {
     "ffmpeg": {
-        "hwaccel": "cuda",
+        # NVENC on Windows (NVIDIA), VAAPI elsewhere (Intel iGPU)
+        "hwaccel": "cuda" if sys.platform == "win32" else "vaapi",
         "segment_duration": "900",
         "rtsp_transport": "tcp",
+    },
+    "ai": {
+        # Remote inference server (empty = local in-process ONNX)
+        "remote_url": "",
+        "remote_timeout_ms": "2500",
     },
     "retention": {
         "max_age_days": "30",
@@ -37,6 +44,16 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "level": "DEBUG",
         "json_output": "false",
         "timezone": "UTC",
+    },
+    "storage": {
+        # Two-tier storage: fast "hot" tier (= data_dir, where the DB,
+        # thumbnails and active recordings live) + a large "archive" tier that
+        # finalized segments are flushed to in the background. Disabled by
+        # default → archive == hot, flusher is a no-op, behaviour unchanged.
+        "two_tier_enabled": "false",
+        "archive_dir": "",            # empty = same as data_dir (single-tier)
+        "hot_retention_minutes": "60", # finalized segments older than this are flush-eligible
+        "hot_max_gb": "0",            # 0 = no cap; >0 = backpressure-flush oldest-first
     },
 }
 

@@ -440,6 +440,8 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
         _buildBackendSection('Storage', Icons.storage, () => [
           _dataDirField(),
         ]),
+        if (Platform.isWindows)
+          _TwoTierStorageSection(settingsApi: widget.settingsApi),
         _buildBackendSection('Retention', Icons.auto_delete, () => [
           _numberField('retention', 'max_age_days', 'Max Age (days)'),
           _numberField('retention', 'max_storage_gb', 'Max Storage (GB)'),
@@ -953,6 +955,503 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
         value: isOn,
         onChanged: (v) => _setValue(category, key, v.toString()),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Two-Tier Storage (Archive) section
+//
+// Self-contained: owns the drive list, archive-config validation, live status
+// polling, and a live Apply (archive/retention/cap changes take effect with no
+// service restart). The HOT tier location is the data directory above — changed
+// via its own migrate→restart flow.
+// ---------------------------------------------------------------------------
+
+String _fmtBytes(num b) {
+  if (b >= 1e12) return '${(b / 1e12).toStringAsFixed(1)} TB';
+  if (b >= 1e9) return '${(b / 1e9).toStringAsFixed(1)} GB';
+  if (b >= 1e6) return '${(b / 1e6).toStringAsFixed(0)} MB';
+  return '$b B';
+}
+
+Color _healthColor(String? health) {
+  switch (health) {
+    case 'Healthy':
+      return Colors.green;
+    case 'Warning':
+      return Colors.orange;
+    case 'Unhealthy':
+      return Colors.red;
+    default:
+      return Colors.grey;
+  }
+}
+
+class _TwoTierStorageSection extends StatefulWidget {
+  final SettingsApi settingsApi;
+  const _TwoTierStorageSection({required this.settingsApi});
+
+  @override
+  State<_TwoTierStorageSection> createState() => _TwoTierStorageSectionState();
+}
+
+class _TwoTierStorageSectionState extends State<_TwoTierStorageSection> {
+  bool _loading = true;
+  bool _applying = false;
+  String? _loadError;
+
+  // Edited values
+  bool _enabled = false;
+  String _archiveDir = '';
+  String _retentionMinutes = '60';
+  String _hotMaxGb = '0';
+
+  // Baseline (persisted) values to detect changes
+  bool _baseEnabled = false;
+  String _baseArchiveDir = '';
+  String _baseRetention = '60';
+  String _baseHotMaxGb = '0';
+
+  List<Map<String, dynamic>> _drives = [];
+  Map<String, dynamic>? _validation; // last validateStorageConfig result
+  Map<String, dynamic>? _status; // live TwoTierStatus
+  Timer? _statusTimer;
+  final _archiveCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _statusTimer = Timer.periodic(const Duration(seconds: 5), (_) => _refreshStatus());
+  }
+
+  @override
+  void dispose() {
+    _statusTimer?.cancel();
+    _archiveCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final settings = await widget.settingsApi.fetchSettings();
+      final s = settings['storage'] ?? {};
+      String val(String k, String d) {
+        final e = s[k];
+        return (e is Map ? e['value']?.toString() : null) ?? d;
+      }
+
+      _baseEnabled = val('two_tier_enabled', 'false').toLowerCase() == 'true';
+      _baseArchiveDir = val('archive_dir', '');
+      _baseRetention = val('hot_retention_minutes', '60');
+      _baseHotMaxGb = val('hot_max_gb', '0');
+
+      List<Map<String, dynamic>> drives = [];
+      try {
+        drives = await widget.settingsApi.fetchDrives();
+      } catch (_) {}
+
+      if (!mounted) return;
+      setState(() {
+        _enabled = _baseEnabled;
+        _archiveDir = _baseArchiveDir;
+        _retentionMinutes = _baseRetention;
+        _hotMaxGb = _baseHotMaxGb;
+        _archiveCtrl.text = _archiveDir;
+        _drives = drives;
+        _loading = false;
+        _loadError = null;
+      });
+      await _refreshStatus();
+      if (_enabled && _archiveDir.isNotEmpty) _validate();
+    } catch (e) {
+      if (mounted) setState(() {
+        _loading = false;
+        _loadError = 'Failed to load storage config: $e';
+      });
+    }
+  }
+
+  Future<void> _refreshStatus() async {
+    try {
+      final status = await widget.settingsApi.fetchStorageStatus();
+      if (mounted) setState(() => _status = status);
+    } catch (_) {}
+  }
+
+  Future<void> _validate() async {
+    try {
+      final res = await widget.settingsApi
+          .validateStorageConfig(_archiveDir, _enabled);
+      if (mounted) setState(() => _validation = res);
+    } catch (e) {
+      if (mounted) setState(() => _validation = {'valid': false, 'error': '$e'});
+    }
+  }
+
+  bool get _dirty =>
+      _enabled != _baseEnabled ||
+      _archiveDir != _baseArchiveDir ||
+      _retentionMinutes != _baseRetention ||
+      _hotMaxGb != _baseHotMaxGb;
+
+  String? get _hotDriveLetter {
+    final d = _status?['hot']?['drive'];
+    return d is Map ? d['letter']?.toString() : null;
+  }
+
+  Future<void> _apply() async {
+    // Block on hard validation errors when enabling.
+    if (_enabled) {
+      if (_validation == null) await _validate();
+      if (_validation?['valid'] != true) {
+        setState(() {}); // surface the inline error
+        return;
+      }
+      // Confirm on SMART warning / non-SSD advisories.
+      final warning = (_validation?['warning'] as String?) ?? '';
+      final drive = _validation?['drive'];
+      final health = drive is Map ? drive['health']?.toString() : null;
+      if (warning.isNotEmpty || health == 'Warning' || health == 'Unhealthy') {
+        final ok = await _confirmRisky(warning, health);
+        if (ok != true) return;
+      }
+    }
+
+    setState(() => _applying = true);
+    try {
+      await widget.settingsApi.updateSettings({
+        'storage.two_tier_enabled': _enabled.toString(),
+        'storage.archive_dir': _archiveDir,
+        'storage.hot_retention_minutes': _retentionMinutes,
+        'storage.hot_max_gb': _hotMaxGb,
+      });
+      _baseEnabled = _enabled;
+      _baseArchiveDir = _archiveDir;
+      _baseRetention = _retentionMinutes;
+      _baseHotMaxGb = _hotMaxGb;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Storage settings applied.')),
+        );
+      }
+      await _refreshStatus();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to apply: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _applying = false);
+    }
+  }
+
+  Future<bool?> _confirmRisky(String warning, String? health) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Use this drive for archive?'),
+        content: Text(
+          warning.isNotEmpty
+              ? warning
+              : "This drive reports SMART status '$health'. Storing footage here risks data loss.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red[700]),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Use Anyway'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.dns, size: 20, color: Colors.grey[400]),
+                const SizedBox(width: 8),
+                const Text('Two-Tier Storage (Archive)',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Record to a fast SSD (the data directory above), then flush older '
+              'footage to a large archive drive in the background. A slow or '
+              'failing archive drive never stalls live recording or motion scripts.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+            ),
+            const SizedBox(height: 12),
+            if (_loading)
+              Row(children: [
+                const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                const SizedBox(width: 12),
+                Text('Loading...', style: TextStyle(color: Colors.grey[500])),
+              ])
+            else if (_loadError != null)
+              Text(_loadError!, style: const TextStyle(color: Colors.red))
+            else
+              ..._buildBody(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildBody() {
+    return [
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('Enable two-tier storage'),
+        value: _enabled,
+        onChanged: (v) {
+          setState(() => _enabled = v);
+          if (v && _archiveDir.isNotEmpty) _validate();
+        },
+      ),
+      if (_enabled) ..._buildArchiveControls(),
+      const SizedBox(height: 8),
+      _buildStatusPanel(),
+      const SizedBox(height: 12),
+      Row(
+        children: [
+          ElevatedButton.icon(
+            onPressed: (_dirty && !_applying) ? _apply : null,
+            icon: _applying
+                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.check, size: 16),
+            label: const Text('Apply'),
+          ),
+          const SizedBox(width: 12),
+          if (_dirty)
+            Text('Applies live — no restart needed.',
+                style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+        ],
+      ),
+    ];
+  }
+
+  List<Widget> _buildArchiveControls() {
+    final hotLetter = _hotDriveLetter;
+    // Candidate archive drives: exclude the hot drive.
+    final candidates = _drives
+        .where((d) => d['letter']?.toString().toUpperCase() != hotLetter?.toUpperCase())
+        .toList();
+    final currentLetter = _archiveDir.isNotEmpty
+        ? _archiveDir.replaceAll('/', '\\').split('\\').first.toUpperCase()
+        : null;
+    final dropdownValue = candidates.any((d) =>
+            d['letter']?.toString().toUpperCase() == currentLetter)
+        ? '${currentLetter!.replaceAll(':', '')}:'
+        : null;
+
+    return [
+      const SizedBox(height: 8),
+      const Text('Archive Drive', style: TextStyle(fontSize: 12, color: Colors.grey)),
+      const SizedBox(height: 6),
+      InputDecorator(
+        decoration: const InputDecoration(isDense: true),
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<String>(
+            value: dropdownValue,
+            isExpanded: true,
+            isDense: true,
+            hint: const Text('Select a drive...'),
+            dropdownColor: const Color(0xFF262626),
+            items: candidates.map((d) {
+              final letter = d['letter']?.toString() ?? '';
+              final label = d['label']?.toString() ?? '';
+              final media = d['media_type']?.toString() ?? '';
+              final health = d['health']?.toString() ?? '';
+              final free = _fmtBytes((d['free_bytes'] ?? 0) as num);
+              return DropdownMenuItem(
+                value: letter,
+                child: Row(children: [
+                  Expanded(
+                    child: Text(
+                      '$letter  ${label.isNotEmpty ? '$label · ' : ''}$media · $free free',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Icon(Icons.circle, size: 10, color: _healthColor(health)),
+                  const SizedBox(width: 4),
+                  Text(health, style: TextStyle(fontSize: 11, color: _healthColor(health))),
+                ]),
+              );
+            }).toList(),
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() {
+                _archiveDir = '$v\\';
+                _archiveCtrl.text = _archiveDir;
+              });
+              _validate();
+            },
+          ),
+        ),
+      ),
+      const SizedBox(height: 8),
+      TextField(
+        controller: _archiveCtrl,
+        decoration: const InputDecoration(
+          labelText: 'Archive folder (override)',
+          hintText: r'e.g. F:\RichIris-Archive',
+          isDense: true,
+        ),
+        onChanged: (v) => _archiveDir = v,
+        onEditingComplete: _validate,
+        onSubmitted: (_) => _validate(),
+      ),
+      if (_validation != null && _enabled) ...[
+        const SizedBox(height: 8),
+        if (_validation!['valid'] != true)
+          _msgRow(Icons.error, Colors.red,
+              (_validation!['error'] as String?) ?? 'Invalid archive path')
+        else ...[
+          _msgRow(Icons.check_circle, Colors.green,
+              'Valid — ${_validation!['free_space_gb']} GB free'),
+          if (((_validation!['warning'] as String?) ?? '').isNotEmpty)
+            _msgRow(Icons.warning_amber, Colors.orange, _validation!['warning']),
+        ],
+      ],
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(
+          child: TextField(
+            controller: TextEditingController(text: _retentionMinutes),
+            decoration: const InputDecoration(
+              labelText: 'Keep on SSD (minutes)',
+              isDense: true,
+            ),
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            onChanged: (v) => _retentionMinutes = v.isEmpty ? '0' : v,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: TextField(
+            controller: TextEditingController(text: _hotMaxGb),
+            decoration: const InputDecoration(
+              labelText: 'SSD cap (GB, 0 = none)',
+              isDense: true,
+            ),
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            onChanged: (v) => _hotMaxGb = v.isEmpty ? '0' : v,
+          ),
+        ),
+      ]),
+    ];
+  }
+
+  Widget _buildStatusPanel() {
+    final st = _status;
+    if (st == null) return const SizedBox.shrink();
+    final hot = st['hot'] as Map? ?? {};
+    final archive = st['archive'] as Map? ?? {};
+    final degraded = st['degraded'] == true;
+    final enabled = st['enabled'] == true;
+    final backlog = st['flush_backlog'] ?? 0;
+    final lastFlush = st['last_flush_at'];
+
+    String tierLine(Map t) {
+      final drive = t['drive'];
+      final letter = drive is Map ? drive['letter']?.toString() ?? '' : '';
+      final media = drive is Map ? drive['media_type']?.toString() ?? '' : '';
+      final health = drive is Map ? drive['health']?.toString() ?? '' : '';
+      final online = t['online'] == true;
+      final free = _fmtBytes((t['disk_free_bytes'] ?? 0) as num);
+      final recorded = _fmtBytes((t['recorded_bytes'] ?? 0) as num);
+      final segs = t['segment_count'] ?? 0;
+      if (!online) return '$letter offline';
+      return '$letter ${media.isNotEmpty ? '$media · ' : ''}$free free · $recorded recorded ($segs) · $health';
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0xFF333333)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (degraded)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _msgRow(Icons.error, Colors.red,
+                  'Archive drive offline/slow — recording continues on SSD; flush will resume automatically.'),
+            ),
+          Row(children: [
+            Icon(Icons.bolt, size: 14, color: _healthColor(
+                (hot['drive'] is Map ? hot['drive']['health']?.toString() : null))),
+            const SizedBox(width: 6),
+            Expanded(child: Text('Hot:  ${tierLine(hot)}',
+                style: TextStyle(fontSize: 12, color: Colors.grey[300]))),
+          ]),
+          const SizedBox(height: 4),
+          Row(children: [
+            Icon(Icons.archive, size: 14, color: enabled
+                ? _healthColor((archive['drive'] is Map ? archive['drive']['health']?.toString() : null))
+                : Colors.grey),
+            const SizedBox(width: 6),
+            Expanded(child: Text(
+                enabled ? 'Archive:  ${tierLine(archive)}' : 'Archive:  (single-tier — disabled)',
+                style: TextStyle(fontSize: 12, color: Colors.grey[300]))),
+          ]),
+          if (enabled) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Flush backlog: $backlog segment(s)'
+              '${lastFlush != null ? ' · last flush ${_ago(lastFlush)}' : ''}',
+              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _ago(dynamic epochSeconds) {
+    try {
+      final t = DateTime.fromMillisecondsSinceEpoch(((epochSeconds as num) * 1000).round());
+      final d = DateTime.now().difference(t);
+      if (d.inMinutes < 1) return 'just now';
+      if (d.inMinutes < 60) return '${d.inMinutes}m ago';
+      if (d.inHours < 24) return '${d.inHours}h ago';
+      return '${d.inDays}d ago';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Widget _msgRow(IconData icon, Color color, String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: 8),
+        Expanded(child: Text(text, style: TextStyle(fontSize: 12, color: color))),
+      ]),
     );
   }
 }

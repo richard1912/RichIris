@@ -35,6 +35,7 @@ def _format_bitrate(kbps: int) -> str:
 def _build_quality_profiles(
     main_kbps: int, sub_kbps: int,
     main_codec: str = "hevc", sub_codec: str = "h264",
+    hwaccel: str = "cuda",
 ) -> dict[str, tuple[str | None, str]]:
     """Build quality profiles with probed bitrates.
 
@@ -56,25 +57,30 @@ def _build_quality_profiles(
     # Ultra-low: 15fps, short GOP (30 frames = 2s at 15fps)
     ul_extra = "#raw=-r#raw=15#raw=-g#raw=30"
 
+    # VAAPI: tag streams so go2rtc uses HW decode + the h265/vaapi template
+    # (see go2rtc_manager ffmpeg config). CUDA uses the default h265 template
+    # (overridden to NVENC there); software uses go2rtc's built-in defaults.
+    hw = "#hardware=vaapi" if hwaccel == "vaapi" else ""
+
     profiles: dict[str, tuple[str | None, str]] = {
         # Direct streams: source_key used to look up camera RTSP URL
         "_s1_direct":   (None, "main"),
         "_s2_direct":   (None, "sub"),
         # Transcoded streams: source_key "chain_s1"/"chain_s2" signals chaining
         # off the direct stream (resolved in build_streams_config)
-        "_s1_low":      (f"#video=h265#raw=-b:v#raw={main_low}", "chain_s1"),
-        "_s1_ultralow": (f"#video=h265#raw=-b:v#raw={main_ultralow}{ul_extra}", "chain_s1"),
-        "_s2_low":      (f"#video=h265#raw=-b:v#raw={sub_low}", "chain_s2"),
-        "_s2_ultralow": (f"#video=h265#raw=-b:v#raw={sub_ultralow}{ul_extra}", "chain_s2"),
+        "_s1_low":      (f"#video=h265{hw}#raw=-b:v#raw={main_low}", "chain_s1"),
+        "_s1_ultralow": (f"#video=h265{hw}#raw=-b:v#raw={main_ultralow}{ul_extra}", "chain_s1"),
+        "_s2_low":      (f"#video=h265{hw}#raw=-b:v#raw={sub_low}", "chain_s2"),
+        "_s2_ultralow": (f"#video=h265{hw}#raw=-b:v#raw={sub_ultralow}{ul_extra}", "chain_s2"),
     }
     # For non-HEVC sources: re-encode to HEVC at source bitrate.
     # For HEVC sources: alias high to direct (no re-encode needed).
     if main_codec != "hevc":
-        profiles["_s1_high"] = (f"#video=h265#raw=-b:v#raw={main_high}", "chain_s1")
+        profiles["_s1_high"] = (f"#video=h265{hw}#raw=-b:v#raw={main_high}", "chain_s1")
     else:
         profiles["_s1_high"] = (None, "main")
     if sub_codec != "hevc":
-        profiles["_s2_high"] = (f"#video=h265#raw=-b:v#raw={sub_high}", "chain_s2")
+        profiles["_s2_high"] = (f"#video=h265{hw}#raw=-b:v#raw={sub_high}", "chain_s2")
     else:
         profiles["_s2_high"] = (None, "sub")
     return profiles
@@ -106,7 +112,10 @@ def build_streams_config(
             main_codec = "hevc"
             sub_codec = "h264"
 
-        profiles = _build_quality_profiles(main_kbps, sub_kbps, main_codec, sub_codec)
+        profiles = _build_quality_profiles(
+            main_kbps, sub_kbps, main_codec, sub_codec,
+            hwaccel=get_config().ffmpeg.hwaccel,
+        )
 
         # Resolve chain references: transcoded streams source from the direct
         # stream name in go2rtc (one RTSP connection per stream to the camera).
@@ -188,6 +197,7 @@ class Go2rtcClient:
             main_kbps, sub_kbps,
             main_codec=main_codec or "hevc",
             sub_codec=sub_codec or "h264",
+            hwaccel=config.ffmpeg.hwaccel,
         )
 
         async def _register_one(client: httpx.AsyncClient, key: str, source_url: str) -> None:

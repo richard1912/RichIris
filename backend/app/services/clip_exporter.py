@@ -209,27 +209,45 @@ async def export_grid_clip(clip_id: int, session_factory) -> None:
                 filters.append(f"{overlay_chain}[c{k}]overlay={x}:{y}{out_label}")
                 overlay_chain = out_label
                 input_index += 1
-            filters.append("[bg]format=yuv420p[out]")
-            filter_complex = ";".join(filters)
+            hwaccel = config.ffmpeg.hwaccel
+            # Composite always happens in software; the sink filter differs:
+            # vaapi uploads the final frames for GPU encode, everything else
+            # (nvenc/x264) takes yuv420p directly.
+            filter_complex_sw = ";".join(filters + ["[bg]format=yuv420p[out]"])
+            filter_complex_hw = ";".join(filters + ["[bg]format=nv12,hwupload[out]"])
 
             date_str = clip.start_time.strftime("%Y-%m-%d")
             start_str = clip.start_time.strftime("%H.%M")
             end_str = clip.end_time.strftime("%H.%M")
             output_file = exports_dir / f"Grid {len(camera_ids)}cam {date_str} {start_str} - {end_str}.mp4"
 
-            base_cmd = [
-                config.ffmpeg.path, "-y",
-                *cmd_inputs,
-                "-filter_complex", filter_complex,
-                "-map", "[out]",
-                "-t", f"{clip_duration:.3f}",
-                "-an",
-            ]
-            nvenc_cmd = base_cmd + [
-                "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "26",
-                "-movflags", "+faststart", str(output_file),
-            ]
-            x264_cmd = base_cmd + [
+            def _build_cmd(filter_graph: str, device_args: list[str]) -> list[str]:
+                return [
+                    config.ffmpeg.path, "-y",
+                    *device_args,
+                    *cmd_inputs,
+                    "-filter_complex", filter_graph,
+                    "-map", "[out]",
+                    "-t", f"{clip_duration:.3f}",
+                    "-an",
+                ]
+
+            if hwaccel == "cuda":
+                hw_cmd = _build_cmd(filter_complex_sw, []) + [
+                    "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "26",
+                    "-movflags", "+faststart", str(output_file),
+                ]
+            elif hwaccel == "vaapi":
+                hw_cmd = _build_cmd(
+                    filter_complex_hw,
+                    ["-init_hw_device", "vaapi=va:/dev/dri/renderD128", "-filter_hw_device", "va"],
+                ) + [
+                    "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", "26",
+                    "-movflags", "+faststart", str(output_file),
+                ]
+            else:
+                hw_cmd = None
+            x264_cmd = _build_cmd(filter_complex_sw, []) + [
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", str(output_file),
             ]
@@ -239,12 +257,15 @@ async def export_grid_clip(clip_id: int, session_factory) -> None:
                 extra={"clip_id": clip_id, "cameras": n, "grid": f"{cols}x{rows}", "output": str(output_file)},
             )
 
-            rc, err = await _run_ffmpeg(nvenc_cmd)
-            if rc != 0:
-                logger.warning(
-                    "NVENC grid export failed, retrying with libx264",
-                    extra={"clip_id": clip_id, "stderr": err},
-                )
+            if hw_cmd is not None:
+                rc, err = await _run_ffmpeg(hw_cmd)
+                if rc != 0:
+                    logger.warning(
+                        "Hardware grid export failed, retrying with libx264",
+                        extra={"clip_id": clip_id, "hwaccel": hwaccel, "stderr": err},
+                    )
+                    rc, err = await _run_ffmpeg(x264_cmd)
+            else:
                 rc, err = await _run_ffmpeg(x264_cmd)
 
             if rc != 0:

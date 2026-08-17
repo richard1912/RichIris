@@ -66,6 +66,11 @@ class MotionDetector:
         self._last_motion: dict[tuple[int, str], datetime] = {}
         self._script_off: dict[tuple[int, str], list[tuple[str, int]]] = {}  # (script, off_delay)
         self._pending_off_tasks: dict[tuple[int, str], list[asyncio.Task]] = {}
+        # Scripts already fired by the fast path (before the face pass) for the
+        # current event onset, keyed by (cam, category) -> set of id(script).
+        # Prevents the slow _on_motion path from re-firing them, and prevents
+        # re-firing on every confirmed frame until the event finalizes.
+        self._early_fired: dict[tuple[int, str], set] = {}
         self._avg_baseline: dict[int, np.ndarray | None] = {}
         self._baseline_frames: dict[int, int] = {}
         # Multi-frame AI confirmation buffers
@@ -209,6 +214,9 @@ class MotionDetector:
         for key in list(self._pending_detections):
             if key[0] == cam_id:
                 del self._pending_detections[key]
+        for key in list(self._early_fired):
+            if key[0] == cam_id:
+                del self._early_fired[key]
 
     def _record_detection(self, cam_id: int, category: str, detected: bool,
                           bbox_center: tuple[float, float] | None = None) -> bool:
@@ -315,10 +323,25 @@ class MotionDetector:
                             diag = (h ** 2 + w ** 2) ** 0.5
                             self._move_threshold[cam_id] = diag * AI_MIN_MOVE_PCT / 100
 
+                        # "Any motion" fast-path: scripts flagged motion_only fire on
+                        # the raw motion pre-filter, BEFORE AI inference + face — the
+                        # fastest possible trigger. On an AI camera the AI branch never
+                        # emits a "motion" category event, so without this a motion_only
+                        # script would never fire. Reuses the (cam,"motion") event
+                        # lifecycle for once-per-onset firing, off-scripts and cooldown.
+                        if self._has_motion_only_scripts(scripts):
+                            await self._on_motion(
+                                cam_id, cam_name, changed_pct, scripts, frame=frame,
+                                motion_mask=thresh, motion_threshold_pct=threshold_pct,
+                                captured_at=captured_at,
+                            )
+
                         from app.services.object_detector import build_class_list
                         detector = get_object_detector()
                         classes = build_class_list(ai_detect_persons, ai_detect_vehicles, ai_detect_animals)
+                        _t_ai = datetime.now()
                         detections = await detector.detect_objects(frame, ai_threshold, classes=classes) if classes else []
+                        _ai_ms = round((datetime.now() - _t_ai).total_seconds() * 1000)
                         # Filter out static objects: only keep detections whose
                         # bounding box overlaps sufficiently with the motion mask
                         moving = []
@@ -358,6 +381,11 @@ class MotionDetector:
                                     )
                                 if confirmed:
                                     any_confirmed = True
+                                    logger.info("[BENCH] detection confirmed", extra={
+                                        "camera": cam_name, "category": cat,
+                                        "ai_ms": _ai_ms,
+                                        "confirm_ms": round((datetime.now() - captured_at).total_seconds() * 1000),
+                                    })
                                     pending = self._pending_detections.pop(pkey, None)
                                     if pending:
                                         p_label, p_conf, p_intensity, p_frame, p_bbox = pending
@@ -365,6 +393,19 @@ class MotionDetector:
                                         p_label, p_conf, p_intensity, p_frame, p_bbox = (
                                             best.label, best.confidence, changed_pct, frame, best_bbox,
                                         )
+                                    # Fire non-face-gated on-scripts NOW, before the
+                                    # ~1-2s face pass below. Lights respond fast; the
+                                    # face pass still runs for the timeline event and
+                                    # any face-gated scripts. Guarded to fire once per
+                                    # event onset (see _fire_fast_scripts).
+                                    _fast_shape = (
+                                        (int(p_frame.shape[0]), int(p_frame.shape[1]))
+                                        if p_frame is not None else None
+                                    )
+                                    await self._fire_fast_scripts(
+                                        cam_id, cam_name, cat, scripts, p_bbox,
+                                        _fast_shape, thresh, threshold_pct, captured_at,
+                                    )
                                     # Always run SCRFD on person events so the enrollment UI
                                     # can filter thumbnails to ones with an actual face, even
                                     # on cameras where face recognition itself is off.
@@ -373,6 +414,7 @@ class MotionDetector:
                                     face_info = None
                                     thumb_frame = p_frame
                                     if cat == "person":
+                                        _t_face = datetime.now()
                                         ev_key = (cam_id, cat)
                                         locked_in = (
                                             self._best_face_confidence.get(ev_key, 0.0)
@@ -393,6 +435,10 @@ class MotionDetector:
                                             mf = (face_info or {}).get("source_frame")
                                             if mf is not None:
                                                 thumb_frame = mf
+                                        logger.info("[BENCH] face pass done", extra={
+                                            "camera": cam_name, "fr_enabled": face_recognition,
+                                            "face_ms": round((datetime.now() - _t_face).total_seconds() * 1000),
+                                        })
                                     await self._on_motion(
                                         cam_id, cam_name, p_intensity, scripts,
                                         detection_label=p_label,
@@ -463,6 +509,11 @@ class MotionDetector:
             return None
 
     @staticmethod
+    def _has_motion_only_scripts(scripts: list[dict]) -> bool:
+        """True if any script wants the 'any motion' category (motion_only)."""
+        return any(s.get("motion_only") for s in scripts)
+
+    @staticmethod
     def _scripts_for_category(scripts: list[dict], category: str) -> list[dict]:
         """Return script configs that match the given detection category."""
         cat_key = {
@@ -471,7 +522,12 @@ class MotionDetector:
             "animal": "animals",
             "motion": "motion_only",
         }.get(category, "motion_only")
-        return [s for s in scripts if s.get(cat_key, False)]
+        if cat_key == "motion_only":
+            return [s for s in scripts if s.get("motion_only")]
+        # A motion_only script triggers on the broader 'any motion' path, so don't
+        # also fire it on a specific category — otherwise it double-fires on an AI
+        # camera (once on motion, once on person/vehicle/animal).
+        return [s for s in scripts if s.get(cat_key, False) and not s.get("motion_only")]
 
     @staticmethod
     def _scripts_match_face(script: dict, matched_face_ids: set[int], face_unknown: bool) -> bool:
@@ -722,6 +778,54 @@ class MotionDetector:
                 )
         return out
 
+    async def _fire_fast_scripts(
+        self, cam_id: int, cam_name: str, category: str, scripts: list[dict],
+        detection_bbox: tuple[int, int, int, int] | None,
+        shape_hw: tuple[int, int] | None,
+        motion_mask: np.ndarray | None,
+        motion_threshold_pct: float,
+        captured_at: datetime,
+    ) -> None:
+        """Fire on-scripts that don't depend on face recognition, immediately on
+        detection-confirm — BEFORE the (~1-2s) face pass.
+
+        A script is "fast" when it is not gated by face (`faces` / `face_unknown`
+        unset): its trigger decision needs only the object detection, so making it
+        wait for ArcFace/SCRFD is pure latency. Face-gated scripts are excluded
+        (their fire decision needs the face result) and run later in `_on_motion`.
+
+        The face pass itself is NOT skipped — it still runs after this returns so
+        the timeline event gets face labels and face-gated scripts still work.
+
+        Zone filtering is applied here (bbox is known). Guarded by `_active_events`
+        + `_early_fired` so a sustained presence fires the light once per onset,
+        not on every confirmed frame (cheap Tuya devices reboot if hammered).
+        """
+        key = (cam_id, category)
+        if key in self._active_events or key in self._early_fired:
+            return
+        matching = self._scripts_for_category(scripts, category)
+        fast = [s for s in matching if not (s.get("faces") or s.get("face_unknown"))]
+        if fast and shape_hw is not None:
+            fast = await self._filter_firing_by_zone(
+                fast, shape_hw, detection_bbox, motion_mask, motion_threshold_pct,
+            )
+        on_scripts = [s for s in fast if s.get("on")]
+        if not on_scripts:
+            return
+        # Mark every fast script (even off-only) so the slow path won't re-fire it.
+        self._early_fired[key] = {id(s) for s in fast}
+        logger.info("[BENCH] fast-fire on-scripts", extra={
+            "camera": cam_name, "category": category, "count": len(on_scripts),
+            "capture_to_fastfire_ms": round((datetime.now() - captured_at).total_seconds() * 1000),
+        })
+        fire_now = datetime.now()
+        for s in on_scripts:
+            asyncio.create_task(self._run_script(
+                s["on"], cam_name, fire_now, 0.0,
+                detection_label=category, bench_t0=captured_at,
+            ))
+
     async def _on_motion(
         self, cam_id: int, cam_name: str, intensity: float,
         scripts: list[dict],
@@ -862,13 +966,23 @@ class MotionDetector:
                 log_extra["face_unknown"] = True
             logger.info("Motion started", extra=log_extra)
 
-            # Run all matching on-scripts for this category (honoring face filters)
-            for s in firing:
-                if s.get("on"):
-                    asyncio.create_task(self._run_script(
-                        s["on"], cam_name, now, intensity, detection_label, detection_confidence,
-                        face_names=[m["name"] for m in face_matches],
-                    ))
+            # Run matching on-scripts for this category (honoring face filters).
+            # Skip any already dispatched by the fast path before the face pass —
+            # those are non-face-gated; here we fire the remaining (face-gated) ones.
+            early = self._early_fired.get(key, set())
+            to_fire = [s for s in firing if s.get("on") and id(s) not in early]
+            if to_fire:
+                logger.info("[BENCH] firing on-scripts (post-face)", extra={
+                    "camera": cam_name, "category": category, "count": len(to_fire),
+                    "early_fired": len(early),
+                    "capture_to_fire_ms": round((now - event_start).total_seconds() * 1000),
+                })
+            for s in to_fire:
+                asyncio.create_task(self._run_script(
+                    s["on"], cam_name, now, intensity, detection_label, detection_confidence,
+                    face_names=[m["name"] for m in face_matches],
+                    bench_t0=event_start,
+                ))
         else:
             factory = get_session_factory()
             async with factory() as session:
@@ -924,6 +1038,7 @@ class MotionDetector:
         self._event_start.pop(key, None)
         self._last_motion.pop(key, None)
         self._best_face_confidence.pop(key, None)
+        self._early_fired.pop(key, None)
         off_scripts = self._script_off.pop(key, None) or []
         if event_id is None:
             return
@@ -968,6 +1083,7 @@ class MotionDetector:
         self, script: str, cam_name: str, timestamp: datetime, intensity: float,
         detection_label: str | None = None, detection_confidence: float | None = None,
         face_names: list[str] | None = None,
+        bench_t0: datetime | None = None,
     ) -> None:
         try:
             env = {
@@ -979,11 +1095,21 @@ class MotionDetector:
                 "DETECTION_CONFIDENCE": str(round(detection_confidence, 2)) if detection_confidence else "",
                 "FACE_NAMES": ",".join(face_names) if face_names else "",
             }
+            _t_spawn = datetime.now()
             proc = await asyncio.create_subprocess_shell(
                 script, env=env,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
+            _spawn_ms = round((datetime.now() - _t_spawn).total_seconds() * 1000)
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            logger.info("[BENCH] script executed", extra={
+                "script": ("…" + script[-58:]) if len(script) > 58 else script,
+                "rc": proc.returncode,
+                "spawn_ms": _spawn_ms,
+                "run_ms": round((datetime.now() - _t_spawn).total_seconds() * 1000),
+                "capture_to_done_ms": (round((datetime.now() - bench_t0).total_seconds() * 1000)
+                                       if bench_t0 else None),
+            })
             if proc.returncode != 0:
                 logger.warning("Motion script failed (rc=%d): %s",
                                proc.returncode, stderr.decode(errors="replace")[-200:].strip())

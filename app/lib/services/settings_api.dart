@@ -105,6 +105,31 @@ class SettingsApi {
     return resp.data as Map<String, dynamic>;
   }
 
+  // --- Two-tier storage API ---
+
+  /// List fixed drives with media type (SSD/HDD), SMART health, and capacity.
+  Future<List<Map<String, dynamic>>> fetchDrives() async {
+    final resp = await _client.dio.get('/api/storage/drives');
+    return (resp.data as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+
+  /// Validate a proposed archive-tier configuration before applying.
+  /// Returns {valid, error, warning, free_space_gb, drive}.
+  Future<Map<String, dynamic>> validateStorageConfig(
+      String archiveDir, bool twoTierEnabled) async {
+    final resp = await _client.dio.post('/api/storage/config/validate', data: {
+      'archive_dir': archiveDir,
+      'two_tier_enabled': twoTierEnabled,
+    });
+    return resp.data as Map<String, dynamic>;
+  }
+
+  /// Live two-tier storage status (per-tier usage, flush backlog, degraded flag).
+  Future<Map<String, dynamic>> fetchStorageStatus() async {
+    final resp = await _client.dio.get('/api/storage/status');
+    return resp.data as Map<String, dynamic>;
+  }
+
   // --- Data directory API ---
 
   /// Get the current data directory info. Also updates [cachedDataDir].

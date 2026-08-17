@@ -134,8 +134,14 @@ async def lifespan(app: FastAPI):
     app_exe = Path(get_app_dir()) / "app" / "richiris.exe"
     await update_checker.start(current_version=app.version, app_exe=app_exe)
 
+    # Two-tier storage: clean any interrupted flush temp files, then start the
+    # background HOT→archive flusher (no-op while two-tier is disabled).
+    from app.services.storage_flush import get_storage_flusher
+    get_storage_flusher().cleanup_stray_tmp()
+
     scan_task = asyncio.create_task(_periodic_scan())
     retention_task = asyncio.create_task(_periodic_retention())
+    flush_task = asyncio.create_task(_periodic_flush())
 
     from app.config import get_bootstrap
     from app.services.self_watchdog import run_self_watchdog
@@ -144,6 +150,7 @@ async def lifespan(app: FastAPI):
     yield
     scan_task.cancel()
     retention_task.cancel()
+    flush_task.cancel()
     watchdog_task.cancel()
 
     logger.info("RichIris NVR shutting down")
@@ -153,6 +160,8 @@ async def lifespan(app: FastAPI):
         await face_clusterer.stop()
     await face_recognizer.stop()
     await obj_detector.stop()
+    from app.services.remote_inference import get_remote_inference
+    await get_remote_inference().close()
     await thumb_capture.stop()
     await frame_broker.stop()
     mgr = get_stream_manager()
@@ -195,10 +204,58 @@ async def _periodic_retention() -> None:
         await asyncio.sleep(6 * 3600)  # Every 6 hours
 
 
+async def _periodic_flush() -> None:
+    """Periodically flush finalized HOT segments to the archive tier.
+
+    No-op (returns instantly) while two-tier storage is disabled, so the loop is
+    cheap when the feature is off. Never raises into the event loop.
+    """
+    from app.services.storage_flush import get_storage_flusher
+    flusher = get_storage_flusher()
+    await asyncio.sleep(60)  # Initial delay to let recordings settle
+    while True:
+        try:
+            await flusher.flush_once()
+        except Exception:
+            logger.exception("Storage flush cycle failed")
+        # Back off when degraded (archive offline) so we don't hammer a bad disk.
+        await asyncio.sleep(120 if flusher.state.degraded else 30)
+
+
 def _kill_orphaned_ffmpeg() -> None:
     """Kill any ffmpeg processes left over from a previous run."""
     import os
     if os.name != "nt":
+        # Under systemd (KillMode=control-group) orphans can't survive a
+        # restart, so this is a best-effort dev-mode cleanup: kill our own
+        # ffmpeg processes whose cmdline references our data dir or the
+        # go2rtc RTSP relay port.
+        try:
+            import signal
+            from pathlib import Path as _Path
+            from app.config import get_bootstrap as _get_bootstrap
+            markers = (str(_get_bootstrap().data_dir), ":18554/")
+            my_uid = os.getuid()
+            killed = []
+            for p in _Path("/proc").iterdir():
+                if not p.name.isdigit():
+                    continue
+                try:
+                    if (p / "comm").read_text().strip() != "ffmpeg":
+                        continue
+                    if p.stat().st_uid != my_uid:
+                        continue
+                    cmdline = (p / "cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
+                    if any(m in cmdline for m in markers):
+                        os.kill(int(p.name), signal.SIGKILL)
+                        killed.append(int(p.name))
+                except (OSError, ValueError):
+                    continue
+            if killed:
+                logger.warning("Killed orphaned ffmpeg processes from previous run",
+                               extra={"pids": killed, "count": len(killed)})
+        except Exception:
+            logger.exception("Failed to clean up orphaned ffmpeg processes")
         return
     try:
         import subprocess

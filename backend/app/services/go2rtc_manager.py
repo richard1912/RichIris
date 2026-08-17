@@ -53,7 +53,8 @@ def _resolve_go2rtc_binary() -> str | None:
     app_dir = get_app_dir()
 
     # Check bundled location (same path in both dev and installed layout)
-    bundled = app_dir / "dependencies" / "go2rtc" / "go2rtc.exe"
+    binary_name = "go2rtc.exe" if sys.platform == "win32" else "go2rtc"
+    bundled = app_dir / "dependencies" / "go2rtc" / binary_name
     if bundled.exists():
         return str(bundled)
 
@@ -91,15 +92,23 @@ def _generate_go2rtc_config(
     # Use Windows 8.3 short path for ffmpeg — go2rtc can't handle spaces in bin path
     ffmpeg_bin = _get_short_path(config.ffmpeg.path)
 
+    ffmpeg_cfg: dict = {"bin": ffmpeg_bin}
+    hwaccel = config.ffmpeg.hwaccel
+    if hwaccel == "cuda":
+        # NVENC GPU encoders (default template keys used by #video=h264/h265)
+        ffmpeg_cfg["h264"] = "-c:v h264_nvenc -g:v 30 -delay 0 -profile:v high -level:v auto"
+        ffmpeg_cfg["h265"] = "-c:v hevc_nvenc -g:v 30 -delay 0 -profile:v main -level:v auto"
+    elif hwaccel == "vaapi":
+        # Override go2rtc's built-in vaapi templates (selected via #hardware=vaapi
+        # on the stream defs, see go2rtc_client) to keep our GOP settings
+        ffmpeg_cfg["h264/vaapi"] = "-c:v h264_vaapi -g 30 -bf 0 -profile:v high"
+        ffmpeg_cfg["h265/vaapi"] = "-c:v hevc_vaapi -g 30 -bf 0 -profile:v main"
+    # hwaccel == "none": no overrides — go2rtc falls back to software encoders
+
     go2rtc_config = {
         "api": {"listen": f":{api_port}"},
         "rtsp": {"listen": f":{rtsp_port}"},
-        "ffmpeg": {
-            "bin": ffmpeg_bin,
-            # Use NVENC GPU encoders
-            "h264": "-c:v h264_nvenc -g:v 30 -delay 0 -profile:v high -level:v auto",
-            "h265": "-c:v hevc_nvenc -g:v 30 -delay 0 -profile:v main -level:v auto",
-        },
+        "ffmpeg": ffmpeg_cfg,
     }
     if streams:
         go2rtc_config["streams"] = streams
@@ -128,12 +137,18 @@ def _launch_process(binary: str, config_path: Path, log_path: Path) -> subproces
         _log_file.close()
     _log_file = open(log_path, "a")
 
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+
     return subprocess.Popen(
         cmd,
         stdout=_log_file,
         stderr=_log_file,
         cwd=str(binary_dir),
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        **kwargs,
     )
 
 

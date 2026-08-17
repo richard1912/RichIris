@@ -270,6 +270,15 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
       final sub = _subStreamCtrl.text.trim();
       final subUrl = sub.isNotEmpty ? _injectCreds(sub, user, pass) : null;
 
+      // Commit any in-progress script-name edit before reading e.name below.
+      // The name field may still be focused when "Save Changes" is tapped, so
+      // its onTapOutside/onSubmitted hasn't fired and e.name would be stale.
+      for (var i = 0; i < _scriptEntries.length; i++) {
+        final e = _scriptEntries[i];
+        final typed = e.nameCtrl.text.trim();
+        e.name = (typed.isEmpty || typed == 'Script ${i + 1}') ? null : typed;
+      }
+
       if (isEditing) {
         // Build motion_scripts from entries (filter out empty ones)
         final scriptsList = _scriptEntries

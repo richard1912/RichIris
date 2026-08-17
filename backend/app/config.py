@@ -136,16 +136,27 @@ class ServerConfig:
 
 @dataclass
 class StorageConfig:
-    recordings_dir: str = ""
+    recordings_dir: str = ""        # HOT tier (= data_dir/recordings): recorder writes here
     thumbnails_dir: str = ""
     database_url: str = ""
+    # Two-tier storage (archive). archive_recordings_dir is where the background
+    # flusher moves finalized segments. When two-tier is off (or archive == hot)
+    # it equals recordings_dir, making the flusher a no-op.
+    archive_recordings_dir: str = ""
+    two_tier_enabled: bool = False
+    hot_retention_minutes: int = 60
+    hot_max_gb: int = 0
+
+
+# NVENC on Windows (NVIDIA), VAAPI elsewhere (Intel iGPU on the Debian box)
+DEFAULT_HWACCEL = "cuda" if sys.platform == "win32" else "vaapi"
 
 
 @dataclass
 class FFmpegConfig:
     path: str = ""
     ffprobe_path: str = ""
-    hwaccel: str = "cuda"
+    hwaccel: str = DEFAULT_HWACCEL
     segment_duration: int = 900
     rtsp_transport: str = "tcp"
     rtsp_timeout_us: int = 30_000_000
@@ -180,6 +191,14 @@ class LoggingConfig:
 
 
 @dataclass
+class AIConfig:
+    # Remote inference server (e.g. http://192.168.8.11:8701 — the Windows RTX
+    # 4080 box). Empty = local in-process ONNX inference.
+    remote_url: str = ""
+    remote_timeout_ms: int = 2500
+
+
+@dataclass
 class CameraConfig:
     name: str = ""
     rtsp_url: str = ""
@@ -197,6 +216,7 @@ class AppConfig:
     retention: RetentionConfig = field(default_factory=RetentionConfig)
     trickplay: TrickplayConfig = field(default_factory=TrickplayConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
 
 
@@ -230,6 +250,9 @@ def _populate_from_bootstrap(config: AppConfig, bootstrap: BootstrapConfig) -> N
 
     # Thumbnails are always under {data_dir}/thumbnails/
     config.storage.thumbnails_dir = str(data_dir / "thumbnails")
+
+    # Archive defaults to the hot recordings dir until DB settings enable two-tier.
+    config.storage.archive_recordings_dir = config.storage.recordings_dir
 
     # Resolve binaries
     if not config.ffmpeg.path or config.ffmpeg.path == "ffmpeg":
@@ -279,17 +302,56 @@ def _apply_db_settings(config: AppConfig, settings: dict[str, str]) -> None:
     config.logging.json_output = _get_bool("logging.json_output", config.logging.json_output)
     config.logging.timezone = _get("logging.timezone") or config.logging.timezone
 
+    # AI (remote inference)
+    config.ai.remote_url = _get("ai.remote_url").strip() or config.ai.remote_url
+    config.ai.remote_timeout_ms = _get_int("ai.remote_timeout_ms", config.ai.remote_timeout_ms)
+
+    # Storage (two-tier). recordings_dir is the HOT tier (= data_dir/recordings),
+    # set by _populate_from_bootstrap and left untouched here. archive_dir is the
+    # root of the archive tier; finalized segments are flushed to
+    # {archive_dir}/recordings. Two-tier is active only when enabled AND a distinct
+    # archive_dir is given — otherwise archive == hot and the flusher is a no-op.
+    config.storage.two_tier_enabled = _get_bool("storage.two_tier_enabled", config.storage.two_tier_enabled)
+    config.storage.hot_retention_minutes = _get_int("storage.hot_retention_minutes", config.storage.hot_retention_minutes)
+    config.storage.hot_max_gb = _get_int("storage.hot_max_gb", config.storage.hot_max_gb)
+
+    archive_dir = _get("storage.archive_dir").strip()
+    archive_recordings = config.storage.recordings_dir  # default: single-tier
+    if config.storage.two_tier_enabled and archive_dir:
+        candidate = str(Path(archive_dir) / "recordings")
+        try:
+            same = Path(candidate).resolve() == Path(config.storage.recordings_dir).resolve()
+        except Exception:
+            same = candidate == config.storage.recordings_dir
+        if not same:
+            archive_recordings = candidate
+    config.storage.archive_recordings_dir = archive_recordings
+
 
 def validate_paths(config: AppConfig) -> None:
     """Ensure required directories exist."""
-    for dir_name, path_str in [
+    dirs = [
         ("recordings_dir", config.storage.recordings_dir),
         ("thumbnails_dir", config.storage.thumbnails_dir),
-    ]:
+    ]
+    # Only create the archive dir when it's a distinct, active two-tier target;
+    # don't touch a (possibly offline) archive drive otherwise.
+    if (
+        config.storage.two_tier_enabled
+        and config.storage.archive_recordings_dir
+        and config.storage.archive_recordings_dir != config.storage.recordings_dir
+    ):
+        dirs.append(("archive_recordings_dir", config.storage.archive_recordings_dir))
+
+    for dir_name, path_str in dirs:
         if path_str:
             p = Path(path_str)
-            p.mkdir(parents=True, exist_ok=True)
-            logger.debug("Ensured directory exists", extra={"dir_name": dir_name, "path": str(p)})
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+                logger.debug("Ensured directory exists", extra={"dir_name": dir_name, "path": str(p)})
+            except Exception:
+                # Archive drive may be offline — flusher handles this as degraded mode.
+                logger.warning("Could not ensure directory", extra={"dir_name": dir_name, "path": str(p)})
 
 
 # ---------------------------------------------------------------------------

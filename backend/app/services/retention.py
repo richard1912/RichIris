@@ -138,22 +138,44 @@ def _delete_recordings(recordings: list[Recording]) -> tuple[int, int]:
 
 
 def _cleanup_empty_dirs() -> None:
-    """Remove empty date directories under each camera folder."""
+    """Remove empty date directories under each camera folder (both tiers)."""
     config = get_config()
-    rec_root = Path(config.storage.recordings_dir)
-    if not rec_root.exists():
-        return
+    roots = [config.storage.recordings_dir]
+    # Also sweep the archive tree when two-tier is active and distinct.
+    archive = config.storage.archive_recordings_dir
+    if archive and archive != config.storage.recordings_dir:
+        roots.append(archive)
 
-    for camera_dir in rec_root.iterdir():
-        if not camera_dir.is_dir():
+    for root_str in roots:
+        rec_root = Path(root_str)
+        if not rec_root.exists():
             continue
-        for date_dir in camera_dir.iterdir():
-            if date_dir.is_dir() and not any(date_dir.iterdir()):
-                try:
-                    date_dir.rmdir()
-                    logger.debug("Removed empty dir", extra={"path": str(date_dir)})
-                except OSError:
-                    pass
+        for camera_dir in rec_root.iterdir():
+            if not camera_dir.is_dir():
+                continue
+            for date_dir in camera_dir.iterdir():
+                if date_dir.is_dir() and not any(date_dir.iterdir()):
+                    try:
+                        date_dir.rmdir()
+                        logger.debug("Removed empty dir", extra={"path": str(date_dir)})
+                    except OSError:
+                        pass
+
+
+async def get_tier_byte_totals(session: AsyncSession) -> dict:
+    """Return recorded bytes and segment counts grouped by tier (hot/archive)."""
+    result = await session.execute(
+        select(
+            Recording.tier,
+            func.count(Recording.id),
+            func.coalesce(func.sum(Recording.file_size), 0),
+        ).group_by(Recording.tier)
+    )
+    totals = {"hot": {"bytes": 0, "count": 0}, "archive": {"bytes": 0, "count": 0}}
+    for tier, count, size in result.all():
+        key = tier if tier in totals else "hot"
+        totals[key] = {"bytes": int(size or 0), "count": int(count or 0)}
+    return totals
 
 
 async def get_storage_stats(session: AsyncSession) -> dict:
