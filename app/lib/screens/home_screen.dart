@@ -504,7 +504,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight: 40,
+        // Android keeps Material's 48px touch targets on IconButtons, so a
+        // 40px toolbar clips the glyphs; desktop runs compact density and fits.
+        toolbarHeight: isAndroid ? 48 : 40,
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
