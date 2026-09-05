@@ -247,6 +247,11 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       _playbackStartTime = start;
     });
     _clearSpeedTimer();
+    // _clearSpeedTimer bumped _generation; anything issued after this call
+    // (a quicker second click on the speed bar, a timeline tap) bumps it
+    // again, and this request must then discard its response rather than
+    // open a session the user has already moved past.
+    final gen = _generation;
     _speed = resumeSpeed;
     _seekSub?.cancel();
 
@@ -257,6 +262,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         widget.quality.param,
         direction: resumeSpeed < 0 ? 'backward' : 'forward',
       );
+      if (_generation != gen || !mounted) return;
       final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
 
       _ensurePlayer();
@@ -296,6 +302,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         });
       }
     } catch (e) {
+      if (_generation != gen || !mounted) return;
       setState(() {
         _playbackError = e.toString();
         _playbackLoading = false;
