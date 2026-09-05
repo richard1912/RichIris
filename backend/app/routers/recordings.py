@@ -321,6 +321,10 @@ async def get_playback_file(
                         # alive; without this the idle sweep (30s) tears down
                         # a long transcode or reverse render mid-stream.
                         mgr.touch(session_id)
+                        if session.renderer:
+                            # Lets the reverse renderer pace itself to us.
+                            session.renderer.bytes_consumed = max(
+                                session.renderer.bytes_consumed, sent)
                         yield chunk
                     else:
                         if session.process and session.process.returncode is None:

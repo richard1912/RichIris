@@ -45,6 +45,13 @@ OUT_WIDTH = 1280
 # playback without hogging the iGPU that live transcodes share.
 CONCURRENCY = 2
 CHUNK_TIMEOUT = 60.0
+# Render only this far ahead of what the client has actually read. Without
+# a bound every session eagerly rendered the whole rest of the segment
+# (up to 15 min, ~2 min of two busy cores + the iGPU) even when the user
+# tapped a different speed two seconds later. ~24 MB is about 90 s of the
+# 720p/10fps output, plenty of runway at -4x; an unread session stalls
+# here and the 30 s idle sweep then tears it down.
+MAX_LEAD_BYTES = 24 * 1024 * 1024
 
 
 def _chunk_plan(end_offset: float) -> list[tuple[float, float]]:
@@ -97,6 +104,9 @@ class ReverseRenderer:
         self.task: asyncio.Task | None = None
         self.chunks_done = 0
         self.error: str | None = None
+        self.bytes_written = 0
+        # Updated by the playback.mp4 endpoint as it streams to the client.
+        self.bytes_consumed = 0
 
     @property
     def chunk_count(self) -> int:
@@ -119,29 +129,45 @@ class ReverseRenderer:
         self.task = asyncio.create_task(self._run())
         return self.mux
 
+    async def _wait_for_headroom(self) -> None:
+        """Block while the client is more than MAX_LEAD_BYTES behind."""
+        while not self._stopped and                 self.bytes_written - self.bytes_consumed > MAX_LEAD_BYTES:
+            await asyncio.sleep(0.25)
+
     async def _run(self) -> None:
         started = time.monotonic()
+        # A sliding window of CONCURRENCY chunk tasks: the next chunk is
+        # only launched once there is headroom, so rendering paces itself
+        # to consumption instead of racing to the end of the segment.
+        pending: list[asyncio.Task] = []
         try:
-            sem = asyncio.Semaphore(CONCURRENCY)
-            # Launch every chunk as a task gated by the semaphore; chunks
-            # complete roughly in order because they are acquired in order.
-            tasks = [asyncio.create_task(self._render_chunk(sem, i, ss, t))
-                     for i, (ss, t) in enumerate(self._plan)]
-            for i, task in enumerate(tasks):
-                data = await task
+            next_index = 0
+            while next_index < len(self._plan) or pending:
+                while len(pending) < CONCURRENCY and next_index < len(self._plan):
+                    await self._wait_for_headroom()
+                    if self._stopped:
+                        break
+                    ss, t = self._plan[next_index]
+                    pending.append(asyncio.create_task(
+                        self._render_chunk(next_index, ss, t)))
+                    next_index += 1
+                if self._stopped or not pending:
+                    break
+                data = await pending.pop(0)
                 if self._stopped:
                     break
                 if data:
                     self.mux.stdin.write(data)
                     await self.mux.stdin.drain()
-                self.chunks_done = i + 1
+                    self.bytes_written += len(data)
+                self.chunks_done += 1
         except (asyncio.CancelledError, BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             logger.exception("Reverse render failed", extra={"source": self._source})
         finally:
-            for t in tasks if "tasks" in locals() else []:
+            for t in pending:
                 t.cancel()
             if self.mux and self.mux.stdin and not self.mux.stdin.is_closing():
                 try:
@@ -155,25 +181,23 @@ class ReverseRenderer:
                        "stopped": self._stopped},
             )
 
-    async def _render_chunk(self, sem: asyncio.Semaphore, index: int,
-                            seek: float, duration: float) -> bytes:
-        async with sem:
-            if self._stopped:
-                return b""
-            data, err = await self._encode(seek, duration, use_hw=True)
-            if data or self._stopped:
-                return data
-            # A seek that lands mid-GOP can make the hardware decoder bail
-            # ("Could not find ref with POC"); software decode tolerates it.
-            logger.warning(
-                "Reverse chunk failed on hw decode, retrying in software",
-                extra={"index": index, "seek": seek, "stderr": err[-300:]},
-            )
-            data, err = await self._encode(seek, duration, use_hw=False)
-            if not data and not self._stopped:
-                logger.error("Reverse chunk failed", extra={"index": index, "seek": seek,
-                                                            "stderr": err[-300:]})
+    async def _render_chunk(self, index: int, seek: float, duration: float) -> bytes:
+        if self._stopped:
+            return b""
+        data, err = await self._encode(seek, duration, use_hw=True)
+        if data or self._stopped:
             return data
+        # A seek that lands mid-GOP can make the hardware decoder bail
+        # ("Could not find ref with POC"); software decode tolerates it.
+        logger.warning(
+            "Reverse chunk failed on hw decode, retrying in software",
+            extra={"index": index, "seek": seek, "stderr": err[-300:]},
+        )
+        data, err = await self._encode(seek, duration, use_hw=False)
+        if not data and not self._stopped:
+            logger.error("Reverse chunk failed", extra={"index": index, "seek": seek,
+                                                        "stderr": err[-300:]})
+        return data
 
     async def _encode(self, seek: float, duration: float, *, use_hw: bool) -> tuple[bytes, str]:
         pre, vf = _decode_args(self._hwaccel, use_hw)
