@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/update_service.dart';
+import '../config/platform_info.dart';
 
 enum _Step { info, downloading, installing, error }
 
@@ -49,7 +50,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
     // On Android, Flutter apps can't shell out to `am` or open `file://`
     // intents, so we hand the APK URL to the system browser. Chrome downloads
     // the file and Android's package installer opens it from the notification.
-    if (Platform.isAndroid) {
+    if (isAndroid) {
       await _openAndroidDownload();
       return;
     }
@@ -73,7 +74,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
       if (!mounted) return;
       setState(() => _step = _Step.installing);
 
-      if (Platform.isWindows) {
+      if (isWindows) {
         await widget.updateService.installUpdate(path);
       }
     } on DioException catch (e) {
@@ -271,11 +272,11 @@ class _UpdateDialogState extends State<UpdateDialog> {
             FilledButton.icon(
               onPressed: _startDownload,
               icon: Icon(
-                Platform.isAndroid ? Icons.open_in_browser : Icons.download,
+                isAndroid ? Icons.open_in_browser : Icons.download,
                 size: 18,
               ),
               label: Text(
-                Platform.isAndroid ? 'Download in browser' : 'Update now',
+                isAndroid ? 'Download in browser' : 'Update now',
               ),
             ),
           ],
@@ -371,7 +372,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
   }
 
   Widget _buildInstallingStep() {
-    final message = Platform.isWindows
+    final message = isWindows
         ? 'Launching installer... The app will close shortly.'
         : 'Opening package installer...';
 

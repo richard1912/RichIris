@@ -1,7 +1,7 @@
-import 'dart:io' show Platform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../config/platform_info.dart';
 
 /// Wraps a video widget with zoom + pan controls.
 /// - Windows: Ctrl+scroll to zoom, drag to pan, zoom icon → slider, minimap
@@ -123,7 +123,19 @@ class _ZoomableVideoState extends State<ZoomableVideo> {
 
   @override
   Widget build(BuildContext context) {
-    final isAndroid = Platform.isAndroid;
+    if (isWeb) {
+      // On web the video is a real DOM element composited with Flutter's
+      // canvas, not a texture painted into it. Nesting it in
+      // InteractiveViewer's transform + clip moves it onto a compositing path
+      // where the Scaffold's opaque black background ends up painted OVER it:
+      // the feed keeps decoding and the element keeps its correct size, but
+      // the picture is black. The grid, which has no InteractiveViewer, shows
+      // the same streams fine.
+      //
+      // Browsers have their own page zoom, so pass the video straight through
+      // rather than trade a visible picture for pan-and-zoom.
+      return widget.child;
+    }
     final isZoomed = _currentScale > 1.01;
 
     return Stack(

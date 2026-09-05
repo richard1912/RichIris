@@ -27,6 +27,13 @@ CAPTURE_FPS = 2
 MAX_FRAME_AGE_SECONDS = 4.0
 # Backoff on ffmpeg exit / crash.
 RECONNECT_DELAY_SECONDS = 3.0
+# A reader that produces no frames for this long is considered hung and its
+# ffmpeg is killed so the loop reconnects. Covers the case where ffmpeg stays
+# alive but silent (camera changed codec mid-session, half-dead RTSP session):
+# stdout never closes, so without this the reader would wait forever and motion
+# detection for that camera would silently stop.
+STALL_TIMEOUT_SECONDS = 30.0
+STALL_CHECK_INTERVAL_SECONDS = 5.0
 # JPEG markers for MJPEG frame boundary parsing.
 _JPEG_SOI = b"\xff\xd8\xff"
 _JPEG_EOI = b"\xff\xd9"
@@ -38,6 +45,9 @@ class FrameBroker:
     def __init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
         self._latest: dict[int, tuple[np.ndarray, float]] = {}
+        # Raw JPEG bytes for the same frames, kept so HTTP consumers (the
+        # client's live-view poster frame) can be served without re-encoding.
+        self._latest_jpeg: dict[int, tuple[bytes, float]] = {}
         self._running = False
 
     async def start(self, cameras: list) -> None:
@@ -62,6 +72,7 @@ class FrameBroker:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
         self._latest.clear()
+        self._latest_jpeg.clear()
         logger.info("Frame broker stopped")
 
     async def add_camera(self, camera) -> None:
@@ -83,6 +94,7 @@ class FrameBroker:
             except (asyncio.CancelledError, Exception):
                 pass
         self._latest.pop(camera_id, None)
+        self._latest_jpeg.pop(camera_id, None)
 
     def get_latest(self, camera_id: int, max_age: float = MAX_FRAME_AGE_SECONDS) -> np.ndarray | None:
         """Return the most recent frame for a camera, or None if missing/stale."""
@@ -93,6 +105,23 @@ class FrameBroker:
         if time.monotonic() - ts > max_age:
             return None
         return frame
+
+    def get_latest_jpeg(
+        self, camera_id: int, max_age: float = MAX_FRAME_AGE_SECONDS
+    ) -> bytes | None:
+        """Return the most recent frame as raw JPEG bytes (no re-encode).
+
+        Used by the live-view poster endpoint so a client can paint a current
+        image the instant it starts, instead of black while its decoder waits
+        for the next keyframe.
+        """
+        entry = self._latest_jpeg.get(camera_id)
+        if entry is None:
+            return None
+        jpeg, ts = entry
+        if time.monotonic() - ts > max_age:
+            return None
+        return jpeg
 
     async def get_fresh(
         self, camera_id: int, max_wait: float = 5.0, poll_interval: float = 0.1
@@ -143,7 +172,13 @@ class FrameBroker:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                await self._consume_mjpeg(cam_id, cam_name, proc.stdout)
+                watchdog = asyncio.create_task(
+                    self._stall_watchdog(cam_id, cam_name, proc)
+                )
+                try:
+                    await self._consume_mjpeg(cam_id, cam_name, proc.stdout)
+                finally:
+                    watchdog.cancel()
             except asyncio.CancelledError:
                 if proc and proc.returncode is None:
                     try:
@@ -164,6 +199,34 @@ class FrameBroker:
             if not self._running:
                 return
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+
+    async def _stall_watchdog(self, cam_id: int, cam_name: str, proc) -> None:
+        """Kill an ffmpeg that stops delivering frames without exiting.
+
+        The reader loop only notices a dead reader when ffmpeg's stdout closes.
+        An ffmpeg that hangs (stream codec changed under it, RTSP session went
+        half-open) keeps the pipe open forever, so this watchdog forces the
+        reconnect instead.
+        """
+        last_ts = self._latest.get(cam_id, (None, 0.0))[1]
+        deadline = time.monotonic() + STALL_TIMEOUT_SECONDS
+        while True:
+            await asyncio.sleep(STALL_CHECK_INTERVAL_SECONDS)
+            ts = self._latest.get(cam_id, (None, 0.0))[1]
+            if ts > last_ts:
+                last_ts = ts
+                deadline = time.monotonic() + STALL_TIMEOUT_SECONDS
+                continue
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Frame broker stalled, restarting reader",
+                    extra={"camera": cam_name, "stall_seconds": STALL_TIMEOUT_SECONDS},
+                )
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return
 
     async def _consume_mjpeg(
         self, cam_id: int, cam_name: str, reader: asyncio.StreamReader
@@ -199,7 +262,9 @@ class FrameBroker:
                 del buf[: end + 2]
                 frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
                 if frame is not None:
-                    self._latest[cam_id] = (frame, time.monotonic())
+                    now = time.monotonic()
+                    self._latest[cam_id] = (frame, now)
+                    self._latest_jpeg[cam_id] = (jpeg, now)
                     frames_seen += 1
                     if frames_seen == 1:
                         logger.info(

@@ -61,6 +61,11 @@ class _CameraGridState extends State<CameraGrid> {
   int? _hoverIndex;
   int _pageIdx = 0;
 
+  /// Captured once per grid so every poster URL stays stable across rebuilds
+  /// (Flutter's image cache is keyed on the URL — a per-build timestamp would
+  /// re-download the poster on every status poll).
+  final int _posterBust = DateTime.now().millisecondsSinceEpoch;
+
   List<Camera> get _cameras => _localOrder ?? widget.cameras;
 
   StreamStatus? _streamFor(int cameraId) {
@@ -251,6 +256,7 @@ class _CameraGridState extends State<CameraGrid> {
         camera: cam,
         stream: _streamFor(cam.id),
         streamUrl: url,
+        posterUrl: widget.streamApi.posterUrl(cam.id, cacheBust: _posterBust),
         selected: widget.selectedCameraId == cam.id,
         onTap: () => widget.onCameraSelected(cam.id),
         onEdit: () => widget.onEditCamera(cam),

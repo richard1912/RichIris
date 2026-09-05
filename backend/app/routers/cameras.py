@@ -19,6 +19,7 @@ from app.models import Camera, ClipExport, MotionEvent, Recording, Zone
 from app.schemas import CameraCreate, CameraResponse, CameraUpdate, TestScriptRequest, TestScriptResponse
 from app.services.ffmpeg import sanitize_camera_name
 from app.services.motion_detector import get_motion_detector
+from app.services.rtsp_url import build_rtsp_credentials, normalize_rtsp_url
 from app.services.stream_manager import get_stream_manager
 
 logger = logging.getLogger(__name__)
@@ -122,9 +123,9 @@ async def discover_rtsp(req: RtspDiscoverRequest):
     if not ip:
         raise HTTPException(status_code=400, detail="IP address required")
 
-    creds = ""
-    if req.username:
-        creds = f"{req.username}:{req.password}@" if req.password else f"{req.username}@"
+    # Percent-encoded: go2rtc's Go URL parser rejects raw "@"/"^" etc. in a
+    # password, even though ffmpeg accepts them (see services/rtsp_url.py).
+    creds = build_rtsp_credentials(req.username, req.password)
 
     logger.info("RTSP discovery starting", extra={"ip": ip, "patterns": len(_RTSP_PATTERNS)})
 
@@ -493,6 +494,9 @@ async def camera_snapshot(req: SnapshotRequest):
     url = req.rtsp_url.strip()
     if not url.lower().startswith("rtsp://"):
         raise HTTPException(status_code=400, detail="rtsp_url must be an rtsp:// URL")
+    # A hand-pasted URL may carry raw credentials; encode so the preview
+    # matches what the camera will use once saved.
+    url = normalize_rtsp_url(url)
 
     config = get_config()
     width = max(64, min(req.width, 1280))
@@ -544,6 +548,30 @@ async def camera_snapshot(req: SnapshotRequest):
     return Response(content=stdout, media_type="image/jpeg")
 
 
+@router.get("/{camera_id}/latest-frame.jpg")
+async def camera_latest_frame(camera_id: int, max_age: float = Query(default=10.0, ge=1.0, le=60.0)):
+    """Serve the newest FrameBroker JPEG for a camera (no re-encode, no ffmpeg).
+
+    This is the live-view *poster frame*: clients paint it the instant the grid
+    appears, so a camera shows a current image while its own decoder is still
+    probing the stream and waiting for the next keyframe (which can be seconds
+    on cameras with a long GOP). Cheap enough to call for every camera at
+    startup — the broker already holds these frames in memory for motion
+    detection. 404 when the broker has no recent frame (camera disabled,
+    reconnecting, or just started).
+    """
+    from app.services.frame_broker import get_frame_broker
+
+    jpeg = get_frame_broker().get_latest_jpeg(camera_id, max_age=max_age)
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail="No recent frame for this camera")
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 class CameraReorderRequest(BaseModel):
     order: list[int]  # list of camera IDs in desired order
 
@@ -593,8 +621,8 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
     if data.motion_scripts:
         scripts_json = json.dumps([s.model_dump() for s in data.motion_scripts])
     camera = Camera(
-        name=data.name, rtsp_url=data.rtsp_url,
-        sub_stream_url=data.sub_stream_url or None,
+        name=data.name, rtsp_url=normalize_rtsp_url(data.rtsp_url),
+        sub_stream_url=normalize_rtsp_url(data.sub_stream_url) or None,
         enabled=data.enabled, rotation=data.rotation,
         sort_order=data.sort_order, group_id=data.group_id,
         motion_sensitivity=data.motion_sensitivity,
@@ -654,10 +682,10 @@ async def update_camera(
         camera.name = data.name
         needs_restart = True
     if data.rtsp_url is not None:
-        camera.rtsp_url = data.rtsp_url
+        camera.rtsp_url = normalize_rtsp_url(data.rtsp_url)
         needs_restart = True
     if "sub_stream_url" in (data.model_fields_set or set()):
-        camera.sub_stream_url = data.sub_stream_url or None
+        camera.sub_stream_url = normalize_rtsp_url(data.sub_stream_url) or None
         needs_restart = True
     if data.enabled is not None:
         camera.enabled = data.enabled

@@ -114,10 +114,14 @@ async def lifespan(app: FastAPI):
     if any(getattr(cam, 'ai_detection', False) for cam in cameras_list):
         await obj_detector.start()
 
-    # Start face recognizer if any camera has face_recognition enabled
+    # Start face recognizer if face work is enabled globally and any camera has
+    # face_recognition enabled. With ai.face_enabled off, neither the SCRFD /
+    # ArcFace models nor the clusterer loop are ever started.
     face_recognizer = get_face_recognizer()
     face_clusterer = None
-    if any(getattr(cam, 'face_recognition', False) for cam in cameras_list):
+    if not config.ai.face_enabled:
+        logger.info("Face detection disabled globally", extra={"setting": "ai.face_enabled"})
+    elif any(getattr(cam, 'face_recognition', False) for cam in cameras_list):
         await face_recognizer.start()
         await face_recognizer.reload_cache()
         # Background clusterer: drains unknown faces from the queue and turns

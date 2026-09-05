@@ -275,12 +275,42 @@ def _rename_segment(seg_path: Path, camera_name: str, start_time: datetime, dura
     return new_path
 
 
+def _refine_renamed_start(seg_path: Path, coarse: datetime) -> datetime | None:
+    """Recover the seconds a renamed segment's filename dropped.
+
+    mtime is ffmpeg's last write to the segment, i.e. its end, so
+    `mtime - duration` is the true start. Returns None if that can't be
+    established or disagrees with the filename by more than a minute (a
+    file copied without `-p` carries a useless mtime).
+    """
+    from app.config import get_config
+
+    duration = _probe_duration(seg_path, get_config())
+    if duration is None:
+        return None
+    try:
+        end = datetime.fromtimestamp(seg_path.stat().st_mtime)
+    except OSError:
+        return None
+    start = end - timedelta(seconds=duration)
+    if abs((start - coarse).total_seconds()) > 60:
+        return None
+    return start
+
+
 def _parse_segment_time(seg_path: Path) -> datetime:
     """Extract start time from segment filename.
 
     Supports two formats:
     - Old: rec_HH-MM-SS.ts in directory YYYY-MM-DD
     - New: Camera Name YYYY-MM-DD HH.MM - HH.MM.ts
+
+    The new format only carries HH.MM, so re-registering an already-renamed
+    segment — after a restore, a storage migration, or any rebuilt DB — used
+    to round its start silently down to :00. That is up to 59s of error in
+    the exact value clip export seeks with, so recover the seconds from mtime
+    where possible. Live registration is unaffected: it always sees the
+    `rec_HH-MM-SS` name, which is accurate to the second.
     """
     filename = seg_path.stem
     if filename.startswith("rec_"):
@@ -296,7 +326,8 @@ def _parse_segment_time(seg_path: Path) -> datetime:
         date_str = match.group(1)
         hour = match.group(2)
         minute = match.group(3)
-        return datetime.strptime(f"{date_str} {hour}:{minute}:00", "%Y-%m-%d %H:%M:%S")
+        coarse = datetime.strptime(f"{date_str} {hour}:{minute}:00", "%Y-%m-%d %H:%M:%S")
+        return _refine_renamed_start(seg_path, coarse) or coarse
 
     raise ValueError(f"Cannot parse segment time from: {filename}")
 

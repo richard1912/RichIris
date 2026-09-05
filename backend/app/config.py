@@ -4,6 +4,7 @@ import logging
 import shutil
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -196,6 +197,25 @@ class AIConfig:
     # 4080 box). Empty = local in-process ONNX inference.
     remote_url: str = ""
     remote_timeout_ms: int = 2500
+    # Global kill switch for ALL face work: SCRFD detection, ArcFace embedding
+    # and the background clusterer. The per-camera `face_recognition` flag only
+    # chooses recognition vs detect-only — SCRFD still runs on every person
+    # event when it is off — so this is the only way to stop the work entirely.
+    # Defaults off so it survives a settings wipe; set `ai.face_enabled` to
+    # true in settings to turn face detection back on.
+    face_enabled: bool = False
+    # Crop a square region around the motion and detect on that, instead of
+    # letterboxing the whole frame (see object_detector.compute_motion_region).
+    # Costs the same per inference; markedly better on small/distant objects.
+    region_crop_enabled: bool = True
+    # Filename of the local detection model to prefer, from dependencies/models.
+    # Empty = use the built-in _MODEL_FILENAMES priority order. Measured on the
+    # i5-8600 against rtdetr-l as reference (recall with region cropping):
+    #   yolo11n-320  20 ms  51%   <- default; fastest
+    #   yolo11s-320  58 ms  60%
+    #   yolo11m-320 169 ms  71%
+    # Speed and accuracy trade directly here; pick per what the box has spare.
+    local_model: str = ""
 
 
 @dataclass
@@ -305,6 +325,9 @@ def _apply_db_settings(config: AppConfig, settings: dict[str, str]) -> None:
     # AI (remote inference)
     config.ai.remote_url = _get("ai.remote_url").strip() or config.ai.remote_url
     config.ai.remote_timeout_ms = _get_int("ai.remote_timeout_ms", config.ai.remote_timeout_ms)
+    config.ai.face_enabled = _get_bool("ai.face_enabled", config.ai.face_enabled)
+    config.ai.region_crop_enabled = _get_bool("ai.region_crop_enabled", config.ai.region_crop_enabled)
+    config.ai.local_model = _get("ai.local_model").strip() or config.ai.local_model
 
     # Storage (two-tier). recordings_dir is the HOT tier (= data_dir/recordings),
     # set by _populate_from_bootstrap and left untouched here. archive_dir is the
@@ -454,3 +477,14 @@ async def reload_from_db(session) -> None:
 def get_tz() -> ZoneInfo:
     """Return the configured timezone as a ZoneInfo object."""
     return ZoneInfo(get_config().logging.timezone)
+
+
+def local_now() -> datetime:
+    """Current wall-clock time in the configured timezone, as a naive datetime.
+
+    Every timestamp this app persists is naive local time (recording filenames,
+    segment start/end, motion event times), so `created_at` must match. SQLite's
+    CURRENT_TIMESTAMP is UTC, which is what `server_default=func.now()` compiles
+    to — that put a clip created at 01:03 local into the list as 15:03.
+    """
+    return datetime.now(get_tz()).replace(tzinfo=None)

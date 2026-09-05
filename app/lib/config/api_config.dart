@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'install_flavor.dart';
+import 'platform_info.dart';
 
 const kDefaultTimeout = Duration(seconds: 15);
 
@@ -27,7 +28,15 @@ String _serverUrlKey() =>
 
 Future<String?> getSavedServerUrl() async {
   final prefs = await SharedPreferences.getInstance();
-  return prefs.getString(_serverUrlKey());
+  final saved = prefs.getString(_serverUrlKey());
+  if (saved != null) return saved;
+  // On web the app is served BY the backend's own Caddy vhost, which proxies
+  // /api on that same origin. The server is therefore, by definition, wherever
+  // this page was loaded from — prompting for it would be asking the user to
+  // retype the URL already in their address bar. Same-origin is also what
+  // keeps every API call free of a CORS preflight.
+  if (isWeb) return Uri.base.origin;
+  return null;
 }
 
 Future<void> saveServerUrl(String url) async {

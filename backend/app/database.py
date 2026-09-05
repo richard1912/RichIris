@@ -436,6 +436,72 @@ async def init_db() -> None:
             await set_setting(session, FACES_MARKER, "1")
             await session.commit()
 
+    # One-shot migration: created_at/updated_at were written by SQLite's
+    # CURRENT_TIMESTAMP, which is UTC, while every other timestamp in this app
+    # is naive local time — a clip exported at 01:03 local listed as 15:03.
+    # New rows use the local_now() Python default; shift the existing ones.
+    # The tz is read from the settings table, not get_tz(): init_db() runs
+    # before load_settings_from_db(), so the config singleton is still on its
+    # bootstrap default here.
+    TZ_MARKER = "migration_created_at_local_v1"
+    async with factory() as session:
+        already = await get_setting(session, TZ_MARKER)
+        tz_name = await get_setting(session, "logging.timezone") or "UTC"
+    if not already:
+        from datetime import datetime as _dt
+        from datetime import timezone as _tzmod
+        from zoneinfo import ZoneInfo
+
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            logger.warning("Migration: unknown timezone %r, skipping shift", tz_name)
+            tz = None
+        columns = [
+            ("camera_groups", "created_at"),
+            ("cameras", "created_at"),
+            ("zones", "created_at"),
+            ("zones", "updated_at"),
+            ("clip_exports", "created_at"),
+            ("faces", "created_at"),
+            ("face_embeddings", "created_at"),
+            ("unclustered_faces", "created_at"),
+        ]
+        shifted = 0
+        if tz is not None and tz_name != "UTC":
+            async with engine.begin() as conn:
+                for table, col in columns:
+                    try:
+                        rows = (await conn.execute(text(
+                            f"SELECT rowid, {col} FROM {table} WHERE {col} IS NOT NULL"
+                        ))).fetchall()
+                    except Exception:
+                        continue  # table absent on this install
+                    for rowid, raw in rows:
+                        if not isinstance(raw, str):
+                            continue
+                        try:
+                            naive = _dt.fromisoformat(raw)
+                        except ValueError:
+                            continue
+                        local = (
+                            naive.replace(tzinfo=_tzmod.utc)
+                            .astimezone(tz)
+                            .replace(tzinfo=None)
+                        )
+                        await conn.execute(
+                            text(f"UPDATE {table} SET {col} = :v WHERE rowid = :r"),
+                            {"v": local.strftime("%Y-%m-%d %H:%M:%S.%f"), "r": rowid},
+                        )
+                        shifted += 1
+        async with factory() as session:
+            await set_setting(session, TZ_MARKER, "1")
+            await session.commit()
+        if shifted:
+            logger.info(
+                "Migration: shifted %d created_at/updated_at values UTC→%s", shifted, tz_name
+            )
+
     logger.info("Database tables created")
 
 

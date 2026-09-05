@@ -8,6 +8,8 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'config/api_config.dart';
+import 'config/platform_info.dart';
+import 'services/player_tuning.dart';
 import 'config/constants.dart';
 import 'models/camera.dart';
 import 'models/camera_group.dart';
@@ -110,7 +112,13 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
     final sName = prefs.getString(kStreamSourceKey);
     final s = StreamSource.values.firstWhere(
       (v) => v.name == sName,
-      orElse: () => StreamSource.s1,
+      // Web defaults to the SUB stream, native to Main. A browser grid decodes
+      // every tile in software-or-hardware <video> elements and pulls each one
+      // over the network separately, so eight 4K main streams is both a heavy
+      // decode and tens of Mbps -- painful over the VPN this is reached
+      // through, and pointless when a tile is a few hundred pixels wide. The
+      // Main/Sub selector still works; this only changes where it starts.
+      orElse: () => isWeb ? StreamSource.s2 : StreamSource.s1,
     );
     setState(() {
       _liveQuality = lq;
@@ -483,7 +491,7 @@ class _MainNav extends StatefulWidget {
   State<_MainNav> createState() => _MainNavState();
 }
 
-class _MainNavState extends State<_MainNav> {
+class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
   int? _selectedCameraId;
   int? _fullscreenCameraId;
   int? _selectedGroupId;
@@ -512,10 +520,34 @@ class _MainNavState extends State<_MainNav> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadSelectedGroup();
     _startPolling();
     _scheduleUpdateCheck();
     _schedulePrecacheThumbs();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Tear the video players down while the engine is still attached. On
+    // Android, a texture that keeps delivering frames after the Flutter engine
+    // detaches crashes the process from
+    // `FlutterRenderer$ImageReaderSurfaceProducer.onImage`
+    // ("FlutterJNI is not attached to native") — an intermittent teardown race
+    // rather than anything the user does in the app. `detached` means this app
+    // is going away, so disposing here costs nothing.
+    if (state == AppLifecycleState.detached) _disposeLivePlayers();
+  }
+
+  void _disposeLivePlayers() {
+    for (final p in _livePlayers.values) {
+      try {
+        p.dispose();
+      } catch (_) {}
+    }
+    _livePlayers.clear();
+    _liveControllers.clear();
   }
 
   Future<void> _loadSelectedGroup() async {
@@ -699,6 +731,11 @@ class _MainNavState extends State<_MainNav> {
   }
 
   void _scheduleUpdateCheck() {
+    // Web has no installer to fetch or run — a reload picks up whatever Caddy
+    // is serving — and the download path uses dart:io, which throws in a
+    // browser. Skip the whole check rather than offering an update that
+    // cannot be applied.
+    if (isWeb) return;
     Future.delayed(const Duration(seconds: 10), () async {
       if (!mounted) return;
       try {
@@ -783,28 +820,23 @@ class _MainNavState extends State<_MainNav> {
 
   @override
   void dispose() {
-    for (final p in _livePlayers.values) {
-      p.dispose();
-    }
+    WidgetsBinding.instance.removeObserver(this);
+    _disposeLivePlayers();
     super.dispose();
   }
 
   void _ensureLivePlayer(int cameraId) {
+    // Web has no media_kit players: LivePlayer renders a <video> platform view
+    // instead. Leaving the maps empty means CameraCard passes null down, which
+    // is the same path a fresh native tile takes.
+    if (isWeb) return;
     if (_livePlayers.containsKey(cameraId)) return;
     final player = Player(
       configuration: PlayerConfiguration(
         logLevel: MPVLogLevel.warn,
       ),
     );
-    final mpv = player.platform as NativePlayer;
-    mpv.setProperty('cache', 'yes');
-    mpv.setProperty('cache-pause', 'no');
-    mpv.setProperty('cache-secs', '5');
-    mpv.setProperty('demuxer-max-bytes', '16777216');
-    mpv.setProperty('demuxer-readahead-secs', '5');
-    mpv.setProperty('rtsp-transport', 'tcp');
-    mpv.setProperty('hwdec', 'auto');
-    mpv.setProperty('network-timeout', '30');
+    applyLiveTuning(player);
     player.setVolume(0);
     _livePlayers[cameraId] = player;
     _liveControllers[cameraId] = VideoController(player);
@@ -878,7 +910,7 @@ class _MainNavState extends State<_MainNav> {
           _exitFullscreen();
         } else if (_selectedCameraId != null) {
           setState(() => _selectedCameraId = null);
-        } else if (Platform.isAndroid) {
+        } else if (isAndroid) {
           final now = DateTime.now();
           if (_lastBackPress != null &&
               now.difference(_lastBackPress!) < const Duration(seconds: 2)) {
@@ -896,6 +928,16 @@ class _MainNavState extends State<_MainNav> {
       },
       child: Stack(
       children: [
+        // Native keeps the grid mounted but unpainted, so the mpv players stay
+        // warm and the grid<->fullscreen handoff is instant. Web cannot afford
+        // that: every tile is a real <video> platform view, and an offstage one
+        // keeps decoding AND keeps its HTTP stream open, so eight feeds would
+        // still be crossing the VPN behind a fullscreen view. It also breaks
+        // the picture -- with that many live platform views Flutter web stops
+        // giving the fullscreen one its own overlay canvas and paints the app
+        // background straight over it, which is why fullscreen came up black.
+        // Unmounting the grid costs a second of re-connect on the way back.
+        if (!isWeb || fullscreenCam == null)
         Offstage(
           offstage: fullscreenCam != null,
           child: HomeScreen(

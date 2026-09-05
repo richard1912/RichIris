@@ -10,7 +10,9 @@
 #   ./scripts/deploy_box.sh --with-models  # also push dependencies/models (~530 MB, first deploy)
 set -euo pipefail
 
-SRC="/c/01-Self-Hosting/RichIris"
+# Repo root, derived from this script so it survives the working copy moving
+# (it used to be hardcoded to /c/01-Self-Hosting/RichIris, which no longer exists).
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="offload"
 DEST="/opt/richiris"
 

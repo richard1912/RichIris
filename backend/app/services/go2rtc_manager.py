@@ -164,7 +164,15 @@ async def _build_streams_from_db() -> dict:
         result = await session.execute(select(Camera).where(Camera.enabled == True))
         cameras = result.scalars().all()
 
-    camera_list = [(cam.name, cam.rtsp_url, cam.sub_stream_url) for cam in cameras]
+    # Normalise here as well as on write: rows added before credential
+    # encoding existed (or edited straight in SQLite) would otherwise make
+    # go2rtc reject the whole stream with "net/url: invalid userinfo".
+    from app.services.rtsp_url import normalize_rtsp_url
+
+    camera_list = [
+        (cam.name, normalize_rtsp_url(cam.rtsp_url), normalize_rtsp_url(cam.sub_stream_url))
+        for cam in cameras
+    ]
     return build_streams_config(camera_list)
 
 

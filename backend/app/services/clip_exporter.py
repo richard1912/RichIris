@@ -104,6 +104,79 @@ async def _build_camera_concat(
     return concat_file, ss_offset
 
 
+MP4_TIMESCALE = 90000  # fine enough that VFR camera timestamps never collide
+
+
+async def _probe_mp4_cadence(path: Path, config) -> tuple[str | None, int | None]:
+    """Return (codec_name, 90kHz ticks per frame) for a finished MP4.
+
+    Camera .ts streams are badly VFR — Front Door averages 12fps but delivers
+    frames anywhere from 12ms to 770ms apart — and mpegts gives ffmpeg nothing
+    to go on, so it guesses `r_frame_rate` (40, against a true 12). A player
+    honours the jittery timestamps literally, which is the visible "keeps
+    getting stuck" stutter; worse, anything downstream that re-encodes to CFR
+    reads the 40 and replays the clip ~3x too fast. Knowing the real cadence
+    lets the export re-time the clip with the `setts` bitstream filter, which
+    rewrites packet timestamps only — the coded frames are copied untouched.
+
+    The cadence is measured from the exported clip rather than sampled from the
+    source on purpose: frame rate drifts within a recording (Front South 47
+    runs 7fps in one stretch and 10fps in another), and a sample of the wrong
+    stretch stretched a 10-minute clip to 14:32. MP4 keeps the frame count in
+    its moov atom, so this is a metadata read, not a decode.
+
+    Returns (codec, None) if the cadence can't be trusted; the caller then
+    keeps the plain copy, exactly as before.
+    """
+    cmd = [
+        config.ffmpeg.ffprobe_path,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,nb_frames",
+        "-show_entries", "format=duration",
+        "-of", "default=nw=1",
+        str(path),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await proc.communicate()
+    except OSError:
+        logger.warning("Clip cadence probe could not run", extra={"file": str(path)})
+        return None, None
+    if proc.returncode != 0:
+        return None, None
+
+    # Parse by key rather than position — ffprobe emits stream fields in its own
+    # struct order, not the order they were asked for.
+    fields: dict[str, str] = {}
+    for line in out.decode(errors="replace").splitlines():
+        key, _, value = line.strip().partition("=")
+        if value:
+            fields.setdefault(key, value)
+    codec = fields.get("codec_name")
+    try:
+        frames = int(fields["nb_frames"])
+        duration = float(fields["duration"])
+    except (KeyError, ValueError):
+        return codec, None
+    if frames < 2 or duration <= 0:
+        return codec, None
+
+    fps = frames / duration
+    if not 1.0 <= fps <= 60.0:
+        logger.warning(
+            "Clip cadence probe gave an implausible rate, leaving timestamps as-is",
+            extra={"file": str(path), "fps": round(fps, 3)},
+        )
+        return codec, None
+    return codec, max(1, round(MP4_TIMESCALE * duration / frames))
+
+
 async def _run_ffmpeg(cmd: list[str]) -> tuple[int, str]:
     """Run an ffmpeg command, returning (returncode, last_stderr_tail)."""
     proc = await asyncio.create_subprocess_exec(
@@ -235,6 +308,7 @@ async def export_grid_clip(clip_id: int, session_factory) -> None:
             if hwaccel == "cuda":
                 hw_cmd = _build_cmd(filter_complex_sw, []) + [
                     "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "26",
+                    "-tag:v", "hvc1",
                     "-movflags", "+faststart", str(output_file),
                 ]
             elif hwaccel == "vaapi":
@@ -243,6 +317,7 @@ async def export_grid_clip(clip_id: int, session_factory) -> None:
                     ["-init_hw_device", "vaapi=va:/dev/dri/renderD128", "-filter_hw_device", "va"],
                 ) + [
                     "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", "26",
+                    "-tag:v", "hvc1",
                     "-movflags", "+faststart", str(output_file),
                 ]
             else:
@@ -341,7 +416,11 @@ async def export_clip(clip_id: int, session_factory) -> None:
                 ss_offset = max(0, (clip.start_time - segments[0].start_time).total_seconds())
                 clip_duration = (clip.end_time - clip.start_time).total_seconds()
 
-                cmd = [
+                # Pass 1: window out the requested range with a plain copy.
+                # Output-side -ss is deliberate — input-side seek on the concat
+                # demuxer does not honour -t here (a 60s request produced 649s).
+                staged_file = exports_dir / f"_staged_{clip_id}.mp4"
+                stage_cmd = [
                     config.ffmpeg.path,
                     "-y",
                     "-f", "concat",
@@ -350,8 +429,9 @@ async def export_clip(clip_id: int, session_factory) -> None:
                     "-ss", f"{ss_offset:.3f}",
                     "-t", f"{clip_duration:.3f}",
                     "-c", "copy",
-                    "-movflags", "+faststart",
-                    str(output_file),
+                    "-avoid_negative_ts", "make_zero",
+                    "-video_track_timescale", str(MP4_TIMESCALE),
+                    str(staged_file),
                 ]
 
                 logger.info(
@@ -359,22 +439,54 @@ async def export_clip(clip_id: int, session_factory) -> None:
                     extra={"clip_id": clip_id, "segments": len(segments), "output": str(output_file)},
                 )
 
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                assign_to_job(proc.pid)
-                _, stderr = await proc.communicate()
-
-                if proc.returncode != 0:
+                rc, err = await _run_ffmpeg(stage_cmd)
+                if rc != 0:
                     logger.error(
                         "FFmpeg clip export failed",
-                        extra={"clip_id": clip_id, "stderr": stderr.decode(errors="replace")[-500:]},
+                        extra={"clip_id": clip_id, "stderr": err},
                     )
                     clip.status = "failed"
                     await session.commit()
                     return
+
+                # Pass 2: re-time to a constant cadence measured off pass 1, so
+                # the clip plays smoothly and downstream transcodes read the real
+                # frame rate instead of ffmpeg's mpegts guess. Still a copy.
+                codec, frame_ticks = await _probe_mp4_cadence(staged_file, config)
+                retime_cmd = [
+                    config.ffmpeg.path, "-y", "-i", str(staged_file), "-c", "copy",
+                ]
+                if frame_ticks:
+                    retime_cmd += ["-bsf:v", f"setts=ts=N*{frame_ticks}"]
+                if codec == "hevc":
+                    # `hev1` (what mpegts copies out as) is rejected by Safari and
+                    # by Chrome without a fallback; `hvc1` is the interoperable tag.
+                    retime_cmd += ["-tag:v", "hvc1"]
+                retime_cmd += [
+                    "-video_track_timescale", str(MP4_TIMESCALE),
+                    "-movflags", "+faststart",
+                    str(output_file),
+                ]
+
+                rc, err = await _run_ffmpeg(retime_cmd)
+                if rc != 0:
+                    # Never lose a finished clip over the cosmetic pass — keep the
+                    # staged copy under the final name and carry on.
+                    logger.warning(
+                        "Clip re-time pass failed, keeping the raw copy",
+                        extra={"clip_id": clip_id, "stderr": err},
+                    )
+                    output_file.unlink(missing_ok=True)
+                    staged_file.replace(output_file)
+                else:
+                    logger.info(
+                        "Clip re-timed to constant cadence",
+                        extra={
+                            "clip_id": clip_id,
+                            "codec": codec,
+                            "fps": round(MP4_TIMESCALE / frame_ticks, 2) if frame_ticks else None,
+                        },
+                    )
 
                 clip.status = "done"
                 clip.file_path = str(output_file)
@@ -383,6 +495,7 @@ async def export_clip(clip_id: int, session_factory) -> None:
 
             finally:
                 concat_file.unlink(missing_ok=True)
+                (exports_dir / f"_staged_{clip_id}.mp4").unlink(missing_ok=True)
 
         except Exception:
             logger.exception("Clip export error", extra={"clip_id": clip_id})

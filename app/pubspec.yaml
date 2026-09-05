@@ -40,6 +40,11 @@ dependencies:
   # App version info at runtime
   package_info_plus: ^8.2.1
 
+  # Direct DOM access for the web build's live-video platform view
+  # (lib/widgets/web_live_video_web.dart). Already present transitively via
+  # media_kit; named here because this app imports it directly.
+  web: ^1.1.0
+
   cupertino_icons: ^1.0.8
 
 dev_dependencies:

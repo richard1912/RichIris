@@ -15,6 +15,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.config import local_now
 from app.database import Base
 
 
@@ -32,7 +33,7 @@ class CameraGroup(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, server_default=func.now())
 
     cameras: Mapped[list["Camera"]] = relationship(back_populates="group")
 
@@ -51,7 +52,7 @@ class Camera(Base):
     fps: Mapped[float | None] = mapped_column(Float, nullable=True)
     rotation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now()
+        DateTime, default=local_now, server_default=func.now()
     )
     sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     group_id: Mapped[int | None] = mapped_column(ForeignKey("camera_groups.id", ondelete="SET NULL"), nullable=True)
@@ -86,9 +87,9 @@ class Zone(Base):
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     points_json: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
+        DateTime, default=local_now, server_default=func.now(), onupdate=local_now
     )
 
     camera: Mapped["Camera"] = relationship(back_populates="zones")
@@ -129,7 +130,7 @@ class ClipExport(Base):
     mode: Mapped[str] = mapped_column(String(20), default="single")
     camera_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now()
+        DateTime, default=local_now, server_default=func.now()
     )
 
     camera: Mapped["Camera"] = relationship(back_populates="clip_exports")
@@ -166,7 +167,7 @@ class Face(Base):
     # Uniqueness is enforced below via a partial index on non-null names.
     name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, server_default=func.now())
 
     embeddings: Mapped[list["FaceEmbedding"]] = relationship(
         back_populates="face", cascade="all, delete-orphan"
@@ -190,7 +191,7 @@ class FaceEmbedding(Base):
     source_motion_event_id: Mapped[int | None] = mapped_column(
         ForeignKey("motion_events.id", ondelete="SET NULL"), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, server_default=func.now())
 
     face: Mapped["Face"] = relationship(back_populates="embeddings")
 
@@ -216,7 +217,7 @@ class UnclusteredFace(Base):
     embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     face_crop_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     detection_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, server_default=func.now())
     # NULL = pending. Set when the clusterer has assigned this row to a Face.
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     assigned_face_id: Mapped[int | None] = mapped_column(

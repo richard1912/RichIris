@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -11,6 +13,9 @@ class CameraCard extends StatefulWidget {
   final Camera camera;
   final StreamStatus? stream;
   final String streamUrl;
+  /// Backend JPEG of the camera's most recent frame, painted over the video
+  /// until the local decoder produces its first frame. Null disables it.
+  final String? posterUrl;
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback onEdit;
@@ -31,6 +36,7 @@ class CameraCard extends StatefulWidget {
     required this.camera,
     this.stream,
     required this.streamUrl,
+    this.posterUrl,
     this.selected = false,
     required this.onTap,
     required this.onEdit,
@@ -53,6 +59,61 @@ class CameraCard extends StatefulWidget {
 
 class _CameraCardState extends State<CameraCard> {
   LivePlayerStatus? _liveStatus;
+
+  /// The poster frame is dropped shortly after the live feed reports its first
+  /// decoded frame — kept briefly so it can cross-fade instead of popping.
+  bool _posterGone = false;
+  Timer? _posterTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    // A player that is already mid-stream (card rebuilt while its feed keeps
+    // running) has nothing to cover — showing the poster there would flash a
+    // still frame over live video. Position, not width: width is set from the
+    // stream's parameter sets before any frame is decoded (see live_player).
+    final pos = widget.livePlayer?.state.position;
+    if (pos != null && pos > Duration.zero) _posterGone = true;
+  }
+
+  void _onLiveStatus(LivePlayerStatus status) {
+    if (!mounted) return;
+    setState(() => _liveStatus = status);
+    if (status.state == LivePlayerState.playing &&
+        !_posterGone &&
+        _posterTimer == null) {
+      _posterTimer = Timer(const Duration(milliseconds: 400), () {
+        if (mounted) setState(() => _posterGone = true);
+      });
+    }
+  }
+
+  /// Poster image, rotated to match the camera the same way the video is.
+  Widget _buildPoster() {
+    Widget img = Image.network(
+      widget.posterUrl!,
+      fit: BoxFit.contain,
+      gaplessPlayback: true,
+      // No frame yet on the server (camera reconnecting, just added) — show
+      // nothing rather than a broken-image box.
+      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+    );
+    final rot = widget.camera.rotation;
+    if (rot != 0) {
+      final isRotated = rot == 90 || rot == 270;
+      img = Transform.rotate(
+        angle: rot * 3.14159265 / 180,
+        child: isRotated ? Transform.scale(scale: 0.5625, child: img) : img,
+      );
+    }
+    return img;
+  }
+
+  @override
+  void dispose() {
+    _posterTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -124,9 +185,7 @@ class _CameraCardState extends State<CameraCard> {
                         fit: BoxFit.contain,
                         player: widget.livePlayer,
                         controller: widget.liveController,
-                        onStatusChanged: (status) {
-                          if (mounted) setState(() => _liveStatus = status);
-                        },
+                        onStatusChanged: _onLiveStatus,
                       ),
                     )
                   else
@@ -138,6 +197,19 @@ class _CameraCardState extends State<CameraCard> {
                           color: const Color(0xFF525252),
                           size: 32,
                         ),
+                      ),
+                    ),
+                  // Poster frame — a server-side JPEG of the camera's current
+                  // view, painted while this client's decoder is still probing
+                  // the stream and waiting for a keyframe. Fades out once the
+                  // real feed has a frame.
+                  if (showLive && widget.posterUrl != null && !_posterGone)
+                    IgnorePointer(
+                      child: AnimatedOpacity(
+                        opacity:
+                            _liveStatus?.state == LivePlayerState.playing ? 0 : 1,
+                        duration: const Duration(milliseconds: 300),
+                        child: _buildPoster(),
                       ),
                     ),
                   // Stream status overlay

@@ -182,7 +182,7 @@ class MotionDetector:
             if camera.ai_detection:
                 detector = get_object_detector()
                 await detector.start()
-            if getattr(camera, "face_recognition", False):
+            if getattr(camera, "face_recognition", False) and get_config().ai.face_enabled:
                 recognizer = get_face_recognizer()
                 await recognizer.start()
                 await recognizer.reload_cache()
@@ -336,12 +336,31 @@ class MotionDetector:
                                 captured_at=captured_at,
                             )
 
-                        from app.services.object_detector import build_class_list
+                        from app.services.object_detector import build_class_list, compute_motion_region
                         detector = get_object_detector()
                         classes = build_class_list(ai_detect_persons, ai_detect_vehicles, ai_detect_animals)
+
+                        # Detect on a square crop around the motion rather than the
+                        # whole frame, so distant objects fill more of the model's
+                        # input. Returned boxes are in CROP space, so shift them back
+                        # into frame space before anything downstream (zones, scripts,
+                        # thumbnails, move-confirmation) sees them.
+                        region = None
+                        if get_config().ai.region_crop_enabled:
+                            region = compute_motion_region(thresh, *frame.shape[:2])
+                        det_frame = frame
+                        if region is not None:
+                            _rx, _ry, _rsize = region
+                            det_frame = frame[_ry:_ry + _rsize, _rx:_rx + _rsize]
+
                         _t_ai = datetime.now()
-                        detections = await detector.detect_objects(frame, ai_threshold, classes=classes) if classes else []
+                        detections = await detector.detect_objects(det_frame, ai_threshold, classes=classes) if classes else []
                         _ai_ms = round((datetime.now() - _t_ai).total_seconds() * 1000)
+
+                        if region is not None and detections:
+                            for _d in detections:
+                                _d.x1 += _rx; _d.x2 += _rx
+                                _d.y1 += _ry; _d.y2 += _ry
                         # Filter out static objects: only keep detections whose
                         # bounding box overlaps sufficiently with the motion mask
                         moving = []
@@ -384,6 +403,7 @@ class MotionDetector:
                                     logger.info("[BENCH] detection confirmed", extra={
                                         "camera": cam_name, "category": cat,
                                         "ai_ms": _ai_ms,
+                                        "region": f"{_rsize}px@{_rx},{_ry}" if region is not None else "fullframe",
                                         "confirm_ms": round((datetime.now() - captured_at).total_seconds() * 1000),
                                     })
                                     pending = self._pending_detections.pop(pkey, None)
@@ -406,14 +426,15 @@ class MotionDetector:
                                         cam_id, cam_name, cat, scripts, p_bbox,
                                         _fast_shape, thresh, threshold_pct, captured_at,
                                     )
-                                    # Always run SCRFD on person events so the enrollment UI
-                                    # can filter thumbnails to ones with an actual face, even
-                                    # on cameras where face recognition itself is off.
-                                    # Full match + embedding only runs when FR is enabled and
-                                    # we haven't already locked in a confident match.
+                                    # Face pass, skipped entirely unless ai.face_enabled.
+                                    # When it is on, SCRFD runs on every person event so the
+                                    # enrollment UI can filter thumbnails to ones with an
+                                    # actual face, even on cameras where face recognition
+                                    # itself is off. Full match + embedding only runs when FR
+                                    # is enabled and we haven't already locked in a match.
                                     face_info = None
                                     thumb_frame = p_frame
-                                    if cat == "person":
+                                    if cat == "person" and get_config().ai.face_enabled:
                                         _t_face = datetime.now()
                                         ev_key = (cam_id, cat)
                                         locked_in = (

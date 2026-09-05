@@ -101,26 +101,54 @@ class _CameraFormScreenState extends State<CameraFormScreen> {
 
   bool get isEditing => widget.camera != null;
 
+  /// Splits `scheme://authority[rest]` — the authority ends at the first
+  /// `/`, `?` or `#`.
+  static final _urlRe = RegExp(
+    r'^([A-Za-z][A-Za-z0-9+.\-]*://)([^/?#]*)(.*)$',
+    caseSensitive: false,
+  );
+
   /// Parse credentials from an RTSP URL like rtsp://user:pass@host/path
   /// Returns (username, password, urlWithoutCreds).
+  ///
+  /// Credentials are percent-decoded for display: the backend stores them
+  /// encoded (go2rtc's Go URL parser rejects a raw `@` or `^` in a password),
+  /// but the user typed the real characters and expects to see them.
+  /// Split on the LAST `@` so a password containing one still resolves the
+  /// host correctly.
   static (String, String, String) _parseRtspCreds(String url) {
-    final uri = Uri.tryParse(url);
-    if (uri == null || uri.userInfo.isEmpty) return ('', '', url);
-    final parts = uri.userInfo.split(':');
-    final user = parts.first;
-    final pass = parts.length > 1 ? parts.sublist(1).join(':') : '';
-    final clean = url.replaceFirst('${uri.userInfo}@', '');
-    return (user, pass, clean);
+    final m = _urlRe.firstMatch(url);
+    if (m == null) return ('', '', url);
+    final authority = m.group(2)!;
+    final at = authority.lastIndexOf('@');
+    if (at < 0) return ('', '', url);
+    final userInfo = authority.substring(0, at);
+    final clean = '${m.group(1)}${authority.substring(at + 1)}${m.group(3)}';
+    final sep = userInfo.indexOf(':');
+    final rawUser = sep < 0 ? userInfo : userInfo.substring(0, sep);
+    final rawPass = sep < 0 ? '' : userInfo.substring(sep + 1);
+    return (_decode(rawUser), _decode(rawPass), clean);
   }
 
-  /// Inject credentials into an RTSP URL.
+  /// Percent-decode, tolerating a stray `%` that isn't a valid escape.
+  static String _decode(String s) {
+    try {
+      return Uri.decodeComponent(s);
+    } catch (_) {
+      return s;
+    }
+  }
+
+  /// Inject credentials into an RTSP URL, percent-encoded so go2rtc can parse
+  /// it. `Uri.encodeComponent` leaves the RFC 3986 unreserved set alone and
+  /// escapes everything else, which is exactly what a userinfo needs.
   static String _injectCreds(String url, String user, String pass) {
     if (user.isEmpty) return url;
-    final creds = pass.isEmpty ? user : '$user:$pass';
-    final re = RegExp(r'^(rtsp://)(.*)$', caseSensitive: false);
-    final m = re.firstMatch(url);
+    final encUser = Uri.encodeComponent(user);
+    final creds = pass.isEmpty ? encUser : '$encUser:${Uri.encodeComponent(pass)}';
+    final m = _urlRe.firstMatch(url);
     if (m == null) return url;
-    return '${m.group(1)}$creds@${m.group(2)}';
+    return '${m.group(1)}$creds@${m.group(2)}${m.group(3)}';
   }
 
   @override

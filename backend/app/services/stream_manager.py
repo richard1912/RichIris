@@ -21,6 +21,39 @@ logger = logging.getLogger(__name__)
 STALE_THRESHOLD_SECONDS = 300  # 5 minutes
 # How often the watchdog checks for stale recordings
 WATCHDOG_INTERVAL_SECONDS = 120  # 2 minutes
+# A condition that keeps failing (unreachable camera) is logged this often, not every retry
+REPEAT_LOG_INTERVAL_SECONDS = 300  # 5 minutes
+
+
+class _RepeatLogSuppressor:
+    """Collapse a repeating failure into one log line per interval.
+
+    A camera that stays unreachable re-fails every retry, and logging each one
+    buries real errors and churns the log files. The first failure is logged
+    immediately, then at most one line per REPEAT_LOG_INTERVAL_SECONDS, carrying
+    a count of what was suppressed in between. ``reset`` on recovery so the next
+    outage logs loudly again.
+    """
+
+    def __init__(self, interval_seconds: float = REPEAT_LOG_INTERVAL_SECONDS) -> None:
+        self._interval = interval_seconds
+        self._state: dict[str, tuple[float, int]] = {}
+
+    def should_log(self, key: str) -> tuple[bool, int]:
+        """Return (log_this_one, suppressed_since_last_logged)."""
+        now = time.monotonic()
+        last, suppressed = self._state.get(key, (0.0, 0))
+        if not last or now - last >= self._interval:
+            self._state[key] = (now, 0)
+            return True, suppressed
+        self._state[key] = (last, suppressed + 1)
+        return False, 0
+
+    def reset(self, key: str) -> None:
+        self._state.pop(key, None)
+
+
+_repeat_log = _RepeatLogSuppressor()
 
 
 @dataclass
@@ -33,6 +66,7 @@ class StreamInfo:
     started_at: float = 0.0
     restart_count: int = 0
     last_error: str | None = None
+    banner_logged: bool = False
     _rec_monitor_task: asyncio.Task | None = field(default=None, repr=False)
     _watchdog_task: asyncio.Task | None = field(default=None, repr=False)
     _main_keepalive_task: asyncio.Task | None = field(default=None, repr=False)
@@ -141,14 +175,17 @@ class StreamManager:
 
             info.last_error = f"Process exited with code {returncode}"
             info.restart_count += 1
-            logger.error(
-                "Recording process died, restarting",
-                extra={
-                    "camera_id": camera_id,
-                    "returncode": returncode,
-                    "restart_count": info.restart_count,
-                },
-            )
+            should_log, suppressed = _repeat_log.should_log(f"rec_died:{camera_id}")
+            if should_log:
+                logger.error(
+                    "Recording process died, restarting",
+                    extra={
+                        "camera_id": camera_id,
+                        "returncode": returncode,
+                        "restart_count": info.restart_count,
+                        "suppressed_since_last": suppressed,
+                    },
+                )
 
             # Exponential backoff: 5s, 10s, 20s, 40s, max 60s
             await asyncio.sleep(min(5 * (2 ** min(info.restart_count - 1, 4)), 60))
@@ -259,9 +296,14 @@ class StreamManager:
                 )) as client:
                     async with client.stream("GET", fmp4_url) as resp:
                         if resp.status_code != 200:
-                            logger.warning("Keepalive HTTP error",
-                                           extra={"camera_id": camera_id, "stream": full_stream,
-                                                  "status": resp.status_code})
+                            should_log, suppressed = _repeat_log.should_log(
+                                f"keepalive:{full_stream}")
+                            if should_log:
+                                logger.warning("Keepalive HTTP error",
+                                               extra={"camera_id": camera_id,
+                                                      "stream": full_stream,
+                                                      "status": resp.status_code,
+                                                      "suppressed_since_last": suppressed})
                             await asyncio.sleep(5)
                             continue
 
@@ -271,6 +313,7 @@ class StreamManager:
                         async for _chunk in resp.aiter_bytes(chunk_size=65536):
                             if first_chunk:
                                 first_chunk_ms = round((_time.monotonic() - t_connect) * 1000, 1)
+                                _repeat_log.reset(f"keepalive:{full_stream}")
                                 logger.info("Keepalive connected",
                                             extra={"camera_id": camera_id, "stream": full_stream,
                                                    "connect_ms": connect_ms,
@@ -342,11 +385,17 @@ def _redact_rtsp(text: str) -> str:
 
 
 async def _read_stderr(info: StreamInfo, label: str) -> None:
-    """Read ffmpeg stderr, log banner once at INFO, then only warnings/errors."""
+    """Read ffmpeg stderr: log the banner once per camera, then only warnings/errors.
+
+    ``info.banner_logged`` is deliberately on the camera, not on this process. An
+    unreachable camera never reaches ffmpeg's progress output, so the banner phase
+    never ends and every relaunch would otherwise re-log the whole build banner -
+    the bulk of the log churn during an outage.
+    """
     proc = info.rec_process
     if not proc or not proc.stderr:
         return
-    banner_logged = False
+    in_banner = True
     buf = ""
     try:
         while True:
@@ -360,26 +409,45 @@ async def _read_stderr(info: StreamInfo, label: str) -> None:
                 if not line:
                     continue
 
-                # Log the first batch of lines (codec/stream info banner) once
-                if not banner_logged:
-                    # Banner ends when ffmpeg starts outputting progress (frame= or size=)
-                    if line.startswith("frame=") or line.startswith("size="):
-                        banner_logged = True
-                        continue
-                    logger.info(
-                        f"ffmpeg-{label} init",
-                        extra={"camera_id": info.camera_id, "output": _redact_rtsp(line[:500])},
-                    )
+                # Banner ends when ffmpeg starts outputting progress (frame= or size=).
+                # Reaching it means the camera is actually streaming, so the outage
+                # suppressors reset and the next failure logs loudly again.
+                if in_banner and (line.startswith("frame=") or line.startswith("size=")):
+                    in_banner = False
+                    info.banner_logged = True
+                    _repeat_log.reset(f"rec_died:{info.camera_id}")
                     continue
 
-                # After banner, only log lines with warning/error indicators
+                # Codec/stream info banner: only worth logging the first time a
+                # camera starts. Error lines still fall through to the check below.
+                if in_banner and not info.banner_logged:
+                    if not _FFMPEG_ERROR_KEYWORDS.search(line):
+                        logger.info(
+                            f"ffmpeg-{label} init",
+                            extra={"camera_id": info.camera_id,
+                                   "output": _redact_rtsp(line[:500])},
+                        )
+                        continue
+
+                # Only log lines with warning/error indicators, throttled so a
+                # persistently failing camera does not flood the log every retry
                 if _FFMPEG_ERROR_KEYWORDS.search(line):
-                    logger.warning(
-                        f"ffmpeg-{label}",
-                        extra={"camera_id": info.camera_id, "output": _redact_rtsp(line[:500])},
-                    )
+                    should_log, suppressed = _repeat_log.should_log(
+                        f"ffmpeg_err:{info.camera_id}:{label}")
+                    if should_log:
+                        logger.warning(
+                            f"ffmpeg-{label}",
+                            extra={"camera_id": info.camera_id,
+                                   "output": _redact_rtsp(line[:500]),
+                                   "suppressed_since_last": suppressed},
+                        )
     except Exception:
         logger.exception(f"ffmpeg-{label} stderr reader failed", extra={"camera_id": info.camera_id})
+    finally:
+        # At most one banner per camera per backend run. A camera that is down never
+        # reaches the frame=/size= progress output, so without this its banner would
+        # be re-logged on every relaunch for as long as the outage lasts.
+        info.banner_logged = True
 
 
 async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:

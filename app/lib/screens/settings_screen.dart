@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../config/api_config.dart';
+import '../config/platform_info.dart';
 import '../config/install_flavor.dart';
 import '../services/api_client.dart';
 import '../services/backend_scanner.dart';
@@ -42,7 +43,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _tryLocalBackend() async {
-    if (!Platform.isWindows) return;
+    if (!isWindows) return;
     const localUrl = 'http://localhost:8700';
     final client = ApiClient(localUrl);
     final ok = await client.testConnection();
@@ -154,21 +155,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextField(
               controller: _controller,
               decoration: InputDecoration(
-                hintText: Platform.isWindows ? 'http://localhost:8700' : 'http://192.168.1.100:8700',
+                hintText: isWindows ? 'http://localhost:8700' : 'http://192.168.1.100:8700',
                 labelText: 'Server URL',
               ),
               keyboardType: TextInputType.url,
               onSubmitted: (_) => _test(),
             ),
             const SizedBox(height: 12),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
-                onPressed: _openScanSheet,
-                icon: const Icon(Icons.wifi_find, size: 18),
-                label: const Text('Scan network'),
+            // BackendScanner walks NetworkInterface.list and opens raw sockets,
+            // neither of which a browser sandbox permits. On web the field is
+            // pre-filled with this page's own origin anyway, so there is
+            // nothing to discover.
+            if (!isWeb)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: _openScanSheet,
+                  icon: const Icon(Icons.wifi_find, size: 18),
+                  label: const Text('Scan network'),
+                ),
               ),
-            ),
             const SizedBox(height: 16),
             if (_error != null)
               Padding(

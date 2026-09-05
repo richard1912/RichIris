@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../config/platform_info.dart';
 import '../services/backup_api.dart';
 import '../services/settings_api.dart';
 import '../widgets/backup_restore_dialog.dart';
@@ -43,7 +44,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
   void initState() {
     super.initState();
     _load();
-    if (Platform.isWindows) {
+    if (isWindows) {
       _loadServiceInfo();
       _serviceRefreshTimer = Timer.periodic(
         const Duration(seconds: 10),
@@ -404,7 +405,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
               ],
             ),
           ),
-        if (Platform.isWindows)
+        if (isWindows)
           _buildSection('Backend Service', Icons.miscellaneous_services, [
             _serviceField(),
           ]),
@@ -440,7 +441,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
         _buildBackendSection('Storage', Icons.storage, () => [
           _dataDirField(),
         ]),
-        if (Platform.isWindows)
+        if (isWindows)
           _TwoTierStorageSection(settingsApi: widget.settingsApi),
         _buildBackendSection('Retention', Icons.auto_delete, () => [
           _numberField('retention', 'max_age_days', 'Max Age (days)'),
@@ -457,7 +458,7 @@ class _SystemSettingsScreenState extends State<SystemSettingsScreen> {
             'ERROR',
           ]),
         ]),
-        if (Platform.isWindows && widget.backupApi != null)
+        if (isWindows && widget.backupApi != null)
           _buildBackendSection('Backup & Restore', Icons.backup, () => [
             _backupRestoreField(),
           ]),

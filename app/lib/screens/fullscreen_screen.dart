@@ -5,9 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../config/constants.dart';
+import '../config/platform_info.dart';
 import '../models/camera.dart';
 import '../models/system_status.dart';
 import '../services/stream_api.dart';
+import '../services/player_tuning.dart';
 import '../services/recording_api.dart';
 import '../services/clip_api.dart';
 import '../services/motion_api.dart';
@@ -210,8 +212,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         logLevel: MPVLogLevel.warn,
       ),
     );
-    final mpv = _pbPlayer!.platform as NativePlayer;
-    mpv.setProperty('hwdec', 'auto');
+    applyHwdec(_pbPlayer!);
     _pbController = VideoController(_pbPlayer!);
     _pbPlayer!.setVolume(0);
     _pbVideoReady = false;
@@ -790,7 +791,6 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   }
 
   Widget _buildHeader(bool running) {
-    final isAndroid = Platform.isAndroid;
     return Container(
       color: const Color(0xFF171717).withValues(alpha: 0.8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -930,6 +930,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       return ZoomableVideo(
         child: LivePlayer(
           url: url,
+          elevateOnWeb: true,
           player: widget.livePlayer,
           controller: widget.liveController,
           onPlayerCreated: (p) => _livePlayer = p,
@@ -983,21 +984,20 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   Future<Map<String, String>> _getPlayerStats(Player player) async {
     final stats = <String, String>{};
     try {
-      final mpv = player.platform as NativePlayer;
-      final codec = await mpv.getProperty('video-codec');
-      final w = await mpv.getProperty('video-params/w');
-      final h = await mpv.getProperty('video-params/h');
+      final codec = await playerProperty(player, 'video-codec');
+      final w = await playerProperty(player, 'video-params/w');
+      final h = await playerProperty(player, 'video-params/h');
       // Try multiple mpv FPS properties in order of reliability
       var fps = '';
       for (final prop in ['container-fps', 'estimated-vf-fps', 'video-params/fps']) {
-        final val = await mpv.getProperty(prop);
+        final val = await playerProperty(player, prop);
         final parsed = double.tryParse(val);
         if (parsed != null && parsed > 0 && parsed <= 120) {
           fps = val;
           break;
         }
       }
-      final bitrate = await mpv.getProperty('video-bitrate');
+      final bitrate = await playerProperty(player, 'video-bitrate');
 
       if (codec.isNotEmpty) {
         // Clean up mpv codec string: "h264 ((null))" → "H.264", "hevc ((null))" → "HEVC"

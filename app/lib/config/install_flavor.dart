@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'platform_info.dart';
 
 /// Returns true if this Flutter app is running from a RichIris *client-only*
 /// Windows install.
@@ -17,7 +18,7 @@ bool? _cached;
 bool isClientOnlyInstall() {
   final cached = _cached;
   if (cached != null) return cached;
-  if (!Platform.isWindows) return _cached = false;
+  if (!isWindows) return _cached = false;
   try {
     final exeDir = File(Platform.resolvedExecutable).parent;
     final marker =

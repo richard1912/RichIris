@@ -5,10 +5,12 @@ import 'package:media_kit/media_kit.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../config/constants.dart';
+import '../config/platform_info.dart';
 import '../models/camera.dart';
 import '../models/grid_layout.dart';
 import '../models/system_status.dart';
 import '../services/stream_api.dart';
+import '../services/player_tuning.dart';
 import '../services/recording_api.dart';
 import '../services/clip_api.dart';
 import '../services/motion_api.dart';
@@ -213,7 +215,7 @@ class _HomeScreenState extends State<HomeScreen> {
           logLevel: MPVLogLevel.warn,
         ),
       );
-      (player.platform as NativePlayer).setProperty('hwdec', 'auto');
+      applyHwdec(player);
       player.setVolume(0);
       _pbPlayers[cameraId] = player;
       _pbControllers[cameraId] = VideoController(player);
@@ -483,7 +485,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final activeCount = widget.systemStatus?.activeStreams ?? 0;
     final totalCount = widget.systemStatus?.totalCameras ?? widget.cameras.length;
-    final isAndroid = Platform.isAndroid;
 
     final kofiButton = TextButton.icon(
       onPressed: () => launchUrl(
