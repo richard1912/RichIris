@@ -10,6 +10,7 @@ from pathlib import Path
 from app.config import get_bootstrap, get_config
 from app.services.benchmark import BenchmarkTrace
 from app.services.job_object import assign_to_job
+from app.services.reverse_playback import ReverseRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,28 @@ IDLE_TIMEOUT = 30  # seconds before cleanup
 
 # Default recording bitrate (kbps) if probing fails.
 DEFAULT_RECORDING_BITRATE_KBPS = 4000
+
+
+async def probe_duration(path: str) -> float | None:
+    """Duration in seconds of a local media file via ffprobe (None on failure).
+
+    Cheap on a .ts even while it is still being written: ffprobe reads the tail
+    for the last timestamp rather than scanning the file.
+    """
+    config = get_config()
+    cmd = [
+        config.ffmpeg.ffprobe_path, "-v", "quiet",
+        "-show_entries", "format=duration", "-of", "csv=p=0", path,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        return float(stdout.decode().strip())
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to probe duration", extra={"path": path})
+        return None
 
 
 async def _probe_file(path: str) -> tuple[int | None, str | None]:
@@ -115,6 +138,8 @@ class PlaybackSession:
     last_access: float = field(default_factory=time.time)
     ready: bool = False
     streaming: bool = False
+    direction: str = "forward"
+    renderer: ReverseRenderer | None = None  # backward sessions only
     _ready_event: asyncio.Event = field(default_factory=asyncio.Event)
     _bench: BenchmarkTrace | None = None
 
@@ -132,9 +157,14 @@ class PlaybackManager:
         self, session_id: str, segment_paths: list[str],
         seek_seconds: float = 0.0, duration_limit: float = 1800.0,
         quality: str = "high", camera_id: int | None = None,
-        bench: BenchmarkTrace | None = None,
+        bench: BenchmarkTrace | None = None, direction: str = "forward",
     ) -> PlaybackSession:
-        """Start a playback session. High = instant remux, medium/low = NVENC transcode."""
+        """Start a playback session. High = instant remux, medium/low = NVENC transcode.
+
+        direction="backward" ignores quality and renders the segment in reverse
+        from seek_seconds back to its start (see reverse_playback.py); the
+        client plays the result forward.
+        """
         # Return existing session if still valid
         if session_id in self._sessions:
             session = self._sessions[session_id]
@@ -178,6 +208,26 @@ class PlaybackManager:
 
         config = get_config()
         output_path = output_dir / "playback.mp4"
+
+        if direction == "backward":
+            session.direction = "backward"
+            session.streaming = True
+            session.renderer = ReverseRenderer(
+                ffmpeg=config.ffmpeg.path, hwaccel=config.ffmpeg.hwaccel,
+                source=segment_paths[0], end_offset=seek_seconds,
+                output_path=output_path,
+            )
+            logger.info(
+                "Starting reverse playback render",
+                extra={"session_id": session_id, "end_offset": round(seek_seconds, 2),
+                       "chunks": session.renderer.chunk_count},
+            )
+            session.process = await session.renderer.start()
+            self._sessions[session_id] = session
+            if bench:
+                bench.mark("reverse_render_started", pid=session.process.pid)
+            asyncio.create_task(self._wait_ready(session))
+            return session
 
         # Probe source bitrate and codec from first segment
         source_kbps = DEFAULT_RECORDING_BITRATE_KBPS
@@ -356,6 +406,8 @@ class PlaybackManager:
         Safe to call after the session has already been popped from the registry
         (used by the eviction fast-path in start_session).
         """
+        if session.renderer:
+            session.renderer.stop()
         if session.process and session.process.returncode is None:
             session.process.kill()
             try:

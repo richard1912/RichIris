@@ -16,7 +16,7 @@ from app.database import get_db
 from app.models import Camera, Recording
 from app.schemas import RecordingResponse, ThumbnailInfo
 from app.services.benchmark import BenchmarkTrace
-from app.services.playback import get_playback_manager
+from app.services.playback import get_playback_manager, probe_duration
 from app.services.thumbnail_capture import get_thumbnail_capture
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ async def start_playback_session(
     camera_id: int,
     start: datetime = Query(..., description="Start time ISO format"),
     quality: str = Query("direct", description="Quality tier: direct, high, low, ultralow"),
-    direction: str = Query("forward", description="Fallback direction: forward or backward"),
+    direction: str = Query("forward", description="forward, or backward for a server-rendered reverse stream"),
     x_bench_id: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
@@ -144,16 +144,25 @@ async def start_playback_session(
 
     seek_seconds = max(0.0, (start - seg.start_time).total_seconds())
     seg_end = seg.end_time or (seg.start_time + timedelta(seconds=seg.duration or 900))
+    if direction == "backward":
+        # seek_seconds becomes the point the reverse render starts FROM. A
+        # request past the segment's end (a gap, or "now" on a growing file)
+        # clamps to what is actually on disk, so playback begins at the last
+        # recorded frame.
+        actual = await probe_duration(seg.file_path)
+        if actual is not None:
+            seek_seconds = min(seek_seconds, max(0.0, actual - 0.2))
     bench.mark("segment_resolved", segment_id=seg.id, seek_seconds=round(seek_seconds, 2),
                in_progress=seg.in_progress)
 
-    # Check if more segments exist after this one
+    # Whether playback can continue past this segment in the travel direction
+    if direction == "backward":
+        more_cond = Recording.start_time < seg.start_time
+    else:
+        more_cond = Recording.start_time >= seg_end
     has_more_result = await db.execute(
         select(Recording.id)
-        .where(
-            Recording.camera_id == camera_id,
-            Recording.start_time >= seg_end,
-        )
+        .where(Recording.camera_id == camera_id, more_cond)
         .limit(1)
     )
     has_more = has_more_result.first() is not None
@@ -162,7 +171,7 @@ async def start_playback_session(
     # Direct = ffmpeg -c copy remux with -ss pre-seek (server-side seek shifts
     # the work off libmpv so first frame is faster than letting libmpv binary-
     # search a raw .ts for the target PTS). Transcoded = HEVC NVENC encode.
-    session_key = f"{seg.id}-{quality}-{seek_seconds:.0f}"
+    session_key = f"{seg.id}-{quality}-{seek_seconds:.0f}-{direction}"
     session_id = hashlib.md5(session_key.encode()).hexdigest()[:12]
 
     mgr = get_playback_manager()
@@ -173,6 +182,7 @@ async def start_playback_session(
         quality=quality,
         camera_id=camera_id,
         bench=bench,
+        direction="backward" if direction == "backward" else "forward",
     )
     bench.mark("session_started", session_id=session_id, streaming=session.streaming)
 
@@ -195,6 +205,7 @@ async def start_playback_session(
         "segment_start": seg.start_time.isoformat(),
         "segment_end": seg_end.isoformat(),
         "has_more": has_more,
+        "direction": session.direction,
     }
 
 
@@ -286,6 +297,11 @@ async def get_playback_file(
     # single slow disk read used to block all other handlers including
     # /api/health, which caused the watchdog to restart the service.
     if is_growing:
+        # A reverse render writes in ~8s chunks and can pause for several
+        # seconds between them on a busy box; a plain transcode streams
+        # continuously, so 5s of silence there really does mean it died.
+        max_stalls = 1200 if session.renderer else 100  # x50ms
+
         async def stream_growing():
             sent = 0
             f = await asyncio.to_thread(open, output_path, "rb")
@@ -301,11 +317,15 @@ async def get_playback_file(
                                 bench_id, len(chunk),
                             )
                         sent += len(chunk)
+                        # A client that is still consuming keeps the session
+                        # alive; without this the idle sweep (30s) tears down
+                        # a long transcode or reverse render mid-stream.
+                        mgr.touch(session_id)
                         yield chunk
                     else:
                         if session.process and session.process.returncode is None:
                             stalls += 1
-                            if stalls > 100:
+                            if stalls > max_stalls:
                                 break
                             await asyncio.sleep(0.05)
                         else:
@@ -345,6 +365,7 @@ async def get_playback_file(
                 chunk = await asyncio.to_thread(f.read, min(65536, remaining))
                 if not chunk:
                     break
+                mgr.touch(session_id)
                 if sent == 0 and bench_id:
                     logger.info(
                         "[BENCH:%s] mp4_first_chunk_sent bytes=%d offset=%d mode=range",

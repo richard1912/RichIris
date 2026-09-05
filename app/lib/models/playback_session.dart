@@ -4,6 +4,8 @@ class PlaybackSession {
   final String segmentStart;
   final String segmentEnd;
   final bool hasMore;
+  /// 'forward' or 'backward' (server-rendered reverse stream).
+  final String direction;
 
   PlaybackSession({
     required this.segmentUrl,
@@ -11,6 +13,7 @@ class PlaybackSession {
     required this.segmentStart,
     required this.segmentEnd,
     required this.hasMore,
+    this.direction = 'forward',
   });
 
   factory PlaybackSession.fromJson(Map<String, dynamic> json) =>
@@ -20,5 +23,6 @@ class PlaybackSession {
         segmentStart: (json['segment_start'] as String?) ?? '',
         segmentEnd: json['segment_end'] as String,
         hasMore: json['has_more'] as bool,
+        direction: (json['direction'] as String?) ?? 'forward',
       );
 }
