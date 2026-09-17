@@ -87,10 +87,11 @@ class StreamManager:
     async def start_stream(
         self, camera_id: int, camera_name: str, rtsp_url: str, sub_stream_url: str | None = None
     ) -> None:
-        """Start a recording ffmpeg process connected directly to the camera.
+        """Start a recording ffmpeg process for a camera.
 
-        Recording uses direct camera RTSP for maximum reliability (independent
-        of go2rtc). Live view goes through go2rtc with keepalive consumers.
+        Recording reads go2rtc's relay of the main stream (see _recording_source),
+        falling back to the camera directly when go2rtc is down. Live view goes
+        through go2rtc with keepalive consumers.
         """
         if camera_id in self._streams and self._streams[camera_id].rec_process:
             logger.warning("Stream already running", extra={"camera_id": camera_id})
@@ -353,9 +354,30 @@ class StreamManager:
         }
 
 
+def _recording_source(info: StreamInfo) -> str:
+    """Pick the RTSP URL the recorder reads from.
+
+    Normally go2rtc's local relay of the main stream, so each camera serves ONE
+    main-stream session (go2rtc's) instead of two. Recording directly from the
+    camera alongside go2rtc doubled the load on the camera uplink: measured
+    2026-09-17 at ~29 Mbit/s of duplicate traffic across 7 cameras sharing a
+    100 Mbps link. Falls back to the camera when go2rtc is not running, so a
+    go2rtc outage still does not stop recording; the next recorder restart after
+    go2rtc is back returns to the relay.
+    """
+    from app.services.go2rtc_manager import get_rtsp_port, is_managed
+
+    if not is_managed():
+        logger.warning("go2rtc not running, recording direct from camera",
+                       extra={"camera_id": info.camera_id})
+        return info.rtsp_url
+    stream_name = get_stream_name(info.camera_name)
+    return f"rtsp://127.0.0.1:{get_rtsp_port()}/{stream_name}_s1_direct"
+
+
 async def _launch_recording(info: StreamInfo, config: AppConfig) -> None:
     """Launch the recording-only ffmpeg subprocess."""
-    cmd = build_recording_command(info.camera_name, info.rtsp_url, config)
+    cmd = build_recording_command(info.camera_name, _recording_source(info), config)
     logger.debug("Launching recording ffmpeg", extra={"cmd": _redact_rtsp(" ".join(cmd)), "camera_id": info.camera_id})
 
     info.rec_process = await asyncio.create_subprocess_exec(

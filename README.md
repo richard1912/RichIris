@@ -106,7 +106,7 @@ FastAPI backend (:8700) --> go2rtc (:18700/:18554) <-- RTSP cameras
 SQLite DB + Recordings + Thumbnails
 ```
 
-- **Recording**: One FFmpeg process per camera, codec passthrough (no transcode), 15-minute `.ts` segments
+- **Recording**: One FFmpeg process per camera, codec passthrough (no transcode), 15-minute `.ts` segments. Reads go2rtc's relay of the main stream, so each camera serves one main-stream session rather than two (falls back to the camera directly if go2rtc is down)
 - **Live view**: go2rtc receives camera RTSP streams and re-serves via RTSP (:8554). Flutter app connects directly to go2rtc for smooth HEVC playback. Zoomable video in fullscreen.
 - **Playback**: Direct mode serves raw segments instantly. Other quality tiers transcode on-the-fly via NVENC
 - **AI detection**: Snapshot-based pipeline -- motion pre-filter, then RT-DETR inference with multi-frame confirmation (2 detections in 3 frames + positional movement)

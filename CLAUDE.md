@@ -31,13 +31,14 @@ update claude md as needed for code changes
 
 ## Architecture
 ```
-Camera RTSP (main) ← ffmpeg recording (-c:v copy → .ts, independent of go2rtc)
-Camera RTSP (main) ← go2rtc ← httpx keepalive (s1_direct) → live view clients (RTSP :18554)
+Camera RTSP (main) ← go2rtc ← ffmpeg recording (s1_direct relay, -c:v copy → .ts)
+                            ← httpx keepalive (s1_direct) → live view clients (RTSP :18554)
 Camera RTSP (sub)  ← go2rtc ← FrameBroker (persistent ffmpeg, MJPEG @2fps) → motion + thumbnails
 Flutter App → RTSP → go2rtc :18554 (live) | HTTP MP4 → FastAPI:8700 → FFmpeg (playback)
 ```
 
 - **Segment start times**: live registration parses `rec_HH-MM-SS.ts` (accurate to the second), then `_rename_segment` rewrites the file as `Camera YYYY-MM-DD HH.MM - HH.MM.ts` — **which drops the seconds**. Re-registering an already-renamed segment (restore, storage migration, rebuilt DB) therefore used to round its start down to `:00`, up to 59s of error in the value clip export seeks with. `_refine_renamed_start()` now recovers the seconds from `mtime - probed_duration` (mtime = ffmpeg's last write = the segment's end), falling back to the truncated filename if that is unavailable or disagrees by more than a minute. This bounds the error to the PTS-vs-wall skew (~10s), it does not eliminate it.
+- **Recording reads go2rtc's relay, not the camera (2026-09-17).** `_recording_source()` in `stream_manager.py` points the recorder at `rtsp://127.0.0.1:18554/<cam>_s1_direct`, so each camera serves ONE main-stream session instead of two. Before this every camera had 3 RTSP sessions (recorder main, go2rtc main, go2rtc sub), and the duplicate main streams were ~29 of the 60 Mbit/s the 7 cameras push through a **100 Mbps link** (Flint2 `lan5`, guest bridge). After: 2 sessions per camera, 31 Mbit/s total, camera ping avg 3-5 ms -> 1.3-2 ms. If go2rtc is not running (`is_managed()` false) the recorder falls back to the camera URL, so a go2rtc outage still records; it returns to the relay on its next restart. Trade-off accepted: a go2rtc crash now also restarts all recorders (5 s backoff). Pre-change file on the box: `stream_manager.py.bak-20260917-direct-rec`. Verify with `ss -tnp dst 192.168.10.0/24` (only `go2rtc` should appear).
 - **Recording**: One ffmpeg per camera, `-c:v copy` passthrough → HEVC 4K .ts files. Watchdog kills stale processes (no file update in 5min). `-timeout 30s` socket timeout. Restarts back off 5s→10s→20s→40s→60s (capped).
 - **Outage log throttling** (`services/stream_manager.py`): a camera that stays unreachable re-fails forever, and logging every retry buries real errors. `_RepeatLogSuppressor` collapses a repeating failure to one line per 5min (`REPEAT_LOG_INTERVAL_SECONDS`), carrying `suppressed_since_last`; it keys off the failure site (`rec_died:{cam}`, `keepalive:{stream}`, `ffmpeg_err:{cam}:{label}`) and is reset on recovery so the next outage logs loudly again. **`StreamInfo.banner_logged` is per camera, not per process** — a down camera never reaches ffmpeg's `frame=`/`size=` progress output, so the banner phase never ends and every relaunch would otherwise re-log the whole ~32-line build+stream banner. Set in a `finally`, so the banner is logged at most once per camera per backend run. Before this, three unreachable cameras produced ~30MB/day of log spam and rotated `richiris.log` every 8h.
 - **go2rtc keepalives**: StreamManager runs httpx fMP4 consumer per camera (s1_direct). Sub-stream kept warm by FrameBroker. Keepalives staggered 1s apart, auto-reconnect 5s retry.
@@ -210,6 +211,27 @@ RichIris/
 **Zones**: `GET/POST /api/cameras/{id}/zones` | `PUT/DELETE /api/cameras/{id}/zones/{zone_id}` — body: `{name, points: [[x,y],...]}` with x,y in [0,1]. Scripts reference via `zone_ids` in `MotionScriptConfig`.
 **Storage**: `POST validate` | `POST migrate` | `GET migrate/{id}/progress` | `POST migrate/{id}/cancel` | `POST migrate/{id}/finalize` | `POST update-path`
 **Health**: `GET /api/health` (returns `{app: "richiris", version}`)
+
+### Fullscreen: camera cycling, 30s skip, and the grid/fullscreen session fight (2026-09-15)
+- **Prev/next camera**: chevrons floating on the video's left/right edges (`_cameraArrow` in
+  `fullscreen_screen.dart`), plus Up/Down or PageUp/PageDown. `app.dart:_switchFullscreenCamera`
+  cycles through enabled cameras; `FullscreenScreen` is keyed on the camera id so the switch is a
+  fresh screen state, opened at the same instant if the old one was in playback, else live.
+- **Back 30 / Forward 30** (`replay_30` / `forward_30` either side of the speed row, keys J / L,
+  `TimelineWidget.onSkip` → `_skip`). From live, back-30 opens playback 30s ago at 1x. In playback it
+  keeps the current speed, reverse included. A forward skip that would land within 3s of now goes
+  live. Backend: the forward branch of `start_playback_session` now falls back to the in-progress
+  segment when no segment "contains" start (a growing segment's `end_time` is only refreshed every
+  15s) and clamps the seek 3s inside the probed duration, so a skip near the tail cannot 404 or
+  hand ffmpeg a seek past EOF.
+- **Why reverse "did not work" on native**: the backend keeps ONE session per camera and evicts the
+  rest. On Windows/Android the grid stays mounted (Offstage) behind fullscreen with its playback
+  players running; fullscreen's reverse session evicted the grid's, the grid's player hit EOF and
+  `_continueCameraPlayback` started a forward session, which evicted the reverse one, and so on
+  every ~1.5s (the 13-09 log shows it hopping back one segment per iteration, 1-2 chunks each).
+  Fixed by ignoring `completed` in the grid for `widget.fullscreenCameraId`, and by
+  `PlaybackRef.ownedSession` so `_exitFullscreen` always restarts the grid tile whose session was
+  evicted. Web was never affected (the grid is unmounted there).
 
 ## App UI Flow
 - **Grid**: Click camera → select (blue ring + drag hint icon) + timeline. Click again → fullscreen. Long-press drag to reorder. Group chip bar above grid filters by camera group. Inline transitions (no Navigator.push). Feature badges under each card's gear icon summarize enabled detection features (motion/AI/face/zones/scripts) via `_FeatureBadges` in `widgets/camera_card.dart`.

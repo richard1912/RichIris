@@ -17,11 +17,11 @@ RichIris is a custom-built NVR (Network Video Recorder). It runs natively on Win
 │    export    │     │       │                                     │
 │  - Settings  │     │       ▼                                     │
 └──────────────┘     │  FFmpeg Subprocesses (1 per camera)         │
-                     │       │  -c:v copy (passthrough)            │
+                     │       │  reads go2rtc s1 relay, -c:v copy   │
                      │       │  → G:\RichIris\{cam}\YYYY-MM-DD\   │
                      │       │                                     │
                      │  go2rtc (API 18700 / RTSP 18554)            │
-                     │       │  RTSP relay (live view)             │
+                     │       │  RTSP relay (live view + recorder)  │
                      │       │  MJPEG sub-stream → FrameBroker     │
                      │       │  /api/frame.jpeg → main-stream snap │
                      │       │                                     │
@@ -60,10 +60,10 @@ The backend orchestrates everything: manages ffmpeg processes, serves the API, p
 
 ### FFmpeg Pipeline
 
-Each camera gets a single ffmpeg process for recording:
+Each camera gets a single ffmpeg process for recording. Its input is **go2rtc's local relay of the main stream**, not the camera itself:
 
 ```bash
-ffmpeg -rtsp_transport tcp -timeout 30000000 -i <stream_url> \
+ffmpeg -rtsp_transport tcp -timeout 30000000 -i rtsp://127.0.0.1:18554/<cam>_s1_direct \
   -map 0:v -map 0:a? -c:v copy -c:a copy \
   -f segment -segment_time 900 -segment_atclocktime 1 \
   -reset_timestamps 1 -strftime 1 \
@@ -71,6 +71,8 @@ ffmpeg -rtsp_transport tcp -timeout 30000000 -i <stream_url> \
 ```
 
 **Why passthrough (`-c:v copy`)?** Preserves original 4K HEVC quality, eliminates GPU transcode load, maximizes the number of simultaneous cameras.
+
+**Why read from go2rtc instead of the camera (2026-09-17)?** go2rtc already holds a main-stream session per camera for live view. A recorder connecting to the camera as well made every camera serve its main stream twice, and on the box that duplicate traffic was ~29 of the 60 Mbit/s seven cameras pushed through a shared 100 Mbps uplink. Via the relay each camera serves exactly two sessions (go2rtc main + go2rtc sub). `stream_manager._recording_source()` picks the URL on every launch: the relay while go2rtc is running (`go2rtc_manager.is_managed()`), the camera URL otherwise, so a go2rtc outage still records. The cost is that a go2rtc crash also restarts every recorder (a few seconds of footage, 5s backoff).
 
 ### go2rtc (Live View)
 
@@ -80,6 +82,7 @@ go2rtc handles all live view streaming. Streams are baked into `go2rtc.yaml` at 
 - MJPEG sub-stream frames consumed by FrameBroker for motion + object detection at 2 fps
 - Multiple quality tiers per camera (S1/S2 x Direct/High/Low/Ultra Low), lazy-initialized
 - Httpx keepalive consumers keep camera RTSP connections alive permanently for instant live view
+- The recording ffmpeg reads `<stream>_s1_direct` from this relay, so go2rtc is the only process connected to any camera
 
 ### AI Pipeline
 

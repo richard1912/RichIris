@@ -138,7 +138,7 @@ Flutter App ──HTTP fMP4──▸ FastAPI:8700 ──▸ go2rtc:1984 ◂─�
 ```
 
 - **Live view**: go2rtc receives RTSP streams and serves HTTP fMP4. The backend proxies these to the Flutter app.
-- **Recording**: One ffmpeg process per camera copies the RTSP stream to `.ts` files (no transcode).
+- **Recording**: One ffmpeg process per camera copies the main stream to `.ts` files (no transcode). It reads go2rtc's local relay (`rtsp://127.0.0.1:18554/<cam>_s1_direct`), so each camera has only go2rtc's sessions; it falls back to the camera URL when go2rtc is not running (`stream_manager._recording_source()`).
 - **Playback**: Direct mode serves raw `.ts` files. Other quality tiers transcode on-the-fly via NVENC.
 - **Motion/AI detection**: Snapshot-based pipeline grabs JPEG frames from go2rtc, runs OpenCV motion pre-filter, then YOLO if motion detected.
 
