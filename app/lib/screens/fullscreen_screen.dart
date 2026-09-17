@@ -45,6 +45,9 @@ class FullscreenScreen extends StatefulWidget {
   final VoidCallback? onBack;
   final ValueChanged<Camera>? onEditCamera;
   final VoidCallback? onAddToGroup;
+  /// Cycle to the previous (-1) / next (+1) enabled camera. The parent swaps
+  /// this screen out for a fresh one (new key) at the same playback time.
+  final ValueChanged<int>? onSwitchCamera;
   final Player? livePlayer;
   final VideoController? liveController;
   final PlaybackRef playbackRef;
@@ -73,6 +76,7 @@ class FullscreenScreen extends StatefulWidget {
     this.onBack,
     this.onEditCamera,
     this.onAddToGroup,
+    this.onSwitchCamera,
     this.livePlayer,
     this.liveController,
     required this.playbackRef,
@@ -241,6 +245,9 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       _pbPlayer = null;
       _pbController = null;
     }
+    // Our session evicts the grid's one for this camera on the backend, so
+    // the grid must restart this camera when we hand back (see PlaybackRef).
+    widget.playbackRef.ownedSession = true;
     setState(() {
       _playbackLoading = true;
       _playbackError = null;
@@ -359,6 +366,23 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     return _getNvrTime() - _tzOffsetMs;
   }
 
+  /// Jump [seconds] (signed) from the frame on screen. From live, a negative
+  /// skip opens playback that many seconds ago at 1x - the "what just
+  /// happened?" gesture. A forward skip that would land in the future (or
+  /// within a few seconds of now, where the growing segment may not have
+  /// caught up yet) goes back to live instead.
+  void _skip(int seconds) {
+    if (_isLive && seconds >= 0) return;
+    final targetMs = _currentPlaybackMs() + seconds * 1000;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (!_isLive && targetMs >= nowMs - 3000) {
+      _goLive();
+      return;
+    }
+    final resume = _isLive ? 1 : _speed;
+    _startPlayback(formatLocalISOFromMs(targetMs), resumeSpeed: resume);
+  }
+
   void _onSpeedChanged(int newSpeed) {
     final wasReverse = _reverse;
     final wantReverse = newSpeed < 0;
@@ -465,6 +489,16 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                     right: 4,
                     child: _buildVideoOverlayChips(),
                   ),
+                  if (_canSwitchCamera) ...[
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: _cameraArrow(Icons.chevron_left, -1),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: _cameraArrow(Icons.chevron_right, 1),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -483,6 +517,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               onLive: _goLive,
               speed: _speed,
               onSpeedChanged: _onSpeedChanged,
+              onSkip: _skip,
               isPlaying: _isPlayingNow,
               onPlayPauseToggle: _togglePlayPause,
               getNvrTime: _getNvrTime,
@@ -490,6 +525,41 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               cameras: widget.cameras.where((c) => c.enabled).toList(),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  bool get _canSwitchCamera =>
+      widget.onSwitchCamera != null &&
+      widget.cameras.where((c) => c.enabled).length > 1;
+
+  /// Previous/next camera chevron floating on the video's edge. Translucent
+  /// so it does not hide much picture; the tap target is the full 44px disc.
+  Widget _cameraArrow(IconData icon, int delta) {
+    final cams = widget.cameras.where((c) => c.enabled).toList();
+    final idx = cams.indexWhere((c) => c.id == widget.camera.id);
+    final target = idx < 0
+        ? null
+        : cams[(idx + delta + cams.length) % cams.length];
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      child: Tooltip(
+        message: target == null
+            ? (delta < 0 ? 'Previous camera' : 'Next camera')
+            : target.name,
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.45),
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () => widget.onSwitchCamera!(delta),
+            child: SizedBox(
+              width: 44,
+              height: 44,
+              child: Icon(icon, size: 32, color: Colors.white.withValues(alpha: 0.85)),
+            ),
+          ),
         ),
       ),
     );
@@ -857,6 +927,16 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       if (idx > 0) _onSpeedChanged(kSpeeds[idx - 1]);
     } else if (key == LogicalKeyboardKey.space) {
       _togglePlayPause();
+    } else if (key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.pageUp) {
+      if (_canSwitchCamera) widget.onSwitchCamera!(-1);
+    } else if (key == LogicalKeyboardKey.arrowDown ||
+        key == LogicalKeyboardKey.pageDown) {
+      if (_canSwitchCamera) widget.onSwitchCamera!(1);
+    } else if (key == LogicalKeyboardKey.keyJ) {
+      _skip(-30);
+    } else if (key == LogicalKeyboardKey.keyL) {
+      _skip(30);
     }
   }
 }

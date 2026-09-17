@@ -799,7 +799,10 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
       final fsTime = _fullscreenRef.getNvrTime!();
       final gridTime = _gridRef.getNvrTime?.call();
       final timeDrift = gridTime != null ? (fsTime - gridTime).abs() : double.infinity;
-      if (_gridRef.isLive || timeDrift > 5000) {
+      // ownedSession: fullscreen opened its own session, which evicted the
+      // grid's for that camera on the backend - the grid tile is at EOF no
+      // matter what its clock says, so it has to restart.
+      if (_gridRef.isLive || timeDrift > 5000 || _fullscreenRef.ownedSession) {
         _resumePlaybackTime = formatLocalISOFromMs(fsTime - widget.tzOffsetMs);
         _resumePlaybackGen++;
       }
@@ -809,9 +812,41 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
     }
     _fullscreenRef.isLive = true;
     _fullscreenRef.getNvrTime = null;
+    _fullscreenRef.ownedSession = false;
     setState(() {
       _fullscreenCameraId = null;
       _fullscreenInitialTime = null;
+      _handoffPlayer = null;
+      _handoffController = null;
+      _handoffStartTime = null;
+    });
+  }
+
+  /// Cycle fullscreen to the previous/next enabled camera. The screen is keyed
+  /// on the camera id, so this swaps in a fresh FullscreenScreen; if the old
+  /// one was in playback the new one opens at the same instant, otherwise it
+  /// comes up live. The grid's player for the old camera is left to
+  /// _exitFullscreen's resume logic, same as backing out.
+  void _switchFullscreenCamera(int delta) {
+    final cams = widget.cameras.where((c) => c.enabled).toList();
+    final currentId = _fullscreenCameraId;
+    if (currentId == null || cams.length < 2) return;
+    final idx = cams.indexWhere((c) => c.id == currentId);
+    if (idx < 0) return;
+    final next = cams[(idx + delta + cams.length) % cams.length];
+
+    String? playbackTime;
+    if (!_fullscreenRef.isLive && _fullscreenRef.getNvrTime != null) {
+      playbackTime = formatLocalISOFromMs(
+          _fullscreenRef.getNvrTime!() - widget.tzOffsetMs);
+    }
+    // The old screen's state is about to be disposed; the new one re-registers.
+    _fullscreenRef.isLive = playbackTime == null;
+    _fullscreenRef.getNvrTime = null;
+    setState(() {
+      _fullscreenCameraId = next.id;
+      _selectedCameraId = next.id;
+      _fullscreenInitialTime = playbackTime;
       _handoffPlayer = null;
       _handoffController = null;
       _handoffStartTime = null;
@@ -1124,6 +1159,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
               if (!didPop) _exitFullscreen();
             },
             child: FullscreenScreen(
+            key: ValueKey('fullscreen-${fullscreenCam.id}'),
             camera: fullscreenCam,
             cameras: widget.cameras,
             stream: _streamForCamera(_fullscreenCameraId!),
@@ -1151,6 +1187,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
               await widget.onRefreshCameras();
             },
             onAddToGroup: () => _showAssignGroupSheet(fullscreenCam),
+            onSwitchCamera: _switchFullscreenCamera,
             playbackRef: _fullscreenRef,
             initialPlaybackTime: _fullscreenInitialTime,
             initialPbPlayer: _handoffPlayer,

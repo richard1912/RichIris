@@ -124,17 +124,34 @@ async def start_playback_session(
             )
             seg = result.scalars().first()
         else:
-            # For forward playback: find the next segment after start
+            # For forward playback: a growing segment's end_time is only
+            # refreshed every ~15s, so a request a few seconds behind "now"
+            # (the 30s skip from live, or a forward skip near the tail) can
+            # fall past the recorded end_time while the file itself already
+            # holds those frames. Prefer that segment over the "next one".
             result = await db.execute(
                 select(Recording)
                 .where(
                     Recording.camera_id == camera_id,
-                    Recording.start_time > start,
+                    Recording.in_progress == True,  # noqa: E712
+                    Recording.start_time <= start,
                 )
-                .order_by(Recording.start_time)
+                .order_by(Recording.start_time.desc())
                 .limit(1)
             )
             seg = result.scalars().first()
+            if not seg:
+                # Otherwise the next segment after start
+                result = await db.execute(
+                    select(Recording)
+                    .where(
+                        Recording.camera_id == camera_id,
+                        Recording.start_time > start,
+                    )
+                    .order_by(Recording.start_time)
+                    .limit(1)
+                )
+                seg = result.scalars().first()
 
     if not seg:
         raise HTTPException(status_code=404, detail="No recordings in range")
@@ -144,6 +161,13 @@ async def start_playback_session(
 
     seek_seconds = max(0.0, (start - seg.start_time).total_seconds())
     seg_end = seg.end_time or (seg.start_time + timedelta(seconds=seg.duration or 900))
+    if direction != "backward" and seg.in_progress:
+        # Never seek past what is on disk: ffmpeg would read to EOF and emit
+        # nothing, and the session would fail as "transcode failed". Stay a
+        # couple of seconds inside so there is a keyframe to land on.
+        actual = await probe_duration(seg.file_path)
+        if actual is not None:
+            seek_seconds = min(seek_seconds, max(0.0, actual - 3.0))
     if direction == "backward":
         # seek_seconds becomes the point the reverse render starts FROM. A
         # request past the segment's end (a gap, or "now" on a growing file)

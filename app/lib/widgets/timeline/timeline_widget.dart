@@ -37,6 +37,8 @@ class TimelineWidget extends StatefulWidget {
   final ValueChanged<int>? onSpeedChanged;
   final bool? isPlaying;
   final VoidCallback? onPlayPauseToggle;
+  /// Jump by a signed number of seconds (-30 / +30) from the frame on screen.
+  final ValueChanged<int>? onSkip;
   /// Called periodically to get the current NVR time in ms.
   /// Returns null if unknown.
   final int Function()? getNvrTime;
@@ -62,6 +64,7 @@ class TimelineWidget extends StatefulWidget {
     this.onSpeedChanged,
     this.isPlaying,
     this.onPlayPauseToggle,
+    this.onSkip,
     this.getNvrTime,
     this.initialDate,
     this.cameras,
@@ -760,6 +763,9 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
+                  if (widget.onSkip != null)
+                    _skipButton(Icons.replay_30, 'Back 30 seconds', -30,
+                        enabled: true),
                   for (final speed in kSpeeds) ...[
                     if (speed == 1 && widget.onPlayPauseToggle != null)
                       Padding(
@@ -799,12 +805,41 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                       ),
                     ),
                   ],
+                  if (widget.onSkip != null)
+                    _skipButton(Icons.forward_30, 'Forward 30 seconds', 30,
+                        enabled: !widget.isLive),
                 ],
               ),
             ),
           // Clips panel (action buttons + clips list)
           if (_showClips) _buildClipsPanel(),
         ],
+      ),
+    );
+  }
+
+  /// Replay/forward-30 button beside the speed row. Same footprint as the
+  /// play/pause button so the row keeps its rhythm.
+  Widget _skipButton(IconData icon, String tooltip, int seconds,
+      {required bool enabled}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: SizedBox(
+        height: 26,
+        child: Tooltip(
+          message: tooltip,
+          child: TextButton(
+            onPressed: enabled ? () => widget.onSkip!(seconds) : null,
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 5),
+              minimumSize: Size.zero,
+              foregroundColor: const Color(0xFFA3A3A3),
+              disabledForegroundColor: const Color(0xFF404040),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+            ),
+            child: Icon(icon, size: 18),
+          ),
+        ),
       ),
     );
   }

@@ -367,6 +367,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _continueCameraPlayback(int cameraId, String segmentEnd, int gen) async {
     if (_generation != gen || !mounted) return;
+    // The fullscreen view owns this camera's playback while it is open. The
+    // backend keeps ONE session per camera, so when fullscreen starts its own
+    // (a reverse render, a skip, a timeline tap) it evicts ours and this
+    // player hits EOF. Continuing here would evict fullscreen's session right
+    // back, and the two views then take turns killing each other's session
+    // every ~1.5s - reverse playback never got past its first chunk.
+    if (widget.fullscreenCameraId == cameraId) return;
     try {
       // Use master clock as the start so the backend pre-seeks this camera to
       // the correct point — keeps it aligned with cameras that didn't hit a

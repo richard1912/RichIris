@@ -19,4 +19,10 @@ class PlaybackRef {
   String? playbackStartIso;
   String? segmentEnd;
   bool hasMore = false;
+
+  /// Set by the fullscreen view once it has opened a playback session of its
+  /// own (rather than adopting the grid's player). The backend evicts the
+  /// grid's session for that camera when this happens, so on exit the grid
+  /// must restart playback even if its clock says it is "close enough".
+  bool ownedSession = false;
 }
