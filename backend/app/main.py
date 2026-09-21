@@ -109,6 +109,10 @@ async def lifespan(app: FastAPI):
     thumb_capture = get_thumbnail_capture()
     thumb_capture.start(cameras_list)
 
+    # Main-stream poster frames, rendered from the live GOP cache.
+    from app.services.live_poster import get_live_poster
+    get_live_poster().start()
+
     # Start AI object detector if any camera has AI detection enabled
     obj_detector = get_object_detector()
     if any(getattr(cam, 'ai_detection', False) for cam in cameras_list):
@@ -166,6 +170,7 @@ async def lifespan(app: FastAPI):
     await obj_detector.stop()
     from app.services.remote_inference import get_remote_inference
     await get_remote_inference().close()
+    await get_live_poster().stop()
     await thumb_capture.stop()
     await frame_broker.stop()
     mgr = get_stream_manager()

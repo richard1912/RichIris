@@ -70,6 +70,7 @@ class StreamInfo:
     _rec_monitor_task: asyncio.Task | None = field(default=None, repr=False)
     _watchdog_task: asyncio.Task | None = field(default=None, repr=False)
     _main_keepalive_task: asyncio.Task | None = field(default=None, repr=False)
+    _sub_keepalive_task: asyncio.Task | None = field(default=None, repr=False)
 
 
 class StreamManager:
@@ -116,12 +117,20 @@ class StreamManager:
         info._watchdog_task = asyncio.create_task(
             self._watchdog(camera_id)
         )
-        # Keep go2rtc's main-stream alive for instant main-quality live view.
-        # (Sub-stream is kept warm by the FrameBroker's persistent ffmpeg reader.)
+        # Keep go2rtc's streams alive AND feed the live GOP cache, which is
+        # what makes a joining client's first frame instant instead of one
+        # keyframe interval away (see services/live_cache.py). The sub stream
+        # gets its own consumer now: the FrameBroker already keeps that
+        # producer warm, but it reads MJPEG, so it yields nothing this cache
+        # can hand to a client. A second fMP4 consumer on an already-running
+        # producer costs the camera nothing and the box ~0.5 Mbit/s.
         main_delay = 3 + self._keepalive_index
         self._keepalive_index += 1
         info._main_keepalive_task = asyncio.create_task(
             self._go2rtc_keepalive(camera_id, "s1_direct", startup_delay=main_delay)
+        )
+        info._sub_keepalive_task = asyncio.create_task(
+            self._go2rtc_keepalive(camera_id, "s2_direct", startup_delay=main_delay + 0.5)
         )
 
         logger.info("Recording stream started", extra={"camera_id": camera_id, "camera": camera_name})
@@ -142,6 +151,15 @@ class StreamManager:
         if info._main_keepalive_task:
             info._main_keepalive_task.cancel()
             info._main_keepalive_task = None
+        if info._sub_keepalive_task:
+            info._sub_keepalive_task.cancel()
+            info._sub_keepalive_task = None
+
+        from app.services.live_cache import get_live_cache
+        cache = get_live_cache()
+        base = get_stream_name(info.camera_name)
+        for suffix in ("s1_direct", "s2_direct"):
+            cache.drop(f"{base}_{suffix}")
 
         # Remove from go2rtc
         client = get_go2rtc_client()
@@ -267,10 +285,21 @@ class StreamManager:
     async def _go2rtc_keepalive(self, camera_id: int, stream_suffix: str, startup_delay: float = 0) -> None:
         """Keep a go2rtc stream alive via a persistent HTTP fMP4 consumer.
 
-        Opens an HTTP streaming connection to go2rtc's fMP4 API and reads/discards
-        data, keeping the camera RTSP connection alive for instant live view.
-        In-process (no ffmpeg subprocess), uses HTTP (avoids RTSP concurrent map bug).
+        Opens an HTTP streaming connection to go2rtc's fMP4 API, keeping the
+        camera RTSP connection alive for instant live view. In-process (no
+        ffmpeg subprocess), uses HTTP (avoids RTSP concurrent map bug).
+
+        The bytes used to be discarded. They now feed the live GOP cache
+        (services/live_cache.py), which holds the init segment plus the
+        fragments since the most recent keyframe and replays them to a
+        joining client. That is the difference between a client's first
+        decodable frame arriving in ~50 ms and it arriving one keyframe
+        interval later (2.0-4.0 s on these cameras, measured). It also means
+        every viewer of a camera is served from THIS one connection rather
+        than opening its own go2rtc consumer.
         """
+        from app.services.live_cache import get_live_cache
+        live_cache = get_live_cache()
         info = self._streams.get(camera_id)
         if not info:
             return
@@ -291,6 +320,9 @@ class StreamManager:
 
         while self._running:
             try:
+                # A reconnect means a fresh init segment; anything cached from
+                # the old session is undecodable against it.
+                live_cache.reset(full_stream)
                 t_connect = _time.monotonic()
                 async with httpx.AsyncClient(timeout=httpx.Timeout(
                     connect=10, read=60, write=10, pool=10
@@ -312,6 +344,7 @@ class StreamManager:
                         # Read first chunk to confirm data is flowing
                         first_chunk = True
                         async for _chunk in resp.aiter_bytes(chunk_size=65536):
+                            live_cache.feed(full_stream, _chunk)
                             if first_chunk:
                                 first_chunk_ms = round((_time.monotonic() - t_connect) * 1000, 1)
                                 _repeat_log.reset(f"keepalive:{full_stream}")
@@ -328,9 +361,11 @@ class StreamManager:
                 logger.debug("Keepalive stream ended, reconnecting",
                              extra={"camera_id": camera_id, "stream": full_stream})
             except asyncio.CancelledError:
+                live_cache.reset(full_stream)
                 return
             except Exception:
                 if not self._running:
+                    live_cache.reset(full_stream)
                     return
                 logger.debug("Keepalive error, retrying in 5s",
                              extra={"camera_id": camera_id, "stream": full_stream})

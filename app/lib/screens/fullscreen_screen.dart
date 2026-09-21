@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -114,6 +113,19 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   bool _reverse = false; // current session is a server-rendered reverse stream
   Timer? _speedTimer;
 
+  // Live poster frame — a server-side JPEG of the camera's current view,
+  // painted over the video while this client's decoder starts up. The grid
+  // has had one since the live-view latency work; fullscreen did not, which
+  // is why entering fullscreen cold, or cycling cameras with the chevrons,
+  // showed black while the grid behind it did not. Coming back from playback
+  // only *looked* instant because mpv leaves the last decoded frame in the
+  // texture, so there was something to see while the reconnect happened; a
+  // fresh screen has an empty texture and nothing to hide behind.
+  LivePlayerStatus? _liveStatus;
+  bool _posterGone = false;
+  Timer? _posterTimer;
+  late final int _posterBust;
+
   // Playback player
   Player? _pbPlayer;
   VideoController? _pbController;
@@ -125,6 +137,13 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   void initState() {
     super.initState();
     _tzOffsetMs = widget.tzOffsetMs;
+    _posterBust = DateTime.now().millisecondsSinceEpoch;
+    // An adopted player that is already mid-stream has a live picture on it;
+    // covering that with a still would be a step backwards. Position, not
+    // width: mpv publishes dimensions from the parameter sets before any
+    // frame is decoded (see live_player.dart).
+    final livePos = widget.livePlayer?.state.position;
+    if (livePos != null && livePos > Duration.zero) _posterGone = true;
     widget.playbackRef.getNvrTime = _getNvrTime;
     // Give the keyboard listener initial focus exactly once, after the tree
     // is built. Never again — callers of TextField (e.g. bug report dialog)
@@ -176,6 +195,7 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
 
   @override
   void dispose() {
+    _posterTimer?.cancel();
     _clearSpeedTimer();
     _statsTimer?.cancel();
     _seekSub?.cancel();
@@ -317,6 +337,40 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     }
   }
 
+  void _onLiveStatus(LivePlayerStatus status) {
+    if (!mounted) return;
+    setState(() => _liveStatus = status);
+    if (status.state == LivePlayerState.playing &&
+        !_posterGone &&
+        _posterTimer == null) {
+      _posterTimer = Timer(const Duration(milliseconds: 400), () {
+        if (mounted) setState(() => _posterGone = true);
+      });
+    }
+  }
+
+  /// Poster image, rotated to match the camera the same way the video is.
+  Widget _buildPoster() {
+    Widget img = Image.network(
+      widget.streamApi.posterUrl(widget.camera.id,
+          cacheBust: _posterBust, stream: widget.streamSource.param),
+      fit: BoxFit.contain,
+      gaplessPlayback: true,
+      // No frame on the server yet (camera reconnecting, just added) — show
+      // nothing rather than a broken-image box.
+      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+    );
+    final rot = widget.camera.rotation;
+    if (rot != 0) {
+      final isRotated = rot == 90 || rot == 270;
+      img = Transform.rotate(
+        angle: rot * 3.14159265 / 180,
+        child: isRotated ? Transform.scale(scale: 0.5625, child: img) : img,
+      );
+    }
+    return img;
+  }
+
   void _goLive() {
     if (_isLive) {
       setState(() => _paused = !_paused);
@@ -328,6 +382,12 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     }
     // Release adopted reference without stopping grid's player
     _adoptedPlayer = false;
+    // The live player was stopped on the way into playback, so this is a
+    // fresh open and the poster should cover it again.
+    _posterTimer?.cancel();
+    _posterTimer = null;
+    _liveStatus = null;
+    _posterGone = false;
     setState(() {
       _isLive = true;
       widget.playbackRef.isLive = true;
@@ -749,16 +809,33 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         );
       }
       final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param, cameraName: widget.camera.name);
-      return ZoomableVideo(
-        child: LivePlayer(
-          url: url,
-          elevateOnWeb: true,
-          player: widget.livePlayer,
-          controller: widget.liveController,
-          onPlayerCreated: (p) => _livePlayer = p,
-          rotation: rot,
-          fit: BoxFit.contain,
-        ),
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          ZoomableVideo(
+            child: LivePlayer(
+              url: url,
+              elevateOnWeb: true,
+              player: widget.livePlayer,
+              controller: widget.liveController,
+              onPlayerCreated: (p) => _livePlayer = p,
+              onStatusChanged: _onLiveStatus,
+              rotation: rot,
+              fit: BoxFit.contain,
+            ),
+          ),
+          // Poster frame over the top until the decoder produces a frame of
+          // its own, then a 300ms cross-fade so it does not pop.
+          if (!_posterGone)
+            IgnorePointer(
+              child: AnimatedOpacity(
+                opacity:
+                    _liveStatus?.state == LivePlayerState.playing ? 0 : 1,
+                duration: const Duration(milliseconds: 300),
+                child: _buildPoster(),
+              ),
+            ),
+        ],
       );
     }
 

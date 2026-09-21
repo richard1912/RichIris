@@ -21,6 +21,23 @@ void applyLiveTuning(Player player) {
   // stream — ~2.9s on a 7fps camera, paid on every client launch. mpv still
   // reports FPS via `estimated-vf-fps` for the stats bar.
   mpv.setProperty('demuxer-lavf-o', 'fpsprobesize=0');
+  // Emit frames as soon as they decode instead of holding them for reorder.
+  // Without this libavcodec wants roughly a full GOP in hand before it shows
+  // anything (measured on a burst-then-realtime test server: 2,379 ms to first
+  // frame at a 1-fragment backlog, 589 ms at 15), with it ~390 ms at any
+  // depth. That is what lets this client ask the server's live cache for the
+  // short backlog (`&backlog=short`, newest keyframe only) and so run up to a
+  // whole GOP closer to live than a browser, which cannot set this. Safe
+  // because these camera streams are IPPP; do not copy it to playback players,
+  // where a recording could carry B-frames.
+  //
+  // History, because it matters: this was added 2026-09-20, blamed for colour
+  // noise on the Android grid, and removed the same day. The blame was wrong.
+  // The noise was go2rtc's canned 2560x1440 hvcC on cameras that really send
+  // 3840x2160 (see `_repair_hevc_init` in the backend's live_cache.py). With
+  // that repaired, this flag was re-tested on the Fold7 on 2026-09-22: all 8
+  // tiles clean over repeated cold launches, no dark frames.
+  mpv.setProperty('vd-lavc-o', 'flags=+low_delay');
 }
 
 /// Enable hardware decoding on a playback player.

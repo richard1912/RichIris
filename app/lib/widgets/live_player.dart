@@ -69,6 +69,7 @@ class _LivePlayerState extends State<LivePlayer> {
   /// Compared for inequality, not ordering: a reconnect restarts the stream
   /// near zero, so a "greater than the old position" test would never fire.
   Duration _positionBaseline = Duration.zero;
+  Duration? _firstPosition;
   bool _reportedPlaying = false;
   Timer? _playingFallbackTimer;
 
@@ -136,7 +137,22 @@ class _LivePlayerState extends State<LivePlayer> {
       if (w != null && w > 0) _armPlayingFallback();
     });
     _positionSub = _player.stream.position.listen((pos) {
-      if (pos > Duration.zero && pos != _positionBaseline) _reportPlaying();
+      if (pos <= Duration.zero || pos == _positionBaseline) return;
+      // One new position is not yet a frame on screen. Over fMP4 the stream's
+      // timestamps do not start at zero, so mpv reports a non-zero position
+      // the moment it starts demuxing, before anything is decoded - lifting
+      // the poster on that faded the tile through black for ~0.3s (measured
+      // on the Fold, 2026-09-22). Wait for the position to MOVE, and by half
+      // a second: with eight 4K MediaCodec decoders starting at once, a tile
+      // was seen ticking its position ~0.7s before its texture had a frame.
+      // Holding the poster that much longer costs nothing visible - it is a
+      // frame of the same scene under half a second old.
+      final first = _firstPosition;
+      if (first == null) {
+        _firstPosition = pos;
+      } else if (pos - first >= const Duration(milliseconds: 500)) {
+        _reportPlaying();
+      }
     });
     widget.onPlayerCreated?.call(_player);
     _startStallDetection();
@@ -210,6 +226,7 @@ class _LivePlayerState extends State<LivePlayer> {
     _playingFallbackTimer?.cancel();
     _playingFallbackTimer = null;
     _positionBaseline = _player.state.position;
+    _firstPosition = null;
     widget.onStatusChanged?.call(
       const LivePlayerStatus(LivePlayerState.connecting),
     );
@@ -235,6 +252,7 @@ class _LivePlayerState extends State<LivePlayer> {
       _lastPositionChange = DateTime.now();
       _reportedPlaying = false;
       _positionBaseline = _player.state.position;
+      _firstPosition = null;
       _player.open(Media(widget.url), play: true);
       _retryMs = (_retryMs * 2).clamp(500, 10000);
     });

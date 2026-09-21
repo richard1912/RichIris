@@ -549,7 +549,8 @@ async def camera_snapshot(req: SnapshotRequest):
 
 
 @router.get("/{camera_id}/latest-frame.jpg")
-async def camera_latest_frame(camera_id: int, max_age: float = Query(default=10.0, ge=1.0, le=60.0)):
+async def camera_latest_frame(camera_id: int, max_age: float = Query(default=10.0, ge=1.0, le=60.0),
+                              stream: str = "s2"):
     """Serve the newest FrameBroker JPEG for a camera (no re-encode, no ffmpeg).
 
     This is the live-view *poster frame*: clients paint it the instant the grid
@@ -559,10 +560,28 @@ async def camera_latest_frame(camera_id: int, max_age: float = Query(default=10.
     startup — the broker already holds these frames in memory for motion
     detection. 404 when the broker has no recent frame (camera disabled,
     reconnecting, or just started).
+
+    ``stream=s1`` asks for a poster of the MAIN stream instead, pre-rendered
+    from the live GOP cache by ``live_poster`` - same aspect ratio and far
+    closer in sharpness to the video that replaces it (the sub stream is 4:3
+    on most cameras here, the main 16:9). Falls back to the broker frame when
+    no main-stream poster is ready.
     """
     from app.services.frame_broker import get_frame_broker
 
-    jpeg = get_frame_broker().get_latest_jpeg(camera_id, max_age=max_age)
+    jpeg = None
+    if stream == "s1":
+        from app.services.go2rtc_client import get_stream_name
+        from app.services.live_poster import REFRESH_SECONDS, get_live_poster
+        from app.services.stream_manager import get_stream_manager
+        info = get_stream_manager().streams.get(camera_id)
+        if info:
+            jpeg = get_live_poster().get(
+                f"{get_stream_name(info.camera_name)}_s1_direct",
+                # Posters are re-rendered on a timer, so allow two cycles.
+                max_age=max(max_age, 2.5 * REFRESH_SECONDS))
+    if jpeg is None:
+        jpeg = get_frame_broker().get_latest_jpeg(camera_id, max_age=max_age)
     if jpeg is None:
         raise HTTPException(status_code=404, detail="No recent frame for this camera")
     return Response(

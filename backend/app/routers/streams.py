@@ -38,8 +38,77 @@ async def close_pool() -> None:
         _pool = None
 
 
+def _serve_from_cache(
+    camera_id: int, camera_name: str, stream_name: str, quality: str,
+    original_quality: str, t_request: float, short: bool = False,
+) -> StreamingResponse | None:
+    """Serve a live stream out of the GOP cache, or None if it is not warm.
+
+    Returns synchronously with the buffer already snapshotted, so the client
+    has a decodable keyframe in the very first bytes of the response body.
+    """
+    from app.services.live_cache import get_live_cache
+
+    cache = get_live_cache()
+    attached = cache.attach(stream_name, short)
+    if attached is None:
+        return None
+    init, backlog, sub = attached
+    backlog_bytes = sum(len(f) for f in backlog)
+
+    logger.info("fMP4 served from GOP cache", extra={
+        "camera_id": camera_id, "camera": camera_name,
+        "stream_name": stream_name, "quality": quality,
+        "quality_requested": original_quality,
+        "init_bytes": len(init), "backlog_fragments": len(backlog),
+        "backlog_bytes": backlog_bytes,
+        "setup_ms": round((time.monotonic() - t_request) * 1000, 1),
+    })
+
+    async def cached_generator():
+        total = 0
+        fragments = 0
+        try:
+            yield init
+            total += len(init)
+            for fragment in backlog:
+                total += len(fragment)
+                fragments += 1
+                yield fragment
+            while True:
+                item = await asyncio.wait_for(sub.queue.get(), timeout=30.0)
+                if item is None:
+                    break
+                total += len(item)
+                fragments += 1
+                yield item
+        except asyncio.TimeoutError:
+            logger.warning("fMP4 cache: no fragment for 30s - closing", extra={
+                "camera_id": camera_id, "stream_name": stream_name,
+                "total_bytes_sent": total, "fragments": fragments,
+            })
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
+        except Exception:
+            logger.warning("fMP4 cache: unexpected error", extra={
+                "camera_id": camera_id, "stream_name": stream_name,
+            }, exc_info=True)
+        finally:
+            cache.detach(stream_name, sub)
+            logger.info("fMP4 cache session ended", extra={
+                "camera_id": camera_id, "stream_name": stream_name,
+                "quality": quality, "total_bytes_sent": total,
+                "fragments": fragments,
+                "duration_s": round(time.monotonic() - t_request, 1),
+                "slow_client": sub.dropped,
+            })
+
+    return StreamingResponse(cached_generator(), media_type="video/mp4")
+
+
 @router.get("/{camera_id}/live.mp4")
-async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quality: str = "direct"):
+async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quality: str = "direct",
+                     backlog: str = "full"):
     """Proxy go2rtc HTTP fMP4 stream for native app live view.
 
     Params:
@@ -74,6 +143,20 @@ async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quali
             stream_name = f"{base_name}_{stream}_direct"
         # No ensure_stream_registered needed — all streams are baked into
         # go2rtc.yaml at startup and survive config reloads.
+
+    # Fast path: the live GOP cache already holds this stream's init segment
+    # and the fragments since its last keyframe, fed by StreamManager's
+    # keepalive. Serving from it skips the keyframe wait entirely (measured
+    # 2,464 ms on RTSP and 4,606 ms through this proxy uncached) and costs
+    # go2rtc nothing, because the client rides the keepalive's single consumer
+    # instead of opening its own. Only the `direct` tiers are cached - the
+    # transcoded ones spin up an ffmpeg on demand and are not kept warm, so
+    # they fall through to the proxy below.
+    cached = _serve_from_cache(camera_id, info.camera_name, stream_name, quality,
+                               original_quality, t_request,
+                               short=(backlog == "short"))
+    if cached is not None:
+        return cached
 
     from app.services.go2rtc_manager import get_api_port
     go2rtc_url = f"http://127.0.0.1:{get_api_port()}/api/stream.mp4?src={stream_name}"
@@ -240,6 +323,18 @@ async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quali
             })
 
     return StreamingResponse(stream_generator(), media_type="video/mp4")
+
+
+@router.get("/cache")
+async def live_cache_stats():
+    """Per-stream state of the live GOP cache.
+
+    ``warm`` is what decides whether live.mp4 takes the instant path;
+    ``age_s`` is how long ago that stream's last keyframe arrived, which is
+    exactly the extra latency a client joining right now would inherit.
+    """
+    from app.services.live_cache import get_live_cache
+    return get_live_cache().stats()
 
 
 @router.get("/{camera_id}/rtsp-info")
