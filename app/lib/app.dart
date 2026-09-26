@@ -515,6 +515,16 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
   int _resumePlaybackGen = 0;
   int _resumeLiveGen = 0;
 
+  /// Bumped when the app returns after being hidden (recents, split screen,
+  /// another app on top). Android tears the Flutter render surface down while
+  /// hidden and the mpv textures come back FROZEN on the last frame while mpv
+  /// keeps decoding underneath (measured 2026-09-25: zero changed pixels for
+  /// 20s+ after return). Recreating the players and remounting the grid /
+  /// fullscreen (keyed on this) brings them back, with the server poster
+  /// covering the tile until live video lands. Same fix as RichRD's viewer.
+  int _liveEpoch = 0;
+  bool _wasHidden = false;
+
   bool _thumbsPrecached = false;
 
   @override
@@ -538,6 +548,16 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
     // rather than anything the user does in the app. `detached` means this app
     // is going away, so disposing here costs nothing.
     if (state == AppLifecycleState.detached) _disposeLivePlayers();
+    if (isWeb) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      _wasHidden = true;
+    } else if (state == AppLifecycleState.resumed && _wasHidden) {
+      _wasHidden = false;
+      _disposeLivePlayers();
+      _handoffPlayer = null;
+      _handoffController = null;
+      if (mounted) setState(() => _liveEpoch++);
+    }
   }
 
   void _disposeLivePlayers() {
@@ -976,6 +996,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
         Offstage(
           offstage: fullscreenCam != null,
           child: HomeScreen(
+            key: ValueKey('home-$_liveEpoch'),
             cameras: _selectedGroupId != null
                 ? widget.cameras.where((c) => c.groupId == _selectedGroupId).toList()
                 : widget.cameras,
@@ -1159,7 +1180,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
               if (!didPop) _exitFullscreen();
             },
             child: FullscreenScreen(
-            key: ValueKey('fullscreen-${fullscreenCam.id}'),
+            key: ValueKey('fullscreen-${fullscreenCam.id}-$_liveEpoch'),
             camera: fullscreenCam,
             cameras: widget.cameras,
             stream: _streamForCamera(_fullscreenCameraId!),
