@@ -75,6 +75,61 @@ def compute_motion_region(
     return x, y, size
 
 # COCO class IDs grouped by detection category
+# --- Tiling for wide frames ---------------------------------------------------
+# A panoramic sub stream (1344x368) letterboxed into a square model input is
+# shrunk 4x, so a person across the street (25x45 px in the frame) reaches the
+# model about 6 px wide and is never found. The motion crop above cannot help
+# when the motion is wide (a passing car, a light switching on), because its
+# square is capped at the frame height and falls back to the whole frame. So in
+# that fallback a wide frame is also detected as overlapping square tiles of
+# full frame height, limited to the columns where something changed.
+TILE_MIN_ASPECT = 1.6         # only frames at least this much wider than tall
+TILE_OVERLAP = 0.33           # neighbouring tiles share this much, so an object
+                              # on a seam is whole in at least one of them
+TILE_MERGE_IOU = 0.5
+
+
+def compute_tiles(
+    motion_mask: np.ndarray, frame_h: int, frame_w: int,
+) -> list[tuple[int, int, int]]:
+    """Square tiles ``(x, y, size)`` covering the motion in a wide frame, else []."""
+    if frame_h <= 0 or frame_w < frame_h * TILE_MIN_ASPECT:
+        return []
+    cols = np.nonzero(motion_mask.any(axis=0))[0]
+    if len(cols) == 0:
+        return []
+    mx1, mx2 = int(cols[0]), int(cols[-1])
+
+    size = frame_h
+    span = frame_w - size
+    count = int(np.ceil(span / (size * (1 - TILE_OVERLAP)))) + 1
+    tiles = []
+    for i in range(count):
+        x = int(round(i * span / (count - 1)))
+        if x <= mx2 and x + size >= mx1:
+            tiles.append((x, 0, size))
+    return tiles
+
+
+def merge_detections(detections: list["Detection"]) -> list["Detection"]:
+    """Drop duplicates of one object found in several overlapping tiles."""
+    kept: list[Detection] = []
+    for d in sorted(detections, key=lambda d: d.confidence, reverse=True):
+        if not any(k.label == d.label and _iou(k, d) >= TILE_MERGE_IOU for k in kept):
+            kept.append(d)
+    return kept
+
+
+def _iou(a: "Detection", b: "Detection") -> float:
+    iw = min(a.x2, b.x2) - max(a.x1, b.x1)
+    ih = min(a.y2, b.y2) - max(a.y1, b.y1)
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    union = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter
+    return inter / union if union > 0 else 0.0
+
+
 CATEGORY_CLASSES = {
     "person": [0],
     "vehicle": [1, 2, 3, 5, 7],       # bicycle, car, motorcycle, bus, truck

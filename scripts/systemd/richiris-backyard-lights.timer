@@ -1,0 +1,10 @@
+[Unit]
+Description=Enforce the backyard lights every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import AppConfig, get_config
+from app.services.ffmpeg import TS_INPUT_ARGS
 from app.models import Camera, Recording
 from app.services.ffmpeg import sanitize_camera_name
 
@@ -338,7 +339,7 @@ def _probe_duration(seg_path: Path, config: AppConfig) -> float | None:
         result = subprocess.run(
             [
                 config.ffmpeg.ffprobe_path,
-                "-v", "quiet",
+                "-v", "quiet", *TS_INPUT_ARGS,
                 "-print_format", "json",
                 "-show_format",
                 str(seg_path),

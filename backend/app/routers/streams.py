@@ -187,7 +187,7 @@ async def proxy_fmp4(request: Request, camera_id: int, stream: str = "s2", quali
         total_bytes = 0
         chunk_count = 0
         try:
-            async for chunk in resp.aiter_bytes(chunk_size=65536):
+            async for chunk in resp.aiter_bytes():  # no chunk_size: it would buffer
                 total_bytes += len(chunk)
                 chunk_count += 1
                 try:

@@ -655,11 +655,13 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
         ai_confidence_threshold=data.ai_confidence_threshold,
         face_recognition=data.face_recognition,
         face_match_threshold=data.face_match_threshold,
+        record_audio=data.record_audio,
     )
     db.add(camera)
     await db.commit()
     await db.refresh(camera)
     logger.info("Camera created", extra={"camera_id": camera.id, "camera_name": camera.name})
+    await _detect_ptz(db, camera)
 
     if camera.enabled:
         try:
@@ -667,7 +669,9 @@ async def create_camera(data: CameraCreate, db: AsyncSession = Depends(get_db)):
             from app.services.go2rtc_manager import restart_go2rtc
             await restart_go2rtc()
             mgr = get_stream_manager()
-            await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+            await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url,
+                                   record_audio=camera.record_audio,
+                               rec_format=camera.rec_format)
             # Start the shared frame broker reader for the new camera first,
             # so motion + thumbnail capture have frames available immediately.
             from app.services.frame_broker import get_frame_broker
@@ -700,6 +704,7 @@ async def update_camera(
     if data.name is not None:
         camera.name = data.name
         needs_restart = True
+    old_rtsp_url = camera.rtsp_url
     if data.rtsp_url is not None:
         camera.rtsp_url = normalize_rtsp_url(data.rtsp_url)
         needs_restart = True
@@ -739,10 +744,21 @@ async def update_camera(
             camera.motion_scripts = json.dumps([s.model_dump() for s in data.motion_scripts])
         else:
             camera.motion_scripts = None
+    if data.record_audio is not None and data.record_audio != camera.record_audio:
+        camera.record_audio = data.record_audio
+        needs_restart = True  # the recorder's ffmpeg arguments change
+    if data.rec_format is not None and data.rec_format != camera.rec_format:
+        camera.rec_format = data.rec_format
+        needs_restart = True  # recorder on/off, go2rtc AAC audio source
+    redetect_ptz = camera.rtsp_url != old_rtsp_url
+    if data.ptz_driver is not None:
+        redetect_ptz = _apply_ptz_driver(camera, data.ptz_driver) or redetect_ptz
 
     await db.commit()
     await db.refresh(camera)
     logger.info("Camera updated", extra={"camera_id": camera.id})
+    if redetect_ptz:
+        await _detect_ptz(db, camera)
 
     # Rename recording folder and update DB paths if name changed
     if data.name is not None and data.name != old_name:
@@ -765,11 +781,14 @@ async def update_camera(
         try:
             await get_go2rtc_client().register_stream(
                 camera.name, camera.rtsp_url, camera.sub_stream_url,
+                add_aac_audio=(camera.rec_format or "ts") != "ts",
             )
         except Exception:
             logger.exception("Failed to re-register go2rtc streams after update",
                              extra={"camera_id": camera.id, "camera_name": camera.name})
-        await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url)
+        await mgr.start_stream(camera.id, camera.name, camera.rtsp_url, camera.sub_stream_url,
+                               record_audio=camera.record_audio,
+                               rec_format=camera.rec_format)
         await broker.add_camera(camera)
 
     # Update motion detection if settings changed
@@ -841,6 +860,8 @@ async def delete_camera(
     await mgr.stop_stream(camera.id)
     from app.services.frame_broker import get_frame_broker
     await get_frame_broker().remove_camera(camera.id)
+    from app.services.ptz import get_ptz_manager
+    await get_ptz_manager().forget(camera.id)
 
     # Remove DB metadata (recordings + clip exports) so FK constraints don't block delete.
     for model in (ClipExport, MotionEvent, Recording):
@@ -879,6 +900,35 @@ async def delete_camera(
     except Exception:
         logger.exception("Failed to restart go2rtc after camera delete")
 
+
+
+def _apply_ptz_driver(camera: Camera, value: str) -> bool:
+    """Apply a manual `ptz_driver` from the API. Returns True for "auto",
+    which means: probe the camera again after saving."""
+    from app.services.ptz import DRIVERS, NO_PTZ, get_ptz_manager
+    get_ptz_manager()  # registers the drivers
+    value = value.strip().lower()
+    if value == "auto":
+        camera.ptz_driver = None
+        return True
+    if value != NO_PTZ and value not in DRIVERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ptz_driver must be auto, {NO_PTZ} or one of: {', '.join(DRIVERS)}",
+        )
+    camera.ptz_driver = value
+    return False
+
+
+async def _detect_ptz(db: AsyncSession, camera: Camera) -> None:
+    """Probe a new or re-addressed camera for PTZ. Never fails the request."""
+    from app.services.ptz import refresh_camera_ptz
+    try:
+        if await refresh_camera_ptz(camera):
+            await db.commit()
+            await db.refresh(camera)
+    except Exception:
+        logger.exception("PTZ detection failed", extra={"camera_id": camera.id})
 
 
 async def _rename_camera_folder(

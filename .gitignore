@@ -62,3 +62,6 @@ adb-wifi.bat
 
 # Claude Code
 .claude/
+
+# Local device notes for the Dahua PTZ (serial, MAC, config dump). Keep out of the public repo.
+Dahua SDT3E410-8P-MB-A-PV1 dual-lens PTZ/

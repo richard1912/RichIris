@@ -68,6 +68,15 @@ class Camera(Base):
     ai_confidence_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
     face_recognition: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     face_match_threshold: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
+    # PTZ driver name (see services/ptz.py). NULL = no driver claims this camera
+    # or it has not been probed yet, "none" = probed, no PTZ.
+    ptz_driver: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Record the main stream's AAC audio (see build_recording_output). Off by
+    # default: before this flag no AAC camera's sound reached the .ts files.
+    record_audio: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Recording format: "ts" (ffmpeg MPEG-TS segments), "shadow" (ts AND riv,
+    # for verification), "riv" (RIV only; see services/riv).
+    rec_format: Mapped[str] = mapped_column(String(10), default="ts", server_default="ts")
 
     group: Mapped["CameraGroup | None"] = relationship(back_populates="cameras")
     recordings: Mapped[list["Recording"]] = relationship(back_populates="camera")
@@ -93,6 +102,31 @@ class Zone(Base):
     )
 
     camera: Mapped["Camera"] = relationship(back_populates="zones")
+
+
+class RivFile(Base):
+    """One RIV file (services/riv): one camera stream, up to 15 minutes.
+
+    Separate from `recordings` on purpose: every legacy reader of that table
+    runs ffmpeg on MPEG-TS, and must never be handed a RIV file.
+    Times are naive local, like every other table.
+    """
+    __tablename__ = "riv_files"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[int] = mapped_column(ForeignKey("cameras.id"), nullable=False, index=True)
+    stream: Mapped[str] = mapped_column(String(4), nullable=False)        # "s1" | "s2"
+    file_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    start_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)        # unix ms, first keyframe
+    end_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)    # unix ms, last frame
+    file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    frames: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    keyframes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    in_progress: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    tier: Mapped[str] = mapped_column(String(10), default="hot", server_default="hot")
 
 
 class Recording(Base):
@@ -157,6 +191,32 @@ class MotionEvent(Base):
     zones_triggered: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     camera: Mapped["Camera"] = relationship(back_populates="motion_events")
+
+
+class EventAssessment(Base):
+    """What the AI guard (services/guard.py) made of one person event."""
+    __tablename__ = "event_assessments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    motion_event_id: Mapped[int] = mapped_column(
+        ForeignKey("motion_events.id"), nullable=False, unique=True, index=True)
+    camera_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    event_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, server_default=func.now())
+    status: Mapped[str] = mapped_column(String(10), default="ok")  # ok | error
+    model: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    # resident | delivery | passerby | visitor | unknown | none
+    subject: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    people_count: Mapped[int] = mapped_column(Integer, default=0)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    activity: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    suspicion: Mapped[int] = mapped_column(Integer, default=0)  # 0 none .. 3 high
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    would_alert: Mapped[bool] = mapped_column(Boolean, default=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    frames_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    frame_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Face(Base):

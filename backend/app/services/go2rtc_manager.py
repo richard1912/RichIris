@@ -170,7 +170,8 @@ async def _build_streams_from_db() -> dict:
     from app.services.rtsp_url import normalize_rtsp_url
 
     camera_list = [
-        (cam.name, normalize_rtsp_url(cam.rtsp_url), normalize_rtsp_url(cam.sub_stream_url))
+        (cam.name, normalize_rtsp_url(cam.rtsp_url), normalize_rtsp_url(cam.sub_stream_url),
+         (cam.rec_format or "ts") != "ts")
         for cam in cameras
     ]
     return build_streams_config(camera_list)

@@ -72,6 +72,11 @@ class TimelineCache {
   }
 
   /// Drop every entry for the given camera (all dates).
+  /// Drop entries of cameras that no longer exist.
+  void dropMissing(Set<int> cameraIds) {
+    _store.removeWhere((k, _) => !cameraIds.contains(k.cameraId));
+  }
+
   void dropCamera(int cameraId) {
     final before = _store.length;
     _store.removeWhere((k, _) => k.cameraId == cameraId);

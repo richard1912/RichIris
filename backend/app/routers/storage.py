@@ -347,7 +347,9 @@ async def _restart_camera_services() -> None:
     stream_mgr = get_stream_manager()
     import asyncio
     await asyncio.gather(*[
-        stream_mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url)
+        stream_mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url,
+                                record_audio=cam.record_audio,
+                         rec_format=cam.rec_format)
         for cam in cameras_list
     ])
     logger.info("Restarted camera streams", extra={"count": len(cameras_list)})

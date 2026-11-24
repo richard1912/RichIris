@@ -148,7 +148,8 @@ class _CameraCardState extends State<CameraCard> {
                             color: Color(0xFF525252), size: 32),
                       ),
                     )
-                  else if (widget.playbackLoading)
+                  else if (widget.playbackLoading &&
+                      widget.playbackController == null)
                     const Center(
                       child: SizedBox(
                         width: 24,
@@ -196,6 +197,25 @@ class _CameraCardState extends State<CameraCard> {
                           widget.camera.enabled ? Icons.videocam : Icons.videocam_off,
                           color: const Color(0xFF525252),
                           size: 32,
+                        ),
+                      ),
+                    ),
+                  // Playback (re)opening: keep the video mounted underneath (a
+                  // remounted texture is green until a frame is uploaded) and
+                  // cover it until the player has really decoded a frame.
+                  if (!widget.isFullscreen &&
+                      widget.playbackLoading &&
+                      widget.playbackController != null)
+                    Container(
+                      color: const Color(0xFF0A0A0A),
+                      child: const Center(
+                        child: SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Color(0xFF3B82F6),
+                          ),
                         ),
                       ),
                     ),

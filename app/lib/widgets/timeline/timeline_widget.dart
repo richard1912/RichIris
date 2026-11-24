@@ -87,6 +87,17 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   List<ThumbnailInfo> _thumbnails = [];
   double _lastScale = 1.0;
   bool _wasPinch = false;
+  // Fingers currently on the bar, and whether this touch sequence ever had
+  // two. ScaleGestureRecognizer ENDS and RESTARTS the gesture whenever the
+  // pointer count changes, so one pinch produced an onScaleEnd as the second
+  // finger landed and a fresh one-finger "scrub" as the first finger lifted;
+  // each was treated as a tap and fired a playback seek (four in a second on
+  // the Pixel 10, 2026-11-14). The outer Listener sees pointer events before
+  // the recognizer does, so this flag is set in time. It is cleared on the
+  // first finger of the NEXT touch, not on the last lift, because the final
+  // onScaleEnd arrives after the last onPointerUp.
+  int _activePointers = 0;
+  bool _multiTouch = false;
   double? _scaleStartPct;
   double? _scaleStartYFrac;
   Timer? _longPressTimer;
@@ -150,7 +161,11 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   void didUpdateWidget(TimelineWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.cameraId != widget.cameraId) {
-      _ctrl.setDate(todayDate(tzOffsetMs: widget.tzOffsetMs));
+      // Keep the viewed date when switching camera during playback; the
+      // video keeps playing that time, so only a live timeline snaps to today.
+      _ctrl.setDate(widget.isLive
+          ? todayDate(tzOffsetMs: widget.tzOffsetMs)
+          : _ctrl.selectedDate);
       _thumbnails = [];
       _hydrateFromCache();
       _fetchSegments();
@@ -250,6 +265,14 @@ class _TimelineWidgetState extends State<TimelineWidget> {
   static const double _maxThumbStalenessSecs = 120;
 
   String? _findNearestThumbUrl(double hour) {
+    // RIV footage: the keyframe at the hovered moment, decoded on demand from
+    // the sub stream (rounded to the second so repeat hovers hit the cache).
+    if (_ctrl.rivCovers(hour)) {
+      final secs = (hour * 3600).floor();
+      final iso = hourToISO(_ctrl.selectedDate, secs / 3600.0);
+      return widget.recordingApi.getSegmentUrl(
+          '/api/riv/${widget.cameraId}/frame.jpg?at=${Uri.encodeQueryComponent(iso)}&stream=s2');
+    }
     if (_thumbnails.isEmpty) return null;
     final targetSecs = hour * 3600;
     ThumbnailInfo? best;
@@ -344,14 +367,43 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                 : DetectionColors.forLabel(ev.detectionLabel);
     final borderColor = isMotion ? motionColor : const Color(0xFF404040);
 
+    // The event details sit beside the thumbnail: on its right, or on its left
+    // when the right would run off the window (hovering near the end of the
+    // timeline). Anchoring by the thumbnail's right edge keeps the thumbnail
+    // where it is whichever side the panel takes.
+    final screenW = MediaQuery.of(context).size.width;
+    final statsOnLeft = isMotion && _thumbLeft + 320 + 3 + 230 > screenW;
+    final stats = !isMotion
+        ? const <Widget>[]
+        : <Widget>[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0xCC000000),
+                borderRadius: BorderRadius.circular(3),
+                border: Border.all(color: motionColor, width: 0.5),
+              ),
+              child: DefaultTextStyle(
+                style: const TextStyle(decoration: TextDecoration.none),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: _buildThumbTooltipLines(_hoverMotionEvent!),
+                ),
+              ),
+            ),
+          ];
+
     return Positioned(
-      left: _thumbLeft,
+      left: statsOnLeft ? null : _thumbLeft,
+      right: statsOnLeft ? screenW - (_thumbLeft + 320) : null,
       top: _thumbTop,
       child: IgnorePointer(
         child: Row(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (statsOnLeft) ...[...stats, const SizedBox(width: 3)],
             Container(
               width: 320,
               height: 180,
@@ -370,25 +422,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                 errorBuilder: (_, __, ___) => const SizedBox.shrink(),
               ),
             ),
-            if (isMotion) ...[
-              const SizedBox(width: 3),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                decoration: BoxDecoration(
-                  color: const Color(0xCC000000),
-                  borderRadius: BorderRadius.circular(3),
-                  border: Border.all(color: motionColor, width: 0.5),
-                ),
-                child: DefaultTextStyle(
-                  style: const TextStyle(decoration: TextDecoration.none),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: _buildThumbTooltipLines(_hoverMotionEvent!),
-                  ),
-                ),
-              ),
-            ],
+            if (isMotion && !statsOnLeft) ...[const SizedBox(width: 3), ...stats],
           ],
         ),
       ),
@@ -574,10 +608,14 @@ class _TimelineWidgetState extends State<TimelineWidget> {
       final padHours = 8.0 / barWidth * _ctrl.visibleHours;
       final hitEvent = _ctrl.motionEventAtHour(hour, padHours: padHours, category: tappedCat);
       if (hitEvent != null) {
-        // Small safety lead. The backend now stamps start_time at frame
-        // capture (not pipeline completion), so residual lag is only
-        // sub-stream buffering + 2fps quantization — ~0.5s max.
-        targetHour = math.max(0.0, isoToHour(hitEvent.startTime) - (0.5 / 3600.0));
+        // Lead in. start_time is when the server RECEIVED the thumbnail
+        // frame, and the detection (sub) stream reaches it 2 to 3.5 s after
+        // the moment is in the recording (measured 2026-11-18 against the
+        // burnt-in clocks), so starting at start_time lands after the
+        // thumbnail's moment. Direct playback also snaps to a keyframe,
+        // which can be a second or two late (a 3 s lead started 1 s AFTER
+        // the thumbnail on a passing car). 5 s puts playback before it.
+        targetHour = math.max(0.0, isoToHour(hitEvent.startTime) - (5.0 / 3600.0));
       }
     }
 
@@ -1219,7 +1257,20 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   _ctrl.zoom(delta, pct);
                 }
               },
+              onPointerCancel: (_) {
+                if (_activePointers > 0) _activePointers--;
+                _longPressTimer?.cancel();
+              },
               onPointerDown: (event) {
+                if (_activePointers == 0) _multiTouch = false;
+                _activePointers++;
+                if (_activePointers >= 2) {
+                  _multiTouch = true;
+                  _longPressTimer?.cancel();
+                  _longPressActive = false;
+                  _pointerDownPos = null;
+                  return;
+                }
                 _pointerDownPos = event.localPosition;
                 _longPressActive = false;
                 _longPressTimer?.cancel();
@@ -1253,6 +1304,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                 }
               },
               onPointerUp: (_) {
+                if (_activePointers > 0) _activePointers--;
                 _longPressTimer?.cancel();
                 _pointerDownPos = null;
                 if (_longPressActive) {
@@ -1267,6 +1319,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
               },
               child: GestureDetector(
                 onTapUp: (details) {
+                  if (_multiTouch) return;
                   final pct = details.localPosition.dx / width;
                   final yFrac = details.localPosition.dy / barHeight;
                   _onTimelineTap(pct, yFraction: yFrac);
@@ -1297,7 +1350,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                     _ctrl.setScrubHour(null);
                     setState(() => _hoverTime = null);
                     _updateThumbOverlay();
-                  } else if (!_wasPinch) {
+                  } else if (!_wasPinch && !_multiTouch) {
                     final pct = (details.localFocalPoint.dx / width).clamp(0.0, 1.0);
                     final yFrac = (details.localFocalPoint.dy / barHeight).clamp(0.0, 1.0);
                     final hour = _ctrl.viewportPctToHour(pct);
@@ -1318,7 +1371,7 @@ class _TimelineWidgetState extends State<TimelineWidget> {
                   }
                 },
                 onScaleEnd: (_) {
-                  if (!_wasPinch && !_longPressActive) {
+                  if (!_wasPinch && !_multiTouch && !_longPressActive) {
                     final scrub = _ctrl.scrubHour;
                     if (scrub != null) {
                       final pct = _ctrl.hourToViewportPct(scrub);

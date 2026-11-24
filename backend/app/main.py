@@ -13,7 +13,7 @@ from app.config import get_app_dir, get_config
 from app.database import close_db, get_db, get_session_factory, init_db
 from app.logging_config import setup_logging
 from app.models import Camera
-from app.routers import backup, cameras, clips, faces, groups, motion, recordings, settings, storage, streams, system, zones
+from app.routers import alerts, backup, cameras, clips, events, faces, groups, motion, ptz, recordings, riv, settings, storage, streams, system, zones
 from app.services.job_object import create_job_object
 from app.services.recorder import cleanup_missing_recordings, scan_all_cameras
 from app.services.retention import enforce_retention
@@ -147,6 +147,13 @@ async def lifespan(app: FastAPI):
     from app.services.storage_flush import get_storage_flusher
     get_storage_flusher().cleanup_stray_tmp()
 
+    # RIV recording (services/riv): writers for cameras set to shadow/riv.
+    from app.services.riv.manager import get_riv_manager
+    try:
+        await get_riv_manager().start()
+    except Exception:
+        logger.exception("RIV manager failed to start")
+
     scan_task = asyncio.create_task(_periodic_scan())
     retention_task = asyncio.create_task(_periodic_retention())
     flush_task = asyncio.create_task(_periodic_flush())
@@ -155,7 +162,13 @@ async def lifespan(app: FastAPI):
     from app.services.self_watchdog import run_self_watchdog
     watchdog_task = asyncio.create_task(run_self_watchdog(get_bootstrap().port))
 
+    # PTZ: find out which not-yet-probed cameras can move (background, never blocks startup).
+    from app.services.ptz import detect_unprobed_cameras, get_ptz_manager
+    ptz_detect_task = asyncio.create_task(detect_unprobed_cameras())
+
     yield
+    ptz_detect_task.cancel()
+    await get_ptz_manager().shutdown()
     scan_task.cancel()
     retention_task.cancel()
     flush_task.cancel()
@@ -173,6 +186,7 @@ async def lifespan(app: FastAPI):
     await get_live_poster().stop()
     await thumb_capture.stop()
     await frame_broker.stop()
+    await get_riv_manager().stop()
     mgr = get_stream_manager()
     await mgr.stop_all()
     pb = get_playback_manager()
@@ -319,7 +333,9 @@ async def _start_camera_recordings(cameras_list: list) -> None:
     """Start recording ffmpeg processes for all cameras (parallel)."""
     mgr = get_stream_manager()
     await asyncio.gather(*[
-        mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url)
+        mgr.start_stream(cam.id, cam.name, cam.rtsp_url, cam.sub_stream_url,
+                         record_audio=cam.record_audio,
+                         rec_format=cam.rec_format)
         for cam in cameras_list
     ])
 
@@ -335,13 +351,17 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    app.include_router(alerts.router)
     app.include_router(backup.router)
     app.include_router(cameras.router)
     app.include_router(clips.router)
+    app.include_router(events.router)
     app.include_router(faces.router)
     app.include_router(groups.router)
     app.include_router(motion.router)
+    app.include_router(ptz.router)
     app.include_router(recordings.router)
+    app.include_router(riv.router)
     app.include_router(settings.router)
     app.include_router(storage.router)
     app.include_router(streams.router)

@@ -46,6 +46,7 @@ FACE_LOCKIN_CONFIDENCE = 0.75
 MOTION_ALPHA = 0.01       # Slow running-average adaptation (steady state)
 MOTION_ALPHA_STARTUP = 0.2
 BASELINE_STARTUP_FRAMES = 25
+LIGHT_CHANGE_PCT = 30.0   # this much of the frame changing at once = lighting, not objects
 HEARTBEAT_INTERVAL = 300   # Log heartbeat every 5 minutes (seconds)
 # Min fraction of a detection bbox that must overlap the motion mask to count as "moving".
 # Filters out static objects (e.g. parked cars) that are detected but aren't actually moving.
@@ -54,6 +55,11 @@ MIN_MOTION_OVERLAP = 0.10  # 10% of bbox area must have changed pixels
 AI_CONFIRM_REQUIRED = 2   # detections needed within the window
 AI_CONFIRM_WINDOW = 3     # sliding window size (frames)
 AI_MIN_MOVE_PCT = 1.5     # min bbox center movement as % of frame diagonal
+# The frame kept for an event (its thumbnail, and the time the event starts) is
+# the best-scoring one seen while waiting for confirmation. An object can sit
+# detected but unconfirmed for a long time (a parked car), so without a limit the
+# thumbnail could be over a minute older than the event it was filed under.
+PENDING_MAX_AGE = 4.0     # seconds
 
 
 class MotionDetector:
@@ -314,6 +320,21 @@ class MotionDetector:
                 _, thresh = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
                 changed_pct = (np.count_nonzero(thresh) / thresh.size) * 100
 
+                # A light switching on or off (or a PTZ lens moving) changes a
+                # large part of the frame at once. Against the slow baseline
+                # that reads as motion everywhere for minutes, so every parked
+                # car counts as "moving": the front lights then re-triggered
+                # themselves every ~2 min all night, and people were lost in
+                # the full-frame noise. Adopt the new lighting as the baseline
+                # straight away and let it settle at the startup rate; anything
+                # really moving still shows against it on the next frames.
+                if changed_pct >= LIGHT_CHANGE_PCT:
+                    self._avg_baseline[cam_id] = gray.astype(np.float32)
+                    self._baseline_frames[cam_id] = 0
+                    await self._check_cooldown(cam_id)
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
                 if changed_pct >= threshold_pct:
                     # Motion detected — run AI detection if enabled, otherwise fire event
                     if ai_detection:
@@ -336,7 +357,9 @@ class MotionDetector:
                                 captured_at=captured_at,
                             )
 
-                        from app.services.object_detector import build_class_list, compute_motion_region
+                        from app.services.object_detector import (
+                            build_class_list, compute_motion_region, compute_tiles, merge_detections,
+                        )
                         detector = get_object_detector()
                         classes = build_class_list(ai_detect_persons, ai_detect_vehicles, ai_detect_animals)
 
@@ -355,12 +378,27 @@ class MotionDetector:
 
                         _t_ai = datetime.now()
                         detections = await detector.detect_objects(det_frame, ai_threshold, classes=classes) if classes else []
-                        _ai_ms = round((datetime.now() - _t_ai).total_seconds() * 1000)
 
                         if region is not None and detections:
                             for _d in detections:
                                 _d.x1 += _rx; _d.x2 += _rx
                                 _d.y1 += _ry; _d.y2 += _ry
+                        # Whole-frame fallback on a wide frame: the letterboxed
+                        # frame is too small for distant people, so add square
+                        # tiles over the columns that changed (see compute_tiles).
+                        _tiles = []
+                        if region is None and classes and get_config().ai.region_crop_enabled:
+                            _tiles = compute_tiles(thresh, *frame.shape[:2])
+                            for _tx, _ty, _ts in _tiles:
+                                _found = await detector.detect_objects(
+                                    frame[_ty:_ty + _ts, _tx:_tx + _ts], ai_threshold, classes=classes)
+                                for _d in _found:
+                                    _d.x1 += _tx; _d.x2 += _tx
+                                    _d.y1 += _ty; _d.y2 += _ty
+                                detections.extend(_found)
+                            if _tiles:
+                                detections = merge_detections(detections)
+                        _ai_ms = round((datetime.now() - _t_ai).total_seconds() * 1000)
                         # Filter out static objects: only keep detections whose
                         # bounding box overlaps sufficiently with the motion mask
                         moving = []
@@ -394,24 +432,31 @@ class MotionDetector:
                                 pkey = (cam_id, cat)
                                 prev = self._pending_detections.get(pkey)
                                 best_bbox = (best.x1, best.y1, best.x2, best.y2)
-                                if prev is None or best.confidence > prev[1]:
+                                if (prev is None or best.confidence > prev[1]
+                                        or (captured_at - prev[5]).total_seconds() > PENDING_MAX_AGE):
                                     self._pending_detections[pkey] = (
                                         best.label, best.confidence, changed_pct, frame.copy(), best_bbox,
+                                        captured_at,
                                     )
                                 if confirmed:
                                     any_confirmed = True
                                     logger.info("[BENCH] detection confirmed", extra={
                                         "camera": cam_name, "category": cat,
                                         "ai_ms": _ai_ms,
-                                        "region": f"{_rsize}px@{_rx},{_ry}" if region is not None else "fullframe",
+                                        "region": (
+                                            f"{_rsize}px@{_rx},{_ry}" if region is not None
+                                            else f"fullframe+{len(_tiles)}tiles" if _tiles
+                                            else "fullframe"
+                                        ),
                                         "confirm_ms": round((datetime.now() - captured_at).total_seconds() * 1000),
                                     })
                                     pending = self._pending_detections.pop(pkey, None)
                                     if pending:
-                                        p_label, p_conf, p_intensity, p_frame, p_bbox = pending
+                                        p_label, p_conf, p_intensity, p_frame, p_bbox, p_captured = pending
                                     else:
-                                        p_label, p_conf, p_intensity, p_frame, p_bbox = (
+                                        p_label, p_conf, p_intensity, p_frame, p_bbox, p_captured = (
                                             best.label, best.confidence, changed_pct, frame, best_bbox,
+                                            captured_at,
                                         )
                                     # Fire non-face-gated on-scripts NOW, before the
                                     # ~1-2s face pass below. Lights respond fast; the
@@ -469,7 +514,9 @@ class MotionDetector:
                                         detection_bbox=p_bbox,
                                         motion_mask=thresh,
                                         motion_threshold_pct=threshold_pct,
-                                        captured_at=captured_at,
+                                        # The event starts when its thumbnail frame was
+                                        # taken, so clicking the event plays that moment.
+                                        captured_at=p_captured,
                                     )
                             else:
                                 # Category not detected this frame — record miss
@@ -953,6 +1000,12 @@ class MotionDetector:
                 await session.refresh(event)
                 self._active_events[key] = event.id
                 self._event_start[key] = event_start
+
+                # AI guard: a vision model checks the detection really is a person. submit()
+                # only queues a task; the alert scripts ask for the verdict before notifying.
+                if category == "person":
+                    from app.services.guard import get_guard
+                    get_guard().submit(event.id, cam_id, cam_name, event_start, detection_bbox, shape_hw, frame)
 
                 # Queue unknown-face embeddings for the background clusterer.
                 # Only done at event-creation to avoid flooding the queue when

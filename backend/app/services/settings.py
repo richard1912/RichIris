@@ -30,6 +30,17 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "remote_url": "",
         "remote_timeout_ms": "2500",
     },
+    "guard": {
+        # AI guard (services/guard.py): a vision model checks each "person" detection is
+        # really a person; the alert scripts skip the notification when it says no.
+        # Off unless a Claude token is set up.
+        "enabled": "false",
+        "model": "claude-sonnet-5-5",
+        # Comma-separated camera names; empty = every camera.
+        "cameras": "",
+        # Minimum seconds between two checks on one camera (0 = check every event).
+        "cooldown_seconds": "0",
+    },
     "retention": {
         "max_age_days": "30",
         "max_storage_gb": "500",

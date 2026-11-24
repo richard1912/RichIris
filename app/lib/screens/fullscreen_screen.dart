@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -12,6 +13,7 @@ import '../services/player_tuning.dart';
 import '../services/recording_api.dart';
 import '../services/clip_api.dart';
 import '../services/motion_api.dart';
+import '../services/ptz_api.dart';
 import '../services/system_api.dart';
 import '../services/timeline_cache.dart';
 import '../utils/time_utils.dart';
@@ -21,6 +23,7 @@ import '../widgets/bug_report_dialog.dart';
 import '../widgets/feature_badges.dart';
 import '../widgets/icon_chip.dart';
 import '../widgets/live_player.dart';
+import '../widgets/ptz_controls.dart';
 import '../widgets/quality_selector.dart';
 import '../widgets/zoomable_video.dart';
 import '../widgets/timeline/timeline_widget.dart';
@@ -36,6 +39,8 @@ class FullscreenScreen extends StatefulWidget {
   final ClipApi clipApi;
   final MotionApi motionApi;
   final SystemApi systemApi;
+  /// PTZ control; the panel is only offered for cameras with `hasPtz`.
+  final PtzApi? ptzApi;
   final TimelineCache timelineCache;
   final int tzOffsetMs;
   final ValueChanged<Quality> onQualityChanged;
@@ -67,6 +72,7 @@ class FullscreenScreen extends StatefulWidget {
     required this.clipApi,
     required this.motionApi,
     required this.systemApi,
+    this.ptzApi,
     required this.timelineCache,
     required this.tzOffsetMs,
     required this.onQualityChanged,
@@ -93,8 +99,12 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   bool _isLive = true;
   bool _paused = false;
   bool _showStats = true;
+  bool _showPtz = false;
   Player? _livePlayer;
   Timer? _statsTimer;
+  // Live-edge chase (PTZ cameras only), see _chaseLiveEdge.
+  Timer? _edgeTimer;
+  double _edgeRate = 1;
   // Persistent focus node for the keyboard-shortcut listener. Must live in
   // state (not be re-created inside build()) — otherwise every rebuild from
   // the stats timer steals focus from any active TextField in the app.
@@ -151,6 +161,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _keyboardFocus.requestFocus();
     });
+    _edgeTimer = Timer.periodic(
+        const Duration(milliseconds: 300), (_) => _chaseLiveEdge());
     // Stats shown by default — start refresh timer
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
@@ -173,7 +185,17 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
           : 0;
       widget.playbackRef.isLive = false;
       widget.onLiveStateChanged(false);
-      // Grid's completed listener handles segment continuation on the shared player
+      // The grid cancels its own continuation listener when it hands the
+      // player over (detachPlayer), so the adopted player used to stop dead at
+      // the end of its segment. Continue from where it ended with a session of
+      // our own; _startPlayback releases the adopted player.
+      _completedSub?.cancel();
+      _completedSub = _pbPlayer!.stream.completed.listen((completed) {
+        if (completed && mounted && _adoptedPlayer && _speedTimer == null) {
+          _startPlayback(formatLocalISOFromMs(_currentPlaybackMs()),
+              resumeSpeed: _speed);
+        }
+      });
     } else if (widget.initialPlaybackTime != null) {
       // Fallback: no shared player available, start fresh session
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -198,6 +220,9 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _posterTimer?.cancel();
     _clearSpeedTimer();
     _statsTimer?.cancel();
+    _edgeTimer?.cancel();
+    // The live player may be the grid's: never leave it sped up.
+    if (_edgeRate != 1) (widget.livePlayer ?? _livePlayer)?.setRate(1);
     _seekSub?.cancel();
     _pbPositionSub?.cancel();
     _completedSub?.cancel();
@@ -220,6 +245,10 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   StreamSubscription? _speedDurSub; // speed re-apply after segment transition
 
   bool _pbVideoReady = false;
+  String _sessionFormat = 'ts';
+  int _kfSpeed = 1;
+  bool _pbArmed = false;
+  Duration? _pbFirstPos;
   StreamSubscription? _pbPositionSub;
 
   void _ensurePlayer() {
@@ -236,7 +265,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _pbVideoReady = false;
     _pbPositionSub?.cancel();
     _pbPositionSub = _pbPlayer!.stream.position.listen((pos) {
-      if (pos > Duration.zero && !_pbVideoReady && mounted) {
+      // Same rule as live and the grid: armed only after open() completed,
+      // zero ignored, and the position must MOVE 500 ms before the black
+      // cover lifts (one position is not yet a frame on the texture).
+      if (_pbVideoReady || !_pbArmed || pos <= Duration.zero || !mounted) return;
+      final first = _pbFirstPos;
+      if (first == null || pos < first) {
+        _pbFirstPos = pos;
+      } else if (pos - first >= const Duration(milliseconds: 500)) {
         setState(() => _pbVideoReady = true);
       }
     });
@@ -258,7 +294,8 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     });
   }
 
-  Future<void> _startPlayback(String start, {int resumeSpeed = 1}) async {
+  Future<void> _startPlayback(String start,
+      {int resumeSpeed = 1, int supersededRetries = 2}) async {
     // Release adopted player if any — we're creating our own session
     if (_adoptedPlayer) {
       _adoptedPlayer = false;
@@ -288,16 +325,23 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         start,
         widget.quality.param,
         direction: resumeSpeed < 0 ? 'backward' : 'forward',
+        speed: resumeSpeed >= 16 ? resumeSpeed : 1,
       );
       if (_generation != gen || !mounted) return;
       final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
+      _sessionFormat = session.format;
+      _kfSpeed = session.speed;
 
       _ensurePlayer();
       _pbVideoReady = false;
+      _pbArmed = false;
+      _pbFirstPos = null;
       // mpv keeps `speed` across loads, so a previous 4x would otherwise
       // leak into this session before the duration listener re-applies it.
-      _pbPlayer!.setRate(resumeSpeed.abs().clamp(1, 4).toDouble());
-      _pbPlayer!.open(Media(fullUrl));
+      _pbPlayer!.setRate(_kfSpeed > 1 ? 1.0 : resumeSpeed.abs().clamp(1, 4).toDouble());
+      _pbPlayer!.open(Media(fullUrl)).then((_) {
+        if (_generation == gen) _pbArmed = true;
+      });
       // Backend already applied seek via ffmpeg — player starts at position 0
       // which maps to segmentStart + seekSeconds in NVR time
 
@@ -330,6 +374,19 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       }
     } catch (e) {
       if (_generation != gen || !mounted) return;
+      // 409 = the server replaced our session with another request for this
+      // camera (an older request of ours that arrived late, or the grid's).
+      // We are still the newest thing the user asked for, so ask again
+      // instead of showing an error.
+      if (e is DioException &&
+          e.response?.statusCode == 409 &&
+          supersededRetries > 0) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (_generation != gen || !mounted) return;
+        return _startPlayback(start,
+            resumeSpeed: resumeSpeed,
+            supersededRetries: supersededRetries - 1);
+      }
       setState(() {
         _playbackError = e.toString();
         _playbackLoading = false;
@@ -449,6 +506,15 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     _clearSpeedTimer();
     setState(() => _speed = newSpeed);
 
+    // RIV footage: 16x/32x is a keyframe-only stream from the server (instant,
+    // no seeking), so entering, leaving or changing it needs a new stream.
+    final wantKf = newSpeed >= 16;
+    if (_sessionFormat == 'riv' && !_isLive && _pbPlayer != null &&
+        (wantKf != (_kfSpeed > 1) || (wantKf && newSpeed != _kfSpeed))) {
+      _startPlayback(formatLocalISOFromMs(_currentPlaybackMs()), resumeSpeed: newSpeed);
+      return;
+    }
+
     final needsSession = _isLive || _pbPlayer == null || _playbackUrl == null;
     if (needsSession || wasReverse != wantReverse) {
       // Reverse is a different render on the server (see reverse_playback.py),
@@ -487,6 +553,15 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
     player.setRate(1);
     player.play();
     final gen = _generation;
+    if (_kfSpeed == speed && _playbackStartTime != null) {
+      // Keyframe stream: the server already compressed time; just track it.
+      final startMs = DateTime.parse(_playbackStartTime!).millisecondsSinceEpoch;
+      _speedTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        if (_generation != gen || _pbPlayer == null) return;
+        _virtualTimeMs = startMs + _pbPlayer!.state.position.inMilliseconds * speed;
+      });
+      return;
+    }
     const tickMs = 500;
     final jumpMs = speed * tickMs;
 
@@ -527,6 +602,15 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
   Widget build(BuildContext context) {
     final running = widget.stream?.running ?? false;
     final rot = widget.camera.rotation;
+    final ptzOpen = _ptzAvailable && _showPtz && _isLive;
+    // Portrait (a phone held upright): the video is a short band across a
+    // narrow screen and a floating panel covers most of it, which defeats the
+    // point of steering the camera. There the panel is docked under the video
+    // in the timeline's place (PTZ is live-only, so the timeline is not needed
+    // while it is open; closing the panel brings it back). Landscape and
+    // desktop have room beside the picture and keep the floating panel.
+    final mq = MediaQuery.of(context).size;
+    final ptzDocked = ptzOpen && mq.height > mq.width;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -549,6 +633,15 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                     right: 4,
                     child: _buildVideoOverlayChips(),
                   ),
+                  if (ptzOpen && !ptzDocked)
+                    Positioned(
+                      left: 56, // clear of the previous-camera chevron
+                      bottom: 8,
+                      child: PtzControls(
+                        cameraId: widget.camera.id,
+                        ptzApi: widget.ptzApi!,
+                      ),
+                    ),
                   if (_canSwitchCamera) ...[
                     Align(
                       alignment: Alignment.centerLeft,
@@ -562,8 +655,24 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
                 ],
               ),
             ),
-            // Timeline
-            TimelineWidget(
+            if (ptzDocked)
+              ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: mq.height * 0.5),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Center(
+                    child: PtzControls(
+                      cameraId: widget.camera.id,
+                      ptzApi: widget.ptzApi!,
+                    ),
+                  ),
+                ),
+              ),
+            // Timeline. Kept mounted (offstage) while the PTZ panel is docked
+            // so its loaded day, zoom and playhead survive.
+            Offstage(
+              offstage: ptzDocked,
+              child: TimelineWidget(
               cameraId: widget.camera.id,
               recordingApi: widget.recordingApi,
               clipApi: widget.clipApi,
@@ -583,12 +692,46 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               getNvrTime: _getNvrTime,
               initialDate: widget.initialPlaybackTime?.substring(0, 10),
               cameras: widget.cameras.where((c) => c.enabled).toList(),
+              ),
             ),
           ],
         ),
       ),
     );
   }
+
+  /// Keep a PTZ camera's live view at the live edge.
+  ///
+  /// The server starts a live stream at the newest keyframe, so the player
+  /// begins up to one keyframe interval behind real time and, playing at 1x,
+  /// stays that far behind for good. Harmless when watching; with PTZ it is
+  /// the delay between pressing a button and seeing the camera move. So while
+  /// more than a moment of video is waiting in the buffer, play slightly fast
+  /// until it is used up.
+  Future<void> _chaseLiveEdge() async {
+    if (!mounted) return;
+    final player = widget.livePlayer ?? _livePlayer;
+    if (player == null) return;
+    var rate = 1.0;
+    if (_ptzAvailable && _isLive && !_paused) {
+      final buffered = double.tryParse(
+          await playerProperty(player, 'demuxer-cache-duration'));
+      if (buffered == null || !mounted) return;
+      rate = buffered > 1.0
+          ? 2.0
+          : buffered > 0.35
+              ? 1.25
+              : buffered < 0.2
+                  ? 1.0
+                  : _edgeRate;
+    }
+    if (rate != _edgeRate) {
+      _edgeRate = rate;
+      player.setRate(rate);
+    }
+  }
+
+  bool get _ptzAvailable => widget.ptzApi != null && widget.camera.hasPtz;
 
   bool get _canSwitchCamera =>
       widget.onSwitchCamera != null &&
@@ -633,6 +776,12 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
+        // Shown in playback too: the panel is live-only, so pressing it there
+        // goes live first. Hiding it left no clue where the controls went.
+        if (_ptzAvailable) ...[
+          _buildPtzToggle(),
+          const SizedBox(height: 8),
+        ],
         IconChip(
           icon: Icons.bar_chart,
           tooltip: 'Video Stats',
@@ -669,6 +818,52 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         const SizedBox(height: 3),
         FeatureBadges(camera: widget.camera),
       ],
+    );
+  }
+
+  /// PTZ panel toggle. Deliberately a full-size labelled button (60px tall)
+  /// rather than a 22px IconChip: it is the control used most on this screen
+  /// and the chip was too small to hit on a phone.
+  Widget _buildPtzToggle() {
+    final open = _showPtz && _isLive;
+    final fg = open ? Colors.white : Colors.white.withValues(alpha: 0.9);
+    return Tooltip(
+      message: !_isLive
+          ? 'Go live and show PTZ controls'
+          : open
+              ? 'Hide PTZ controls'
+              : 'PTZ controls',
+      child: Material(
+        color: open ? const Color(0xFF3B82F6) : Colors.black54,
+        borderRadius: BorderRadius.circular(8),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () {
+            if (!_isLive) {
+              _goLive();
+              setState(() => _showPtz = true);
+            } else {
+              setState(() => _showPtz = !_showPtz);
+            }
+          },
+          child: SizedBox(
+            height: 60,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.control_camera, size: 30, color: fg),
+                  const SizedBox(width: 6),
+                  Text('PTZ',
+                      style: TextStyle(
+                          color: fg, fontSize: 17, fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -809,11 +1004,14 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
         );
       }
       final url = widget.streamApi.liveUrl(widget.camera.id, widget.streamSource.param, widget.quality.param, cameraName: widget.camera.name);
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          ZoomableVideo(
-            child: LivePlayer(
+      // The poster sits INSIDE the zoom wrapper: outside it, a pinch while the
+      // poster was still up (slow start, or a stalled stream reconnecting) left
+      // an unzoomed stale frame across the middle of the zoomed video.
+      return ZoomableVideo(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            LivePlayer(
               url: url,
               elevateOnWeb: true,
               player: widget.livePlayer,
@@ -823,19 +1021,19 @@ class _FullscreenScreenState extends State<FullscreenScreen> {
               rotation: rot,
               fit: BoxFit.contain,
             ),
-          ),
-          // Poster frame over the top until the decoder produces a frame of
-          // its own, then a 300ms cross-fade so it does not pop.
-          if (!_posterGone)
-            IgnorePointer(
-              child: AnimatedOpacity(
-                opacity:
-                    _liveStatus?.state == LivePlayerState.playing ? 0 : 1,
-                duration: const Duration(milliseconds: 300),
-                child: _buildPoster(),
+            // Poster frame over the top until the decoder produces a frame of
+            // its own, then a 300ms cross-fade so it does not pop.
+            if (!_posterGone)
+              IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity:
+                      _liveStatus?.state == LivePlayerState.playing ? 0 : 1,
+                  duration: const Duration(milliseconds: 300),
+                  child: _buildPoster(),
+                ),
               ),
-            ),
-        ],
+          ],
+        ),
       );
     }
 

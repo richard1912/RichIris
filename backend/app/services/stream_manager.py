@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 
 from app.config import AppConfig, get_config
-from app.services.ffmpeg import build_recording_command, sanitize_camera_name
+from app.services.ffmpeg import build_recording_command, probe_audio_codec, sanitize_camera_name
 from app.services.go2rtc_client import get_go2rtc_client, get_stream_name
 from app.services.job_object import assign_to_job
 
@@ -21,8 +21,52 @@ logger = logging.getLogger(__name__)
 STALE_THRESHOLD_SECONDS = 300  # 5 minutes
 # How often the watchdog checks for stale recordings
 WATCHDOG_INTERVAL_SECONDS = 120  # 2 minutes
+# A recorder is a stream copy and sits at ~60 MB. One whose RAM + swap passes this has run
+# away (12 GB twice: Garage 2026-09-23, Front Door 2026-11-19, each filling swap and stalling
+# the whole box) and is killed so the monitor relaunches it.
+RECORDER_MAX_MEMORY_MB = 1024
+# A segment still being written this long past the segment length means the recorder has
+# stopped rolling. Seen when a camera reconnects and the relay then carries audio only: with
+# no video keyframe the segment muxer can never cut, the file still grows (so it is not
+# "stale"), and hours of video are silently missing (Front Door, 2026-11-19 00:57 to 08:16).
+SEGMENT_OVERRUN_SECONDS = 180
+RIV_VIDEO_STALL_SECONDS = 60
 # A condition that keeps failing (unreachable camera) is logged this often, not every retry
 REPEAT_LOG_INTERVAL_SECONDS = 300  # 5 minutes
+
+
+def _process_memory_mb(pid: int) -> float | None:
+    """Resident + swapped memory of a process in MB. None where /proc is unavailable (Windows)."""
+    try:
+        kb = 0
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith(("VmRSS:", "VmSwap:")):
+                    kb += int(line.split()[1])
+        return kb / 1024
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _segment_overrun_seconds(day_dir: Path, segment_seconds: int, now: float) -> float | None:
+    """How far past its due roll the segment being written is, or None if not known.
+
+    The file being written is the newest `rec_HH-MM-SS.ts` (finished ones are renamed).
+    Segments cut on the wall clock, so it is due to roll at the next multiple of the
+    segment length after it started.
+    """
+    try:
+        live = [f for f in day_dir.iterdir() if f.name.startswith("rec_") and f.suffix == ".ts"]
+        if not live:
+            return None
+        newest = max(live, key=lambda f: f.stat().st_mtime)
+        if now - newest.stat().st_mtime > 60:
+            return None  # not being written; the staleness check owns that case
+        started = datetime.strptime(f"{day_dir.name} {newest.stem[4:]}", "%Y-%m-%d %H-%M-%S").timestamp()
+    except (OSError, ValueError):
+        return None
+    due = (int(started // segment_seconds) + 1) * segment_seconds
+    return now - due
 
 
 class _RepeatLogSuppressor:
@@ -62,6 +106,13 @@ class StreamInfo:
     camera_name: str
     rtsp_url: str
     sub_stream_url: str | None = None
+    record_audio: bool = False
+    # "ts" | "shadow" | "riv". With "riv" no ffmpeg recorder runs at all: the
+    # keepalive's fMP4 feeds the RIV writer (services/riv).
+    rec_format: str = "ts"
+    # Source audio codec, probed once per stream when record_audio is on
+    # (None = not known yet, "" = the camera sends no audio).
+    audio_codec: str | None = None
     rec_process: asyncio.subprocess.Process | None = None
     started_at: float = 0.0
     restart_count: int = 0
@@ -86,7 +137,8 @@ class StreamManager:
         return self._streams
 
     async def start_stream(
-        self, camera_id: int, camera_name: str, rtsp_url: str, sub_stream_url: str | None = None
+        self, camera_id: int, camera_name: str, rtsp_url: str, sub_stream_url: str | None = None,
+        record_audio: bool = False, rec_format: str = "ts",
     ) -> None:
         """Start a recording ffmpeg process for a camera.
 
@@ -106,17 +158,22 @@ class StreamManager:
             camera_name=camera_name,
             rtsp_url=rtsp_url,
             sub_stream_url=sub_stream_url or None,
+            record_audio=bool(record_audio),
+            rec_format=rec_format or "ts",
         )
         self._streams[camera_id] = info
 
-        await _launch_recording(info, config)
-
-        info._rec_monitor_task = asyncio.create_task(
-            self._monitor_process(camera_id)
-        )
-        info._watchdog_task = asyncio.create_task(
-            self._watchdog(camera_id)
-        )
+        if info.rec_format == "riv":
+            info.started_at = time.time()
+            info._watchdog_task = asyncio.create_task(self._riv_watchdog(camera_id))
+        else:
+            await _launch_recording(info, config)
+            info._rec_monitor_task = asyncio.create_task(
+                self._monitor_process(camera_id)
+            )
+            info._watchdog_task = asyncio.create_task(
+                self._watchdog(camera_id)
+            )
         # Keep go2rtc's streams alive AND feed the live GOP cache, which is
         # what makes a joining client's first frame instant instead of one
         # keyframe interval away (see services/live_cache.py). The sub stream
@@ -229,7 +286,27 @@ class StreamManager:
             if not info or not info.rec_process:
                 break
             if info.rec_process.returncode is not None:
-                break  # Already dead, monitor will handle restart
+                # Already dead, the monitor relaunches it. Keep watching: this
+                # used to `break`, so one death left the camera's recorder
+                # unwatched until the service restarted.
+                continue
+
+            # A runaway recorder keeps writing its file, so the staleness check
+            # below never sees it. Check its memory first.
+            mem_mb = _process_memory_mb(info.rec_process.pid)
+            if mem_mb is not None and mem_mb > RECORDER_MAX_MEMORY_MB:
+                logger.error(
+                    "Watchdog: recorder memory runaway, killing ffmpeg",
+                    extra={
+                        "camera_id": camera_id,
+                        "camera_name": info.camera_name,
+                        "memory_mb": round(mem_mb),
+                        "limit_mb": RECORDER_MAX_MEMORY_MB,
+                    },
+                )
+                info.last_error = f"Watchdog: recorder used {round(mem_mb)} MB"
+                info.rec_process.kill()
+                continue  # _monitor_process relaunches it
 
             config = get_config()
             safe_name = sanitize_camera_name(info.camera_name)
@@ -249,6 +326,20 @@ class StreamManager:
                         has_fresh_file = True
                         break
             except OSError:
+                continue
+
+            overrun = _segment_overrun_seconds(today_dir, config.ffmpeg.segment_duration, now)
+            if overrun is not None and overrun > SEGMENT_OVERRUN_SECONDS:
+                logger.error(
+                    "Watchdog: recorder stopped rolling segments, killing ffmpeg",
+                    extra={
+                        "camera_id": camera_id,
+                        "camera_name": info.camera_name,
+                        "overrun_seconds": round(overrun),
+                    },
+                )
+                info.last_error = "Watchdog: segment never rolled (no video?)"
+                info.rec_process.kill()
                 continue
 
             if has_fresh_file:
@@ -343,7 +434,10 @@ class StreamManager:
                         connect_ms = round((_time.monotonic() - t_connect) * 1000, 1)
                         # Read first chunk to confirm data is flowing
                         first_chunk = True
-                        async for _chunk in resp.aiter_bytes(chunk_size=65536):
+                        # No chunk_size: httpx then holds bytes back until a full
+                        # chunk has arrived, which released a 2.8 Mbit/s stream to
+                        # viewers in lumps up to 1 s apart (found 2026-11-19).
+                        async for _chunk in resp.aiter_bytes():
                             live_cache.feed(full_stream, _chunk)
                             if first_chunk:
                                 first_chunk_ms = round((_time.monotonic() - t_connect) * 1000, 1)
@@ -371,11 +465,45 @@ class StreamManager:
                              extra={"camera_id": camera_id, "stream": full_stream})
             await asyncio.sleep(5)
 
+    async def _riv_watchdog(self, camera_id: int) -> None:
+        """RIV cameras: no video written for RIV_VIDEO_STALL_SECONDS while the
+        keepalive is up means a connection delivering nothing (or audio only,
+        the Front Door failure of 2026-11-19), which its 60 s read timeout never
+        sees. Restart the main keepalive so go2rtc opens a fresh session."""
+        from app.services.riv.manager import get_riv_manager
+        await asyncio.sleep(120)
+        while self._running and camera_id in self._streams:
+            await asyncio.sleep(15)
+            info = self._streams.get(camera_id)
+            if info is None:
+                return
+            idle = get_riv_manager().video_idle_seconds(camera_id, "s1")
+            if idle is None or idle < RIV_VIDEO_STALL_SECONDS:
+                continue
+            logger.warning("RIV: no video written, restarting the main keepalive",
+                           extra={"camera_id": camera_id, "camera": info.camera_name,
+                                  "idle_s": round(idle)})
+            if info._main_keepalive_task:
+                info._main_keepalive_task.cancel()
+            info._main_keepalive_task = asyncio.create_task(
+                self._go2rtc_keepalive(camera_id, "s1_direct"))
+            info.restart_count += 1
+            await asyncio.sleep(RIV_VIDEO_STALL_SECONDS)
+
     def get_status(self, camera_id: int) -> dict:
         """Get status info for a stream."""
         info = self._streams.get(camera_id)
         if not info:
             return {"running": False}
+        if info.rec_format == "riv":
+            from app.services.riv.manager import get_riv_manager
+            idle = get_riv_manager().video_idle_seconds(camera_id, "s1")
+            running = idle is not None and idle < 30
+            return {"running": running, "pid": None,
+                    "uptime_seconds": time.time() - info.started_at if running else None,
+                    "restart_count": info.restart_count,
+                    "error": None if running else "RIV: no video written recently",
+                    "format": "riv"}
 
         running = info.rec_process is not None and info.rec_process.returncode is None
         uptime = time.time() - info.started_at if running else None
@@ -412,7 +540,14 @@ def _recording_source(info: StreamInfo) -> str:
 
 async def _launch_recording(info: StreamInfo, config: AppConfig) -> None:
     """Launch the recording-only ffmpeg subprocess."""
-    cmd = build_recording_command(info.camera_name, _recording_source(info), config)
+    source = _recording_source(info)
+    if info.record_audio and info.audio_codec is None:
+        info.audio_codec = await probe_audio_codec(source, config)
+        logger.info("Probed recording audio",
+                    extra={"camera_id": info.camera_id, "audio_codec": info.audio_codec})
+    cmd = build_recording_command(info.camera_name, source, config,
+                                  record_audio=info.record_audio,
+                                  audio_codec=info.audio_codec)
     logger.debug("Launching recording ffmpeg", extra={"cmd": _redact_rtsp(" ".join(cmd)), "camera_id": info.camera_id})
 
     info.rec_process = await asyncio.create_subprocess_exec(

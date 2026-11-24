@@ -237,6 +237,33 @@ async def init_db() -> None:
             logger.info("Migration: added face_match_threshold column to cameras")
         except Exception:
             pass
+    # Migrate: add ptz_driver column to cameras (NULL = not probed / no driver)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN ptz_driver VARCHAR(20)")
+            )
+            logger.info("Migration: added ptz_driver column to cameras")
+        except Exception:
+            pass
+    # Migrate: add rec_format column to cameras (RIV recording format)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN rec_format VARCHAR(10) NOT NULL DEFAULT 'ts'")
+            )
+            logger.info("Migration: added rec_format column to cameras")
+        except Exception:
+            pass
+    # Migrate: add record_audio column to cameras
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE cameras ADD COLUMN record_audio BOOLEAN NOT NULL DEFAULT 0")
+            )
+            logger.info("Migration: added record_audio column to cameras")
+        except Exception:
+            pass
     # Migrate: add face_matches column to motion_events
     async with engine.begin() as conn:
         try:

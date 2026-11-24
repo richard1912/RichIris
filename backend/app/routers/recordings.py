@@ -11,9 +11,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_config
+from app.config import get_config, local_now
 from app.database import get_db
-from app.models import Camera, Recording
+from app.models import Camera, Recording, RivFile
 from app.schemas import RecordingResponse, ThumbnailInfo
 from app.services.benchmark import BenchmarkTrace
 from app.services.playback import get_playback_manager, probe_duration
@@ -21,6 +21,19 @@ from app.services.thumbnail_capture import get_thumbnail_capture
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
+
+# Newest playback request per camera, by arrival order. There is ONE playback
+# session per camera, and requests are handled concurrently, so a slow older
+# request (segment lookup/probe) used to start late and evict the session of a
+# NEWER one, which then failed with a 500 the client showed as an error
+# (pinch-zooming the Android timeline, 2026-11-14). The newest request now
+# always wins and a superseded one gets 409, which clients drop or retry.
+_playback_seq = 0
+_latest_playback_req: dict[int, int] = {}
+
+
+def _superseded() -> HTTPException:
+    return HTTPException(status_code=409, detail="Superseded by a newer playback request")
 
 
 @router.get("/{camera_id}/dates", response_model=list[str])
@@ -36,7 +49,12 @@ async def list_recording_dates(camera_id: int, db: AsyncSession = Depends(get_db
         .where(Recording.camera_id == camera_id)
         .order_by(date_col.desc())
     )
-    dates = [str(row[0]) for row in result.all()]
+    dates = {str(row[0]) for row in result.all()}
+    riv_col = func.date(RivFile.start_time).label("riv_date")
+    riv = await db.execute(select(distinct(riv_col)).where(
+        RivFile.camera_id == camera_id, RivFile.stream == "s1"))
+    dates |= {str(row[0]) for row in riv.all()}
+    dates = sorted(dates, reverse=True)
     logger.debug("Listed recording dates", extra={"camera_id": camera_id, "count": len(dates)})
     return dates
 
@@ -64,12 +82,163 @@ async def list_segments(
         )
         .order_by(Recording.start_time)
     )
-    segments = result.scalars().all()
+    segments: list = list(result.scalars().all())
+    # RIV footage (main stream) as segments too, so the timeline shows it.
+    # Negative ids keep them apart from MPEG-TS rows; clients only merge by time.
+    riv = await db.execute(
+        select(RivFile).where(RivFile.camera_id == camera_id, RivFile.stream == "s1",
+                              RivFile.start_time >= start, RivFile.start_time <= end)
+        .order_by(RivFile.start_time))
+    now = local_now()
+    for r in riv.scalars().all():
+        end_time = r.end_time or (now if r.in_progress else None)
+        segments.append(RecordingResponse(
+            id=-r.id, camera_id=r.camera_id, file_path=r.file_path, start_time=r.start_time,
+            end_time=end_time, file_size=r.file_size,
+            duration=r.duration if r.duration is not None else (
+                (end_time - r.start_time).total_seconds() if end_time else None),
+            in_progress=r.in_progress))
+    segments.sort(key=lambda x: x.start_time)
     logger.debug(
         "Listed segments",
         extra={"camera_id": camera_id, "date": str(date), "count": len(segments)},
     )
     return segments
+
+
+# Forward requests closer than this to the end of a closed segment start at
+# the next segment instead (see start_playback_session).
+SEGMENT_TAIL_SECONDS = 1.5
+
+
+async def _riv_playback(camera: Camera, start: datetime, quality: str,
+                        direction: str, stream: str, speed: int = 1) -> dict | None:
+    """Serve from RIV when it holds the footage (services/riv/serve.py).
+
+    Same JSON contract as a session, so clients need no change: the URL is a
+    continuous fMP4 whose position 0 is the keyframe at ``segment_start``
+    (exact), ``seek_seconds`` is 0, and it runs across file boundaries and
+    into live. No ffmpeg, no session, nothing to evict. ``segment_end`` is
+    where the continuous footage stops (a gap), which is where a client asks
+    again; ``has_more`` is false while the stream reaches live.
+
+    Direct quality, forward only for now; everything else uses the MPEG-TS
+    path while the camera still records it ("shadow").
+    """
+    fmt = camera.rec_format or "ts"
+    if fmt == "ts":
+        return None
+    from app.routers.riv import to_iso, to_ms
+    from app.services.riv.serve import find_run
+    start_ms = to_ms(start.isoformat())
+    if direction == "backward":
+        return await _riv_reverse(camera, start_ms, stream, fmt)
+    if speed >= 8:
+        # Keyframe fast forward (any quality: it is one keyframe per GOP).
+        run = await find_run(camera.id, stream, start_ms)
+        if run is None or (fmt == "shadow" and run.start_ms > start_ms + 5_000):
+            return None
+        seg_start = to_iso(run.start_ms)
+        return {
+            "segment_url": f"/api/riv/{camera.id}/stream.mp4?start={seg_start}&stream={stream}&speed={speed}",
+            "seek_seconds": 0.0, "segment_start": seg_start,
+            "segment_end": to_iso(run.end_ms), "has_more": False,
+            "direction": "forward", "format": "riv", "speed": speed,
+        }
+    if quality != "direct":
+        return await _riv_transcoded(camera, start_ms, stream, quality, fmt)
+    run = await find_run(camera.id, stream, start_ms)
+    if run is None:
+        return None
+    if fmt == "shadow" and run.start_ms > start_ms + 5_000:
+        return None     # RIV starts later than asked: the .ts may have it
+    seg_start = to_iso(run.start_ms)
+    return {
+        "segment_url": f"/api/riv/{camera.id}/stream.mp4?start={seg_start}&stream={stream}",
+        "seek_seconds": 0.0,
+        "segment_start": seg_start,
+        "segment_end": to_iso(run.end_ms),
+        "has_more": not run.live,
+        "direction": "forward",
+        "format": "riv",
+    }
+
+
+async def _riv_reverse(camera: Camera, start_ms: int, stream: str, fmt: str) -> dict | None:
+    """Reverse from RIV: keyframe-aligned chunks, each read from the RIV
+    stream endpoint between two keyframes (no -ss, no mid-GOP decoder starts)."""
+    from app.config import get_bootstrap
+    from app.routers.riv import to_iso
+    from app.services.riv.serve import reverse_chunks
+    found = await reverse_chunks(camera.id, stream, start_ms)
+    if found is None:
+        return None
+    chunks, has_more = found
+    if fmt == "shadow" and chunks[0][1] < start_ms - 5_000:
+        return None
+    base = f"http://127.0.0.1:{get_bootstrap().port}/api/riv/{camera.id}/stream.mp4"
+    plan = [(float(s), (e - s) / 1000) for s, e in chunks]
+
+    def input_for(seek: float, duration: float) -> list[str]:
+        s_ms = int(seek)
+        e_ms = s_ms + int(round(duration * 1000))
+        return ["-i", f"{base}?start={to_iso(s_ms)}&end={to_iso(e_ms)}&stream={stream}"]
+
+    earliest = chunks[-1][0]
+    newest = chunks[0][1]
+    key = f"riv-{camera.id}-{stream}-{newest}-backward"
+    session_id = hashlib.md5(key.encode()).hexdigest()[:12]
+    mgr = get_playback_manager()
+    session = await mgr.start_session(
+        session_id=session_id, segment_paths=[], seek_seconds=(newest - earliest) / 1000,
+        quality="direct", camera_id=camera.id, direction="backward",
+        reverse_plan=plan, reverse_input=input_for,
+    )
+    await session._ready_event.wait()
+    if not session.ready:
+        raise HTTPException(status_code=500, detail="Reverse render failed")
+    return {
+        "segment_url": f"/api/recordings/playback/{session_id}/playback.mp4",
+        "seek_seconds": (newest - earliest) / 1000,
+        "segment_start": to_iso(earliest),
+        "segment_end": to_iso(newest),
+        "has_more": has_more,
+        "direction": "backward",
+        "format": "riv",
+    }
+
+
+async def _riv_transcoded(camera: Camera, start_ms: int, stream: str, quality: str,
+                          fmt: str) -> dict | None:
+    """Transcoded qualities from RIV: the same ffmpeg presets, reading the
+    continuous RIV stream (local HTTP) instead of -ss into a .ts file."""
+    from app.config import get_bootstrap
+    from app.routers.riv import to_iso
+    from app.services.riv.serve import find_run
+    run = await find_run(camera.id, stream, start_ms)
+    if run is None or (fmt == "shadow" and run.start_ms > start_ms + 5_000):
+        return None
+    src = (f"http://127.0.0.1:{get_bootstrap().port}/api/riv/{camera.id}/stream.mp4"
+           f"?start={to_iso(run.start_ms)}&stream={stream}")
+    key = f"riv-{camera.id}-{stream}-{run.start_ms}-{quality}"
+    session_id = hashlib.md5(key.encode()).hexdigest()[:12]
+    mgr = get_playback_manager()
+    session = await mgr.start_session(
+        session_id=session_id, segment_paths=[src], seek_seconds=0.0,
+        quality=quality, camera_id=camera.id, direction="forward",
+    )
+    await session._ready_event.wait()
+    if not session.ready:
+        raise HTTPException(status_code=500, detail="Playback transcode failed")
+    return {
+        "segment_url": f"/api/recordings/playback/{session_id}/playback.mp4",
+        "seek_seconds": 0.0,
+        "segment_start": to_iso(run.start_ms),
+        "segment_end": to_iso(run.end_ms),
+        "has_more": not run.live,
+        "direction": "forward",
+        "format": "riv",
+    }
 
 
 @router.post("/{camera_id}/playback")
@@ -78,6 +247,8 @@ async def start_playback_session(
     start: datetime = Query(..., description="Start time ISO format"),
     quality: str = Query("direct", description="Quality tier: direct, high, low, ultralow"),
     direction: str = Query("forward", description="forward, or backward for a server-rendered reverse stream"),
+    stream: str = Query("s1", pattern="^s[12]$", description="RIV only: s1 main, s2 sub stream"),
+    speed: int = Query(1, ge=1, le=64, description="RIV only: >= 8 = keyframe fast forward"),
     x_bench_id: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
@@ -92,9 +263,20 @@ async def start_playback_session(
     bench = BenchmarkTrace(x_bench_id, camera_id=camera_id, quality=quality)
     bench.mark("request_received", start=start.isoformat())
 
+    global _playback_seq
+    _playback_seq += 1
+    req_seq = _playback_seq
+    _latest_playback_req[camera_id] = req_seq
+
     camera = await db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
+
+    riv = await _riv_playback(camera, start, quality, direction, stream, speed)
+    if riv is not None:
+        bench.mark("riv_resolved")
+        bench.summary()
+        return riv
 
     # Find the segment that contains 'start'
     result = await db.execute(
@@ -156,12 +338,45 @@ async def start_playback_session(
     if not seg:
         raise HTTPException(status_code=404, detail="No recordings in range")
 
+    # The segment after this one, if any. Its existence also tells us this
+    # segment is no longer being written, whatever its in_progress flag says:
+    # the scanner only clears that flag a minute or two after the rollover.
+    result = await db.execute(
+        select(Recording)
+        .where(
+            Recording.camera_id == camera_id,
+            Recording.start_time > seg.start_time,
+        )
+        .order_by(Recording.start_time)
+        .limit(1)
+    )
+    nxt = result.scalars().first()
+    growing = bool(seg.in_progress) and nxt is None
+
+    # A forward request that lands in the last moments of a FINISHED segment
+    # must roll into the next one. The grid continues on its master clock,
+    # which can sit a few ms before this camera's segment end. Two freezes
+    # came from serving that tail (both PTZ 49, 2026-11-18): a closed segment
+    # gave an empty fMP4, so the player never reported "completed" (06:06);
+    # and a just-rolled segment still flagged in_progress was clamped 3 s
+    # back, so the last seconds replayed in a loop (09:46).
+    if direction != "backward" and not growing and nxt is not None:
+        end = seg.end_time
+        if seg.in_progress:
+            actual = await probe_duration(seg.file_path)
+            if actual is not None:
+                end = seg.start_time + timedelta(seconds=actual)
+        if end and (end - start).total_seconds() < SEGMENT_TAIL_SECONDS:
+            if Path(nxt.file_path).exists():
+                seg = nxt
+                growing = bool(seg.in_progress)
+
     if not Path(seg.file_path).exists():
         raise HTTPException(status_code=404, detail="Recording file missing")
 
     seek_seconds = max(0.0, (start - seg.start_time).total_seconds())
     seg_end = seg.end_time or (seg.start_time + timedelta(seconds=seg.duration or 900))
-    if direction != "backward" and seg.in_progress:
+    if direction != "backward" and growing:
         # Never seek past what is on disk: ffmpeg would read to EOF and emit
         # nothing, and the session would fail as "transcode failed". Stay a
         # couple of seconds inside so there is a keyframe to land on.
@@ -183,7 +398,9 @@ async def start_playback_session(
     if direction == "backward":
         more_cond = Recording.start_time < seg.start_time
     else:
-        more_cond = Recording.start_time >= seg_end
+        # Not ">= seg_end": a segment's probed end can overlap the next
+        # one's start by up to a second, which hid the only later segment.
+        more_cond = Recording.start_time > seg.start_time
     has_more_result = await db.execute(
         select(Recording.id)
         .where(Recording.camera_id == camera_id, more_cond)
@@ -197,6 +414,11 @@ async def start_playback_session(
     # search a raw .ts for the target PTS). Transcoded = HEVC NVENC encode.
     session_key = f"{seg.id}-{quality}-{seek_seconds:.0f}-{direction}"
     session_id = hashlib.md5(session_key.encode()).hexdigest()[:12]
+
+    if _latest_playback_req.get(camera_id) != req_seq:
+        # A newer request arrived while we were resolving the segment: do not
+        # start (and so do not evict the newer request's session).
+        raise _superseded()
 
     mgr = get_playback_manager()
     session = await mgr.start_session(
@@ -215,6 +437,9 @@ async def start_playback_session(
     bench.mark("ready_event_set", ready=session.ready)
     if not session.ready:
         bench.summary()
+        if _latest_playback_req.get(camera_id) != req_seq or mgr.get_session(session_id) is not session:
+            # Evicted before it produced output: not a failure, just replaced.
+            raise _superseded()
         raise HTTPException(status_code=500, detail="Playback transcode failed")
 
     logger.info(

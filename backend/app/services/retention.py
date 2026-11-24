@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
-from app.models import Recording
+from app.models import Recording, RivFile
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +51,21 @@ async def _delete_by_age(session: AsyncSession, max_age_days: int) -> tuple[int,
         select(Recording).where(Recording.start_time < cutoff)
     )
     old_recordings = result.scalars().all()
+    old_riv = (await session.execute(
+        select(RivFile).where(RivFile.start_time < cutoff, RivFile.in_progress == False)  # noqa: E712
+    )).scalars().all()
 
-    if not old_recordings:
+    if not old_recordings and not old_riv:
         return 0, 0
 
-    deleted, freed = _delete_recordings(old_recordings)
+    deleted, freed = _delete_recordings(list(old_recordings) + list(old_riv))
 
     ids = [r.id for r in old_recordings]
-    await session.execute(delete(Recording).where(Recording.id.in_(ids)))
+    if ids:
+        await session.execute(delete(Recording).where(Recording.id.in_(ids)))
+    riv_ids = [r.id for r in old_riv]
+    if riv_ids:
+        await session.execute(delete(RivFile).where(RivFile.id.in_(riv_ids)))
 
     logger.info(
         "Age-based retention",
@@ -75,6 +82,9 @@ async def _delete_by_storage(session: AsyncSession, max_storage_gb: int) -> tupl
         select(func.coalesce(func.sum(Recording.file_size), 0))
     )
     total_size = total_result.scalar()
+    riv_total = (await session.execute(
+        select(func.coalesce(func.sum(RivFile.file_size), 0)))).scalar()
+    total_size += riv_total
 
     if total_size <= max_bytes:
         return 0, 0
@@ -89,7 +99,11 @@ async def _delete_by_storage(session: AsyncSession, max_storage_gb: int) -> tupl
     result = await session.execute(
         select(Recording).order_by(Recording.start_time.asc())
     )
-    all_recordings = result.scalars().all()
+    all_recordings = list(result.scalars().all())
+    all_recordings += (await session.execute(
+        select(RivFile).where(RivFile.in_progress == False)  # noqa: E712
+    )).scalars().all()
+    all_recordings.sort(key=lambda r: r.start_time)
 
     to_delete = []
     freed_so_far = 0
@@ -103,8 +117,12 @@ async def _delete_by_storage(session: AsyncSession, max_storage_gb: int) -> tupl
         return 0, 0
 
     deleted, freed = _delete_recordings(to_delete)
-    ids = [r.id for r in to_delete]
-    await session.execute(delete(Recording).where(Recording.id.in_(ids)))
+    ids = [r.id for r in to_delete if isinstance(r, Recording)]
+    if ids:
+        await session.execute(delete(Recording).where(Recording.id.in_(ids)))
+    riv_ids = [r.id for r in to_delete if isinstance(r, RivFile)]
+    if riv_ids:
+        await session.execute(delete(RivFile).where(RivFile.id.in_(riv_ids)))
 
     logger.info(
         "Storage-based retention",

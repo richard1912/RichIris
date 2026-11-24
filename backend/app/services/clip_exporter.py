@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_config
+from app.services.ffmpeg import TS_INPUT_ARGS, ts_audio_bsf_args
 from app.models import Camera, ClipExport, Recording
 from app.services.ffmpeg import sanitize_camera_name
 from app.services.job_object import assign_to_job
@@ -105,6 +106,48 @@ async def _build_camera_concat(
 
 
 MP4_TIMESCALE = 90000  # fine enough that VFR camera timestamps never collide
+
+
+async def _riv_source(camera: Camera | None, start: datetime, end: datetime
+                      ) -> tuple[str, float, str] | None:
+    """(local RIV stream URL, seconds from its first frame to ``start``) when
+    this camera's footage for the window is in RIV, else None.
+
+    RIV is used when the camera records only RIV, or records both ("shadow")
+    and RIV covers the start. The stream begins on the keyframe at or before
+    ``start``; the offset is exact (RIV stores each keyframe's wall time).
+    """
+    fmt = (camera.rec_format if camera else "ts") or "ts"
+    if fmt == "ts":
+        return None
+    from app.config import get_bootstrap
+    from app.routers.riv import to_iso, to_ms
+    from app.services.riv.serve import find_run
+    start_ms, end_ms = to_ms(start.isoformat()), to_ms(end.isoformat())
+    run = await find_run(camera.id, "s1", start_ms)
+    if run is None or run.start_ms >= end_ms:
+        return None
+    if fmt == "shadow" and run.start_ms > start_ms + 5_000:
+        return None
+    url = (f"http://127.0.0.1:{get_bootstrap().port}/api/riv/{camera.id}/stream.mp4"
+           f"?start={to_iso(run.start_ms)}&end={to_iso(end_ms)}&stream=s1")
+    from app.services.riv.serve import video_codec
+    codec = await asyncio.to_thread(video_codec, run.sources[0].path)
+    return url, max(0.0, (start_ms - run.start_ms) / 1000), codec
+
+
+async def _export_riv(url: str, output_file: Path, config, codec: str = "") -> tuple[int, str]:
+    """Single copy pass. The stored fragments carry the camera's real
+    timestamps, so the MPEG-TS re-time pass is unnecessary; the clip starts on
+    the keyframe at or before the requested time (at most one GOP early)."""
+    return await _run_ffmpeg([
+        config.ffmpeg.path, "-y", "-i", url,
+        "-map", "0:v", "-map", "0:a?", "-c", "copy",
+        # hev1 (go2rtc's sample entry) is rejected by Safari; hvc1 is the
+        # interoperable tag. Only valid on HEVC.
+        *(["-tag:v", "hvc1"] if codec in ("hev1", "hvc1") else []),
+        "-movflags", "+faststart", str(output_file),
+    ])
 
 
 async def _probe_mp4_cadence(path: Path, config) -> tuple[str | None, int | None]:
@@ -225,6 +268,10 @@ async def export_grid_clip(clip_id: int, session_factory) -> None:
             for idx, cam_id in enumerate(camera_ids):
                 camera = await session.get(Camera, cam_id)
                 cam_name = camera.name if camera else f"Camera {cam_id}"
+                riv = await _riv_source(camera, clip.start_time, clip.end_time)
+                if riv is not None:
+                    cells.append({"concat": None, "riv": riv[0], "ss": riv[1], "name": cam_name})
+                    continue
                 prepared = await _build_camera_concat(
                     session, cam_id, clip.start_time, clip.end_time,
                     exports_dir, f"{clip_id}_{idx}",
@@ -235,7 +282,7 @@ async def export_grid_clip(clip_id: int, session_factory) -> None:
                 else:
                     cells.append({"concat": None, "ss": 0.0, "name": cam_name})
 
-            if all(c["concat"] is None for c in cells):
+            if all(c["concat"] is None and not c.get("riv") for c in cells):
                 clip.status = "failed"
                 await session.commit()
                 logger.warning("No footage for any grid camera", extra={"clip_id": clip_id})
@@ -256,7 +303,18 @@ async def export_grid_clip(clip_id: int, session_factory) -> None:
             overlay_chain = "[0:v]"
             input_index = 1
             for k, cell in enumerate(cells):
-                if cell["concat"] is not None:
+                if cell.get("riv"):
+                    # RIV starts on a keyframe; trim the exact offset in the
+                    # filter (the stream is not seekable) so cells stay in sync.
+                    cmd_inputs += ["-i", cell["riv"]]
+                    filters.append(
+                        f"[{input_index}:v]trim=start={cell['ss']:.3f},setpts=PTS-STARTPTS,"
+                        f"scale={GRID_CELL_W}:{GRID_CELL_H}:"
+                        f"force_original_aspect_ratio=decrease,"
+                        f"pad={GRID_CELL_W}:{GRID_CELL_H}:(ow-iw)/2:(oh-ih)/2,"
+                        f"setsar=1,fps={GRID_FPS}[c{k}]"
+                    )
+                elif cell["concat"] is not None:
                     cmd_inputs += [
                         "-f", "concat", "-safe", "0",
                         "-ss", f"{cell['ss']:.3f}",
@@ -377,6 +435,26 @@ async def export_clip(clip_id: int, session_factory) -> None:
         await session.commit()
 
         try:
+            camera = await session.get(Camera, clip.camera_id)
+            riv = await _riv_source(camera, clip.start_time, clip.end_time)
+            if riv is not None:
+                exports_dir = get_exports_dir()
+                cam_name = camera.name
+                output_file = exports_dir / (
+                    f"{cam_name} {clip.start_time.strftime('%Y-%m-%d')} "
+                    f"{clip.start_time.strftime('%H.%M')} - {clip.end_time.strftime('%H.%M')}.mp4")
+                rc, err = await _export_riv(riv[0], output_file, config, riv[2])
+                if rc == 0 and output_file.exists() and output_file.stat().st_size > 0:
+                    clip.status = "done"
+                    clip.file_path = str(output_file)
+                    await session.commit()
+                    logger.info("Clip export completed (RIV)",
+                                extra={"clip_id": clip_id, "file": str(output_file)})
+                    return
+                logger.error("RIV clip export failed, trying MPEG-TS",
+                             extra={"clip_id": clip_id, "stderr": err[-500:]})
+                output_file.unlink(missing_ok=True)
+
             segments = await find_overlapping_segments(
                 session, clip.camera_id, clip.start_time, clip.end_time
             )
@@ -422,13 +500,14 @@ async def export_clip(clip_id: int, session_factory) -> None:
                 staged_file = exports_dir / f"_staged_{clip_id}.mp4"
                 stage_cmd = [
                     config.ffmpeg.path,
-                    "-y",
+                    "-y", *TS_INPUT_ARGS,
                     "-f", "concat",
                     "-safe", "0",
                     "-i", str(concat_file),
                     "-ss", f"{ss_offset:.3f}",
                     "-t", f"{clip_duration:.3f}",
                     "-c", "copy",
+                    *ts_audio_bsf_args([s.file_path for s in segments]),
                     "-avoid_negative_ts", "make_zero",
                     "-video_track_timescale", str(MP4_TIMESCALE),
                     str(staged_file),

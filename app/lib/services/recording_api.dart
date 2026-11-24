@@ -24,13 +24,17 @@ class RecordingApi {
 
   Future<PlaybackSession> startPlayback(
       int cameraId, String start, String quality,
-      {String direction = 'forward', String? benchId}) async {
+      {String direction = 'forward', String? benchId, String stream = 's1',
+      int speed = 1}) async {
     final resp = await _client.dio.post(
       '/api/recordings/$cameraId/playback',
       queryParameters: {
         'start': start,
         'quality': quality,
         'direction': direction,
+        // RIV recordings only (ignored for MPEG-TS): s1 main, s2 sub stream.
+        'stream': stream,
+        if (speed > 1) 'speed': speed,
       },
       options: benchId != null
           ? Options(headers: {'X-Bench-Id': benchId})

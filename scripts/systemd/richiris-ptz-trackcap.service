@@ -1,0 +1,16 @@
+[Unit]
+Description=RichIris PTZ 49 tracking cap controller (one person = follow, several = cycle)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=richard
+Group=richard
+ExecStart=/opt/richiris/venv/bin/python /opt/richiris/scripts/ptz_track_cap.py --daemon
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

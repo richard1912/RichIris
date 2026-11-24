@@ -45,7 +45,15 @@ class TimelinePainter extends CustomPainter {
 
     // Adaptive interval based on zoom
     double interval;
-    if (vpHours <= 2) {
+    if (vpHours <= 2 / 60) {
+      interval = 10 / 3600; // 10 s
+    } else if (vpHours <= 5 / 60) {
+      interval = 30 / 3600; // 30 s
+    } else if (vpHours <= 12 / 60) {
+      interval = 1 / 60; // 1 min
+    } else if (vpHours <= 0.5) {
+      interval = 2 / 60; // 2 min
+    } else if (vpHours <= 2) {
       interval = 5 / 60; // 5 min
     } else if (vpHours <= 4) {
       interval = 15 / 60; // 15 min
@@ -66,10 +74,12 @@ class TimelinePainter extends CustomPainter {
         markerPaint,
       );
 
-      final totalMinutes = (h * 60).round();
-      final hours = totalMinutes ~/ 60;
-      final minutes = totalMinutes % 60;
-      final label = '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}';
+      final totalSecs = (h * 3600).round();
+      final hours = totalSecs ~/ 3600;
+      final minutes = (totalSecs % 3600) ~/ 60;
+      final secs = totalSecs % 60;
+      var label = '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}';
+      if (interval < 1 / 60) label += ':${secs.toString().padLeft(2, '0')}';
       final tp = TextPainter(
         text: TextSpan(text: label, style: textStyle),
         textDirection: TextDirection.ltr,

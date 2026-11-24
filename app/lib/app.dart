@@ -25,6 +25,9 @@ import 'screens/add_cameras_wizard_screen.dart';
 import 'screens/camera_form_screen.dart';
 import 'screens/system_settings_screen.dart';
 import 'screens/faces_screen.dart';
+import 'screens/events_screen.dart';
+import 'models/guard_event.dart';
+import 'services/events_api.dart';
 import 'services/api_client.dart';
 import 'services/camera_api.dart';
 import 'services/face_api.dart';
@@ -32,6 +35,7 @@ import 'services/group_api.dart';
 import 'services/recording_api.dart';
 import 'services/clip_api.dart';
 import 'services/motion_api.dart';
+import 'services/ptz_api.dart';
 import 'services/backup_api.dart';
 import 'services/settings_api.dart';
 import 'services/system_api.dart';
@@ -214,7 +218,14 @@ class RichIrisAppState extends State<RichIrisApp> with WidgetsBindingObserver {
           // so the first click into any camera has instant segments + motion
           // + thumbnails from cache. See services/timeline_cache.dart.
           final today = todayDate(tzOffsetMs: _tzOffsetMs);
-          final enabled = _cameras.where((c) => c.enabled).toList();
+          var enabled = _cameras.where((c) => c.enabled).toList();
+          // Only preload timelines for the saved group view; other cameras
+          // load theirs when they are first shown.
+          final savedGroup = int.tryParse(
+              (await SharedPreferences.getInstance()).getString(kSelectedGroupKey) ?? '');
+          if (savedGroup != null && enabled.any((c) => c.groupId == savedGroup)) {
+            enabled = enabled.where((c) => c.groupId == savedGroup).toList();
+          }
           debugPrint(
               '[TLCACHE] kicking off prewarm after _fetchInitialData cameras=${enabled.length} date=$today');
           unawaited(_timelineCache!.prewarmAll(enabled, today));
@@ -495,10 +506,42 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
   int? _selectedCameraId;
   int? _fullscreenCameraId;
   int? _selectedGroupId;
+  // False until the saved group has been read. Until then the grid gets no
+  // cameras: showing "all" for those first frames opened every stream.
+  bool _groupLoaded = false;
+
+  /// The saved group, unless it no longer exists. The saved id is accepted
+  /// before the group list has arrived (it used to be dropped then, which is
+  /// why the selection did not survive a restart); once groups are known, an
+  /// id that is not among them falls back to "all".
+  int? get _viewGroupId {
+    final id = _selectedGroupId;
+    if (id == null) return null;
+    if (widget.groups.isNotEmpty) {
+      return widget.groups.any((g) => g.id == id) ? id : null;
+    }
+    if (widget.cameras.isEmpty) return id;
+    return widget.cameras.any((c) => c.groupId == id) ? id : null;
+  }
+
+  /// Cameras of the selected group view (all cameras when no group is selected).
+  List<Camera> get _viewCameras {
+    if (!_groupLoaded) return const [];
+    final id = _viewGroupId;
+    return id == null
+        ? widget.cameras
+        : widget.cameras.where((c) => c.groupId == id).toList();
+  }
   final Map<int?, String> _layoutIdByGroup = {};
   bool _isDragging = false;
   bool _showSystem = false;
   bool _showFaces = false;
+
+  /// The Events pane is open. It stays mounted (offstage) under a fullscreen
+  /// playback started from it, so backing out returns to the same place in the
+  /// feed. The grid is NOT mounted while this is set.
+  bool _showEvents = false;
+  late final EventsApi _eventsApi = EventsApi(widget.apiClient);
   final Map<int, Player> _livePlayers = {};
   final Map<int, VideoController> _liveControllers = {};
   Quality? _frozenGridQuality; // quality the grid last used; frozen while fullscreen
@@ -576,7 +619,8 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
     int? initialGroupId;
     if (saved != null && saved != 'all') {
       final id = int.tryParse(saved);
-      if (id != null && widget.groups.any((g) => g.id == id)) {
+      if (id != null &&
+          (widget.groups.isEmpty || widget.groups.any((g) => g.id == id))) {
         initialGroupId = id;
       }
     }
@@ -584,7 +628,10 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
     // right number of slots on first paint.
     await _ensureLayoutLoaded(initialGroupId, prefs);
     if (mounted) {
-      setState(() => _selectedGroupId = initialGroupId);
+      setState(() {
+        _selectedGroupId = initialGroupId;
+        _groupLoaded = true;
+      });
     }
   }
 
@@ -610,7 +657,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
   }
 
   Future<void> _onLayoutChanged(String id) async {
-    final groupId = _selectedGroupId;
+    final groupId = _viewGroupId;
     setState(() => _layoutIdByGroup[groupId] = id);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(gridLayoutPrefKey(groupId), id);
@@ -811,7 +858,44 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
     });
   }
 
+  /// Events pane -> fullscreen playback of that camera at the event. Starts a
+  /// few seconds early, like a timeline event tap: the detection stream lags
+  /// the recording and direct playback snaps to a keyframe.
+  void _playEventRecording(GuardEvent event) {
+    if (!widget.cameras.any((c) => c.id == event.cameraId)) return;
+    final start = DateTime.tryParse(event.startTime);
+    if (start == null) return;
+    _fullscreenRef.isLive = false;
+    _fullscreenRef.getNvrTime = null;
+    _fullscreenRef.ownedSession = false;
+    setState(() {
+      _fullscreenCameraId = event.cameraId;
+      _fullscreenInitialTime =
+          formatLocalISO(start.subtract(const Duration(seconds: 5)));
+      _handoffPlayer = null;
+      _handoffController = null;
+      _handoffStartTime = null;
+    });
+  }
+
   void _exitFullscreen() {
+    if (_showEvents) {
+      // Opened from the Events pane: there is no grid underneath to hand the
+      // playback back to. Return to the feed, and put the app-level live flag
+      // back so the grid comes up live when Events is closed.
+      _fullscreenRef.isLive = true;
+      _fullscreenRef.getNvrTime = null;
+      _fullscreenRef.ownedSession = false;
+      widget.onLiveStateChanged(true);
+      setState(() {
+        _fullscreenCameraId = null;
+        _fullscreenInitialTime = null;
+        _handoffPlayer = null;
+        _handoffController = null;
+        _handoffStartTime = null;
+      });
+      return;
+    }
     // Transfer fullscreen playback state back to grid
     if (!_fullscreenRef.isLive && _fullscreenRef.getNvrTime != null) {
       // Fullscreen was in playback — restart grid at fullscreen's current time
@@ -848,7 +932,12 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
   /// comes up live. The grid's player for the old camera is left to
   /// _exitFullscreen's resume logic, same as backing out.
   void _switchFullscreenCamera(int delta) {
-    final cams = widget.cameras.where((c) => c.enabled).toList();
+    // Cycle within the selected group view; a camera opened from outside it
+    // (an event's "Play recording") cycles through everything.
+    var cams = _viewCameras.where((c) => c.enabled).toList();
+    if (!cams.any((c) => c.id == _fullscreenCameraId)) {
+      cams = widget.cameras.where((c) => c.enabled).toList();
+    }
     final currentId = _fullscreenCameraId;
     if (currentId == null || cams.length < 2) return;
     final idx = cams.indexWhere((c) => c.id == currentId);
@@ -922,20 +1011,26 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
       );
     }
 
-    // Pre-create players for all enabled, running cameras
+    // Players exist only for the cameras of the selected group view (plus the
+    // one in fullscreen). A pooled player keeps streaming and decoding after
+    // its tile is gone, so cameras outside the view used to stay live in the
+    // background for as long as the app ran.
+    final inView = _viewCameras.map((c) => c.id).toSet();
+    if (_fullscreenCameraId != null) inView.add(_fullscreenCameraId!);
     for (final cam in widget.cameras) {
+      if (!inView.contains(cam.id)) continue;
       final stream = _streamForCamera(cam.id);
       if (cam.enabled && (stream?.running ?? false)) {
         _ensureLivePlayer(cam.id);
       }
     }
-    // Prune players + timeline cache entries for removed cameras
-    final cameraIds = widget.cameras.map((c) => c.id).toSet();
-    _livePlayers.keys.where((id) => !cameraIds.contains(id)).toList().forEach((id) {
+    _livePlayers.keys.where((id) => !inView.contains(id)).toList().forEach((id) {
       _livePlayers.remove(id)?.dispose();
       _liveControllers.remove(id);
-      widget.timelineCache.dropCamera(id);
     });
+    // Timeline cache entries for removed cameras
+    final cameraIds = widget.cameras.map((c) => c.id).toSet();
+    widget.timelineCache.dropMissing(cameraIds);
 
     // Freeze grid quality while fullscreen is active so grid streams
     // don't compete with the fullscreen feed on quality changes.
@@ -963,6 +1058,8 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
         if (didPop) return;
         if (_fullscreenCameraId != null) {
           _exitFullscreen();
+        } else if (_showEvents) {
+          setState(() => _showEvents = false);
         } else if (_selectedCameraId != null) {
           setState(() => _selectedCameraId = null);
         } else if (isAndroid) {
@@ -992,19 +1089,17 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
         // giving the fullscreen one its own overlay canvas and paints the app
         // background straight over it, which is why fullscreen came up black.
         // Unmounting the grid costs a second of re-connect on the way back.
-        if (!isWeb || fullscreenCam == null)
+        if (!_showEvents && (!isWeb || fullscreenCam == null))
         Offstage(
           offstage: fullscreenCam != null,
           child: HomeScreen(
             key: ValueKey('home-$_liveEpoch'),
-            cameras: _selectedGroupId != null
-                ? widget.cameras.where((c) => c.groupId == _selectedGroupId).toList()
-                : widget.cameras,
+            cameras: _viewCameras,
             allCameras: widget.cameras,
             groups: widget.groups,
-            selectedGroupId: _selectedGroupId,
+            selectedGroupId: _viewGroupId,
             onGroupSelected: _onGroupSelected,
-            layoutId: _layoutIdByGroup[_selectedGroupId] ?? kDefaultLayoutId,
+            layoutId: _layoutIdByGroup[_viewGroupId] ?? kDefaultLayoutId,
             onLayoutChanged: _onLayoutChanged,
             onGroupsChanged: () => widget.onRefreshGroups(),
             groupApi: widget.groupApi,
@@ -1038,7 +1133,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
                   // Hand off the grid's player for seamless transition
                   pbPlayer = _gridRef.getPlayer?.call(id);
                   pbController = _gridRef.getController?.call(id);
-                  pbStartTime = _gridRef.playbackStartIso;
+                  pbStartTime = _gridRef.getStartIso?.call(id) ?? _gridRef.playbackStartIso;
                 }
                 setState(() {
                   _fullscreenCameraId = id;
@@ -1056,6 +1151,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
             onStreamSourceChanged: widget.onStreamSourceChanged,
             onOpenSystem: () => setState(() => _showSystem = true),
             onOpenFaces: () => setState(() => _showFaces = true),
+            onOpenEvents: () => setState(() => _showEvents = true),
             onOpenSystemSettings: () {
               Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => SystemSettingsScreen(
@@ -1136,7 +1232,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
                     existingCameraCount: widget.cameras.length,
                     groups: widget.groups,
                     groupApi: widget.groupApi,
-                    initialGroupId: _selectedGroupId,
+                    initialGroupId: _viewGroupId,
                   ),
                 ));
               } else if (choice == 'manual') {
@@ -1144,7 +1240,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
                   builder: (_) => CameraFormScreen(
                       cameraApi: widget.cameraApi, apiClient: widget.apiClient,
                       groups: widget.groups, groupApi: widget.groupApi, faceApi: widget.faceApi,
-                      initialGroupId: _selectedGroupId),
+                      initialGroupId: _viewGroupId),
                 ));
               } else {
                 return;
@@ -1173,6 +1269,18 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
             resumeLiveGen: _resumeLiveGen,
           ),
         ),
+        if (_showEvents)
+          Offstage(
+            offstage: fullscreenCam != null,
+            child: EventsScreen(
+              eventsApi: _eventsApi,
+              cameras: widget.cameras,
+              tzOffsetMs: widget.tzOffsetMs,
+              active: fullscreenCam == null,
+              onBack: () => setState(() => _showEvents = false),
+              onPlayRecording: _playEventRecording,
+            ),
+          ),
         if (fullscreenCam != null)
           PopScope(
             canPop: false,
@@ -1191,6 +1299,7 @@ class _MainNavState extends State<_MainNav> with WidgetsBindingObserver {
             clipApi: widget.clipApi,
             motionApi: widget.motionApi,
             systemApi: widget.systemApi,
+            ptzApi: PtzApi(widget.apiClient),
             timelineCache: widget.timelineCache,
             tzOffsetMs: widget.tzOffsetMs,
             livePlayer: _livePlayers[_fullscreenCameraId],

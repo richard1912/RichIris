@@ -42,7 +42,15 @@ void applyLiveTuning(Player player) {
 
 /// Enable hardware decoding on a playback player.
 void applyHwdec(Player player) {
-  (player.platform as NativePlayer).setProperty('hwdec', 'auto');
+  final mpv = player.platform as NativePlayer;
+  mpv.setProperty('hwdec', 'auto');
+  // No audio track on playback players (they are muted anyway). With audio
+  // selected, mpv's position follows the AUDIO clock, which starts ticking
+  // while the 4K hardware decoder is still initialising - so "position is
+  // moving" did not mean "a video frame is on the texture", and the tile was
+  // uncovered onto an empty (green) surface. Without audio, position only
+  // advances when a video frame is actually shown.
+  mpv.setProperty('aid', 'no');
 }
 
 /// Read an mpv property, or `''` when it is unavailable.

@@ -1,0 +1,8 @@
+[Unit]
+Description=Prius Cam health check (storage, offline, battery, heat, recording)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=richard
+ExecStart=/opt/richiris/venv/bin/python /opt/richiris/scripts/carcam_monitor.py

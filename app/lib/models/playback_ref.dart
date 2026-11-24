@@ -15,6 +15,10 @@ class PlaybackRef {
   /// Detach a player so the source view doesn't dispose it during cleanup.
   void Function(int cameraId)? detachPlayer;
 
+  /// The wall time at which this camera's current player file has position 0
+  /// (changes after a segment continuation, unlike [playbackStartIso]).
+  String? Function(int cameraId)? getStartIso;
+
   /// Session state needed by the receiving view for segment continuation.
   String? playbackStartIso;
   String? segmentEnd;

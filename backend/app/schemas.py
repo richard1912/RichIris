@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class MotionScriptConfig(BaseModel):
@@ -91,6 +91,7 @@ class CameraCreate(BaseModel):
     ai_confidence_threshold: int = 50
     face_recognition: bool = False
     face_match_threshold: int = 50
+    record_audio: bool = False
 
 
 class CameraUpdate(BaseModel):
@@ -112,6 +113,10 @@ class CameraUpdate(BaseModel):
     ai_confidence_threshold: int | None = None
     face_recognition: bool | None = None
     face_match_threshold: int | None = None
+    # "auto" re-detects, "none" switches PTZ off, or a driver name (services/ptz.py).
+    ptz_driver: str | None = None
+    record_audio: bool | None = None
+    rec_format: str | None = Field(default=None, pattern="^(ts|shadow|riv)$")
 
 
 class CameraResponse(BaseModel):
@@ -139,6 +144,10 @@ class CameraResponse(BaseModel):
     face_recognition: bool = False
     face_match_threshold: int = 50
     zone_count: int = 0
+    ptz_driver: str | None = None
+    ptz: bool = False
+    record_audio: bool = False
+    rec_format: str = "ts"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -155,7 +164,72 @@ class CameraResponse(BaseModel):
         data = {c.key: getattr(camera, c.key) for c in camera.__table__.columns}
         data["motion_scripts"] = scripts
         data["zone_count"] = zone_count
+        data["ptz"] = bool(camera.ptz_driver) and camera.ptz_driver != "none"
         return cls(**data)
+
+
+class PtzCapabilitiesResponse(BaseModel):
+    pan_min: float
+    pan_max: float
+    tilt_min: float
+    tilt_max: float
+    zoom_min: float
+    zoom_max: float
+    speed_min: int
+    speed_max: int
+    max_presets: int
+    absolute: bool
+    presets: bool
+
+
+class PtzInfoResponse(BaseModel):
+    driver: str
+    capabilities: PtzCapabilitiesResponse
+
+
+class PtzStatusResponse(BaseModel):
+    pan: float
+    tilt: float
+    zoom: float
+    moving: bool
+
+
+class PtzMoveRequest(BaseModel):
+    # left, right, up, down, up_left, up_right, down_left, down_right, zoom_in, zoom_out
+    direction: str
+    speed: int = Field(default=3, ge=1, le=8)
+    # Seconds until the server stops the move unless `move` is sent again.
+    timeout: float = Field(default=2.5, ge=0.5, le=10.0)
+
+
+class PtzMoveResponse(BaseModel):
+    ok: bool = True
+    timeout: float
+
+
+class PtzPositionRequest(BaseModel):
+    """Absolute target. Omitted axes keep their current value."""
+    pan: float | None = None
+    tilt: float | None = None
+    zoom: float | None = None
+
+
+class PtzPresetCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=40)
+    id: int | None = Field(default=None, ge=1)
+
+
+class PtzPresetResponse(BaseModel):
+    id: int
+    name: str
+    pan: float | None = None
+    tilt: float | None = None
+    zoom: float | None = None
+
+
+class PtzDetectResponse(BaseModel):
+    ptz_driver: str | None
+    ptz: bool
 
 
 class FaceMatchInfo(BaseModel):

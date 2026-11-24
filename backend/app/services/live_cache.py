@@ -394,7 +394,11 @@ class _Subscriber:
 class _StreamBuffer:
     """Init segment + fragments since the last keyframe, plus subscribers."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, sink=None) -> None:
+        # Recording sink (services/riv): called with every fragment that is
+        # kept, after the init repair. This buffer instance is one go2rtc
+        # connection, so it doubles as the RIV "epoch" key.
+        self.sink = sink
         self.name = name
         self.init: bytes | None = None
         # (fragment bytes, starts a video GOP)
@@ -441,7 +445,8 @@ class _StreamBuffer:
             elif btype == b"mdat":
                 if self._pending_moof is not None:
                     self._append(self._pending_moof + box,
-                                 self._pending_has_video and self._pending_is_key)
+                                 self._pending_has_video and self._pending_is_key,
+                                 self._pending_has_video)
                     self._pending_moof = None
         self._tail = buf[consumed:] if consumed < len(buf) else b""
 
@@ -466,7 +471,7 @@ class _StreamBuffer:
         self.fragments.clear()
         self.buffered_bytes = 0
 
-    def _append(self, fragment: bytes, is_key: bool) -> None:
+    def _append(self, fragment: bytes, is_key: bool, has_video: bool = True) -> None:
         if is_key:
             self.last_keyframe_at = time.monotonic()
             if not self._init_checked and self.init is not None:
@@ -479,6 +484,11 @@ class _StreamBuffer:
         elif self.init is None or not self.fragments:
             # Nothing decodable to hang this off yet.
             return
+        if self.sink is not None:
+            try:
+                self.sink(self.name, self, self.init, fragment, is_key, has_video)
+            except Exception:  # recording must never break live view
+                logger.exception("Live cache sink failed", extra={"stream": self.name})
         self.fragments.append((fragment, is_key))
         self.buffered_bytes += len(fragment)
         if is_key:
@@ -568,11 +578,18 @@ class LiveCache:
 
     def __init__(self) -> None:
         self._streams: dict[str, _StreamBuffer] = {}
+        self._sink = None
+
+    def set_sink(self, sink) -> None:
+        """Install the recording sink (RivManager.sink) on every buffer."""
+        self._sink = sink
+        for buf in self._streams.values():
+            buf.sink = sink
 
     def feed(self, stream_name: str, chunk: bytes) -> None:
         buf = self._streams.get(stream_name)
         if buf is None:
-            buf = self._streams[stream_name] = _StreamBuffer(stream_name)
+            buf = self._streams[stream_name] = _StreamBuffer(stream_name, self._sink)
         buf.feed(chunk)
 
     def reset(self, stream_name: str) -> None:

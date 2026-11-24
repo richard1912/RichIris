@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import '../../config/constants.dart';
 import '../../models/motion_event.dart';
@@ -31,6 +32,18 @@ class TimelineController extends ChangeNotifier {
         viewportStart = 0.0;
 
   double get visibleHours => 24.0 / zoomLevel;
+
+  /// True when a RIV recording (negative segment id, see the backend's
+  /// /segments) covers [hour]: the timeline can then show the exact frame.
+  bool rivCovers(double hour) {
+    for (final s in _segments) {
+      if (s.id >= 0) continue;
+      final a = isoToHour(s.startTime);
+      final b = s.endTime != null ? isoToHour(s.endTime!) : a + (s.duration ?? 0) / 3600.0;
+      if (hour >= a && hour <= b) return true;
+    }
+    return false;
+  }
 
   void setSegments(List<RecordingSegment> segments) {
     _segments = segments;
@@ -142,7 +155,9 @@ class TimelineController extends ChangeNotifier {
 
   void zoom(double delta, double anchorPct) {
     final anchorHour = viewportStart + anchorPct * visibleHours;
-    zoomLevel = (zoomLevel + delta).clamp(kMinZoom, kMaxZoom);
+    // Multiplicative, so each wheel notch is the same relative step from a
+    // whole day down to one minute.
+    zoomLevel = (zoomLevel * math.pow(1.25, delta)).clamp(kMinZoom, kMaxZoom);
     viewportStart = (anchorHour - anchorPct * visibleHours).clamp(0.0, 24.0 - visibleHours);
     notifyListeners();
   }

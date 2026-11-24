@@ -1,0 +1,12 @@
+[Unit]
+Description=RichIris backyard lights (camera white lamps on from sunset to sunrise)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/richiris
+
+[Service]
+Type=oneshot
+User=richard
+Group=richard
+ExecStart=/opt/richiris/venv/bin/python "/opt/richiris/Camera Light Control/backyard_lights.py"
+TimeoutStartSec=90

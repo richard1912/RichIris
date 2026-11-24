@@ -13,6 +13,13 @@ class FeatureBadges extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final badges = <IconChip>[];
+    if (camera.hasPtz) {
+      badges.add(const IconChip(
+        icon: Icons.control_camera,
+        color: Color(0xFFF59E0B),
+        tooltip: 'PTZ camera',
+      ));
+    }
     if (camera.motionSensitivity > 0) {
       badges.add(const IconChip(
         icon: Icons.directions_run,

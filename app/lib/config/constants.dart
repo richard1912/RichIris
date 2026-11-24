@@ -45,7 +45,7 @@ extension QualityExt on Quality {
 const List<int> kSpeeds = [-4, -2, -1, 1, 2, 4, 16, 32];
 
 const double kMinZoom = 1.0;
-const double kMaxZoom = 24.0;
+const double kMaxZoom = 1440.0; // 1 minute across the bar
 const double kSegmentMergeGapSeconds = 30.0;
 const int kCameraRefreshMs = 5000;
 const int kSegmentPollMs = 15000;

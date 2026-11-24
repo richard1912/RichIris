@@ -34,6 +34,7 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   late final TextEditingController _nameCtrl;
   final GlobalKey _canvasKey = GlobalKey();
   Uint8List? _snapshot;
+  double _snapshotAspect = 16 / 9;
   bool _loadingSnapshot = true;
   bool _saving = false;
   String? _error;
@@ -62,10 +63,17 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
     try {
       final bytes = await widget.cameraApi.snapshot(
         rtspUrl: widget.camera.rtspUrl,
-        width: 800,
+        width: 1280,
         timeoutS: 10,
       );
-      if (mounted) setState(() { _snapshot = bytes; _loadingSnapshot = false; });
+      final aspect = await _decodeAspect(bytes);
+      if (mounted) {
+        setState(() {
+          _snapshot = bytes;
+          _snapshotAspect = aspect;
+          _loadingSnapshot = false;
+        });
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -74,6 +82,21 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
         });
       }
     }
+  }
+
+  /// Width / height of the snapshot itself. Cameras are not all 16:9 (the
+  /// panorama is about 3.5:1), and zone points are normalized against the
+  /// whole frame, so the canvas must be exactly the picture's shape.
+  Future<double> _decodeAspect(Uint8List bytes) async {
+    try {
+      final image = await decodeImageFromList(bytes);
+      final w = image.width, h = image.height;
+      image.dispose();
+      if (w > 0 && h > 0) return w / h;
+    } catch (_) {
+      // Fall through: Image.memory will show its own error for bad bytes.
+    }
+    return 16 / 9;
   }
 
   Offset _toDisplay(Offset norm) {
@@ -263,7 +286,11 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
       builder: (context, constraints) {
         return Center(
           child: AspectRatio(
-            aspectRatio: 16 / 9,
+            // The canvas IS the image rect: the box takes the snapshot's own
+            // shape (letterboxed inside the available space), so the picture,
+            // the painter and the hit-testing all share one coordinate space
+            // and the frame edges are exactly x/y = 0 and 1.
+            aspectRatio: _snapshotAspect,
             child: LayoutBuilder(
               builder: (ctx, inner) {
                 _canvasSize = Size(inner.maxWidth, inner.maxHeight);
@@ -273,7 +300,7 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
                     children: [
                       Image.memory(
                         _snapshot!,
-                        fit: BoxFit.cover,
+                        fit: BoxFit.fill,
                         gaplessPlayback: true,
                       ),
                       GestureDetector(

@@ -67,6 +67,7 @@ class HomeScreen extends StatefulWidget {
   final VoidCallback onOpenSystemSettings;
   final VoidCallback? onOpenServerSettings;
   final VoidCallback? onOpenFaces;
+  final VoidCallback? onOpenEvents;
   final VoidCallback onAddCamera;
   final ValueChanged<Camera> onEditCamera;
   final ValueChanged<Camera>? onAddToGroup;
@@ -113,6 +114,7 @@ class HomeScreen extends StatefulWidget {
     required this.onOpenSystemSettings,
     this.onOpenServerSettings,
     this.onOpenFaces,
+    this.onOpenEvents,
     required this.onAddCamera,
     required this.onEditCamera,
     this.onAddToGroup,
@@ -137,12 +139,82 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<int, StreamSubscription> _seekSubs = {};
   final Map<int, StreamSubscription> _firstFrameSubs = {};
   final Set<int> _pbLoading = {};
+  // Tiles stay "loading" (spinner) until their player has decoded a frame:
+  // between open() and the first frame the hw surface is empty YUV, which
+  // libmpv shows as a solid green picture.
+  final Map<int, StreamSubscription> _shownSubs = {};
+  final Map<int, Timer> _shownTimers = {};
+
+  /// Cover the tile, open [url], and uncover only once video frames are
+  /// really being shown: the listener is armed after open() has completed (so
+  /// the previous media's positions cannot count), ignores zero, and needs the
+  /// position to move 500 ms past the first new value (same rule as live).
+  void _openCovered(int cameraId, Player player, String url) {
+    _shownSubs[cameraId]?.cancel();
+    _shownTimers[cameraId]?.cancel();
+    if (!_pbLoading.contains(cameraId)) setState(() => _pbLoading.add(cameraId));
+    final t0 = DateTime.now().millisecondsSinceEpoch;
+    int? firstMs, paramsMs;
+    var done = false;
+    StreamSubscription? paramsSub;
+    void release(String why) {
+      if (done) return;
+      done = true;
+      _shownSubs.remove(cameraId)?.cancel();
+      _shownTimers.remove(cameraId)?.cancel();
+      paramsSub?.cancel();
+      if (mounted && _pbLoading.contains(cameraId)) {
+        setState(() => _pbLoading.remove(cameraId));
+      }
+      final now = DateTime.now().millisecondsSinceEpoch;
+      unawaited(widget.systemApi.logClientEvent(event: 'pb_uncover', details: {
+        'camera': cameraId,
+        'why': why,
+        'total_ms': now - t0,
+        'first_pos_ms': firstMs == null ? null : firstMs! - t0,
+        'video_params_ms': paramsMs == null ? null : paramsMs! - t0,
+      }));
+    }
+    _shownTimers[cameraId] = Timer(const Duration(seconds: 10), () => release('timeout'));
+    player.open(Media(url)).then((_) {
+      if (done) return;
+      paramsSub = player.stream.videoParams.listen((p) {
+        if ((p.w ?? 0) > 0) paramsMs ??= DateTime.now().millisecondsSinceEpoch;
+      });
+      Duration? first;
+      _shownSubs[cameraId] = player.stream.position.listen((pos) {
+        if (pos <= Duration.zero) return;
+        if (first == null) {
+          first = pos;
+          firstMs = DateTime.now().millisecondsSinceEpoch;
+        } else if (pos - first! >= const Duration(milliseconds: 500)) {
+          release('playing');
+        } else if (pos < first!) {
+          first = pos;
+        }
+      });
+    });
+  }
+
   final Set<int> _pbFailed = {};
   int _generation = 0;
 
   // Shared playback clock — single source of truth for all cameras
   String? _playbackStartIso;
+  // Where each camera's CURRENT file has position 0. Equal to
+  // _playbackStartIso until a segment continuation opens a new file that
+  // starts at the master time; the playhead must then use the new origin.
+  final Map<int, String> _fileStartIso = {};
   int? _playbackWallStartMs;
+
+  // Grid playback controls (pause / speed). The master clock is virtual:
+  // _clockBaseMs is the media time (ms past _playbackStartIso) at wall time
+  // _playbackWallStartMs, advancing at _pbRate unless _pbPaused.
+  bool _pbPaused = false;
+  int _pbRate = 1;
+  int _clockBaseMs = 0;
+  static const List<int> _gridSpeeds = [-4, -2, -1, 1, 2, 4, 8];
+  String get _pbDirection => _pbRate < 0 ? 'backward' : 'forward';
 
   // Resume state tracking (from fullscreen transitions)
   int _lastResumePlaybackGen = 0;
@@ -160,6 +232,7 @@ class _HomeScreenState extends State<HomeScreen> {
     ref.getNvrTime = _getNvrTime;
     ref.getPlayer = (id) => _pbPlayers[id];
     ref.getController = (id) => _pbControllers[id];
+    ref.getStartIso = (id) => _fileStartIso[id] ?? _playbackStartIso;
     ref.detachPlayer = (id) {
       // Remove from maps without disposing — the receiver takes ownership
       _completedSubs[id]?.cancel();
@@ -201,6 +274,12 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final sub in _firstFrameSubs.values) {
       sub.cancel();
     }
+    for (final sub in _shownSubs.values) {
+      sub.cancel();
+    }
+    for (final t in _shownTimers.values) {
+      t.cancel();
+    }
     for (final p in _pbPlayers.values) {
       p.dispose();
     }
@@ -226,9 +305,95 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Current master playback time as ISO string, derived from shared clock.
   String? _masterTimeIso() {
     if (_playbackStartIso == null || _playbackWallStartMs == null) return null;
-    final elapsed = DateTime.now().millisecondsSinceEpoch - _playbackWallStartMs!;
     final start = DateTime.parse(_playbackStartIso!);
-    return start.add(Duration(milliseconds: elapsed)).toIso8601String();
+    return start.add(Duration(milliseconds: _clockMs())).toIso8601String();
+  }
+
+  /// Media time (ms past _playbackStartIso) of the master clock now.
+  int _clockMs() {
+    final wall = _playbackWallStartMs;
+    if (wall == null) return _clockBaseMs;
+    if (_pbPaused) return _clockBaseMs;
+    return _clockBaseMs + (DateTime.now().millisecondsSinceEpoch - wall) * _pbRate;
+  }
+
+  /// Freeze the clock's current value as the new base (before pause/rate change).
+  void _rebaseClock() {
+    if (_playbackWallStartMs == null) return;
+    _clockBaseMs = _clockMs();
+    _playbackWallStartMs = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  void _togglePbPause() {
+    if (_isLive) {
+      // Freeze live = switch to playback at this instant, paused.
+      final t = _nvrLocalNow().subtract(const Duration(seconds: 2));
+      _startPlayback(t.toIso8601String()).then((_) {
+        if (!_isLive && !_pbPaused && mounted) _togglePbPause();
+      });
+      return;
+    }
+    _rebaseClock();
+    setState(() => _pbPaused = !_pbPaused);
+    for (final p in _pbPlayers.values) {
+      _pbPaused ? p.pause() : p.play();
+    }
+  }
+
+  void _setPbRate(int rate) {
+    if (_isLive) {
+      if (rate == 1) return;
+      _pbRate = rate;
+      // Reverse starts at now; faster-than-live forward starts 5 min back.
+      _startPlayback(_nvrLocalNow()
+          .subtract(rate < 0
+              ? const Duration(seconds: 2)
+              : const Duration(minutes: 5))
+          .toIso8601String());
+      return;
+    }
+    if (rate == _pbRate) return;
+    if ((rate < 0) != (_pbRate < 0)) {
+      // Reverse is a separate server render: restart every camera from the
+      // current master time in the new direction.
+      final from = _masterTimeIso() ?? _playbackStartIso;
+      setState(() => _pbRate = rate);
+      if (from != null) _startPlayback(from);
+      return;
+    }
+    _rebaseClock();
+    setState(() => _pbRate = rate);
+    for (final p in _pbPlayers.values) {
+      p.setRate(rate.abs().toDouble());
+    }
+  }
+
+  /// Jump every camera by [seconds] from the current grid playback time.
+  void _skipPb(int seconds) {
+    if (_isLive) {
+      if (seconds < 0) {
+        _startPlayback(_nvrLocalNow()
+            .add(Duration(seconds: seconds))
+            .toIso8601String());
+      }
+      return;
+    }
+    if (_playbackStartIso == null) return;
+    final now = DateTime.parse(_playbackStartIso!)
+        .add(Duration(milliseconds: _clockMs()));
+    final target = now.add(Duration(seconds: seconds));
+    if (seconds > 0 && target.isAfter(_nvrLocalNow().subtract(const Duration(seconds: 3)))) {
+      _goLive();
+      return;
+    }
+    _startPlayback(target.toIso8601String());
+  }
+
+  /// "Now" on the NVR clock, expressed like a parsed playback ISO.
+  DateTime _nvrLocalNow() {
+    // Playback ISOs are this client's local wall clock (formatLocalISOFromMs),
+    // exactly as fullscreen builds them; tzOffsetMs is NOT a UTC offset.
+    return DateTime.now();
   }
 
   Future<void> _startPlayback(String start) async {
@@ -267,7 +432,10 @@ class _HomeScreenState extends State<HomeScreen> {
     // even while sessions are still loading (prevents fallback to DateTime.now()
     // which causes 404 when fullscreen is entered before sessions finish).
     _playbackStartIso = start;
+    _fileStartIso.clear();
     _playbackWallStartMs = null;
+    _clockBaseMs = 0;
+    _pbPaused = false;
     _syncRefState();
 
     setState(() {
@@ -296,16 +464,16 @@ class _HomeScreenState extends State<HomeScreen> {
         bench.mark('api_request_start', extra: {'camera': cam.id});
         final session = await widget.recordingApi.startPlayback(
           cam.id, start, widget.quality.param,
+          direction: _pbDirection,
           benchId: bench.id,
+          stream: widget.streamSource.name,
         );
         if (_generation != gen || !mounted) return;
         bench.mark('api_response_received',
             extra: {'camera': cam.id, 'seek_s': session.seekSeconds.toStringAsFixed(2)});
         // Anchor the master wall clock on the first session that resolves.
         _playbackWallStartMs ??= DateTime.now().millisecondsSinceEpoch;
-        if (mounted) {
-          setState(() => _pbLoading.remove(cam.id));
-        }
+        _fileStartIso[cam.id] = _originIso(session, start);
         _openCameraSession(cam.id, session, gen);
       } catch (_) {
         if (_generation == gen && mounted) {
@@ -325,12 +493,24 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// Opens a player for a single camera session and wires up segment continuation.
+  /// Wall time at which this session's file has position 0: the server's
+  /// segment_start + seek_seconds (exact to the frame for RIV, where it is the
+  /// keyframe playback starts on), falling back to what was asked for.
+  String _originIso(PlaybackSession s, String fallback) {
+    final base = DateTime.tryParse(s.segmentStart);
+    if (base == null) return fallback;
+    return base
+        .add(Duration(milliseconds: (s.seekSeconds * 1000).round()))
+        .toIso8601String();
+  }
+
   void _openCameraSession(int cameraId, PlaybackSession session, int gen) {
     final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
     final player = _ensurePlayer(cameraId);
     final bench = PlaybackBenchmark.current;
     bench?.mark('player_open', extra: {'camera': cameraId});
-    player.open(Media(fullUrl));
+    _openCovered(cameraId, player, fullUrl);
+    if (_pbRate != 1) player.setRate(_pbRate.abs().toDouble());
 
     // Detect first decoded frame: position stream emits a non-zero value once
     // the player actually has a frame to render. Only the first camera's first
@@ -382,13 +562,18 @@ class _HomeScreenState extends State<HomeScreen> {
       final start = masterIso ?? segmentEnd;
       final session = await widget.recordingApi.startPlayback(
         cameraId, start, widget.quality.param,
+        direction: _pbDirection,
+        stream: widget.streamSource.name,
       );
       if (_generation != gen || !mounted) return;
+      _fileStartIso[cameraId] = _originIso(session, start);
 
       final fullUrl = widget.recordingApi.getSegmentUrl(session.segmentUrl);
       final player = _pbPlayers[cameraId];
       if (player == null) return;
-      player.open(Media(fullUrl));
+      _openCovered(cameraId, player, fullUrl);
+      if (_pbRate != 1) player.setRate(_pbRate.abs().toDouble());
+      if (_pbPaused) player.pause();
 
       _completedSubs[cameraId]?.cancel();
       _completedSubs[cameraId] = player.stream.completed.listen((completed) {
@@ -421,7 +606,13 @@ class _HomeScreenState extends State<HomeScreen> {
       p.stop();
     }
     _playbackStartIso = null;
+    _fileStartIso.clear();
     _playbackWallStartMs = null;
+    _pbPaused = false;
+    _pbRate = 1;
+    for (final p in _pbPlayers.values) {
+      p.setRate(1);
+    }
     setState(() {
       _isLive = true;
       _paused = false;
@@ -435,12 +626,18 @@ class _HomeScreenState extends State<HomeScreen> {
   int _getNvrTime() {
     if (!_isLive && _playbackStartIso != null) {
       final startMs = DateTime.parse(_playbackStartIso!).millisecondsSinceEpoch;
+      // Reverse renders run backwards; use the virtual master clock.
+      if (_pbRate < 0) return startMs + _clockMs() + widget.tzOffsetMs;
       // Use a reference player's actual position so the playhead stops
       // when the stream freezes/buffers instead of advancing blindly.
       final refId = widget.selectedCameraId;
       final refPlayer = refId != null ? _pbPlayers[refId] : _pbPlayers.values.firstOrNull;
       if (refPlayer != null) {
-        return startMs + refPlayer.state.position.inMilliseconds + widget.tzOffsetMs;
+        final fileIso = _fileStartIso[refId ?? _pbPlayers.keys.first];
+        final originMs = fileIso != null
+            ? DateTime.parse(fileIso).millisecondsSinceEpoch
+            : startMs;
+        return originMs + refPlayer.state.position.inMilliseconds + widget.tzOffsetMs;
       }
       // No player ready yet (sessions still loading) — return the intended
       // playback start time so fullscreen entry doesn't fall back to now().
@@ -587,6 +784,12 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(width: 8),
           ],
+          if (widget.onOpenEvents != null)
+            IconButton(
+              icon: const Icon(Icons.event_note, size: 20),
+              tooltip: 'Events',
+              onPressed: widget.onOpenEvents,
+            ),
           if (widget.onOpenFaces != null)
             IconButton(
               icon: const Icon(Icons.face_retouching_natural, size: 20),
@@ -661,6 +864,7 @@ class _HomeScreenState extends State<HomeScreen> {
               streamSource: widget.streamSource.param,
               quality: widget.quality.param,
               layout: gridLayoutById(widget.layoutId),
+              resizeScope: widget.selectedGroupId?.toString() ?? 'all',
               selectedCameraId: widget.selectedCameraId,
               onCameraSelected: widget.onCameraSelected,
               onEditCamera: widget.onEditCamera,
@@ -675,6 +879,7 @@ class _HomeScreenState extends State<HomeScreen> {
               playbackFailed: _isLive ? const {} : _pbFailed,
             ),
           ),
+          _buildPlaybackBar(),
           if (widget.selectedCameraId != null)
             TimelineWidget(
               cameraId: widget.selectedCameraId!,
@@ -693,6 +898,61 @@ class _HomeScreenState extends State<HomeScreen> {
               cameras: widget.allCameras.where((c) => c.enabled).toList(),
             ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildPlaybackBar() {
+    Widget btn(IconData icon, String tip, VoidCallback onTap) => IconButton(
+          icon: Icon(icon, size: 22),
+          tooltip: tip,
+          onPressed: onTap,
+          visualDensity: VisualDensity.compact,
+        );
+    return Container(
+      color: const Color(0xFF171717),
+      height: 40,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            const SizedBox(width: 8),
+            btn(Icons.replay_30, 'Back 30 s', () => _skipPb(-30)),
+            btn(_pbPaused && !_isLive ? Icons.play_arrow : Icons.pause,
+                _pbPaused && !_isLive ? 'Play' : 'Pause', _togglePbPause),
+            btn(Icons.forward_30, 'Forward 30 s', () => _skipPb(30)),
+            const SizedBox(width: 8),
+            for (final sp in _gridSpeeds)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: SizedBox(
+                  height: 28,
+                  child: TextButton(
+                    onPressed: () => _setPbRate(sp),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero,
+                      backgroundColor: _pbRate == sp && !_isLive
+                          ? const Color(0xFF3B82F6)
+                          : Colors.transparent,
+                      foregroundColor: _pbRate == sp
+                          ? Colors.white
+                          : const Color(0xFFA3A3A3),
+                    ),
+                    child: Text('${sp}x', style: const TextStyle(fontSize: 12)),
+                  ),
+                ),
+              ),
+            const SizedBox(width: 8),
+            TextButton.icon(
+              onPressed: _isLive ? null : _goLive,
+              icon: Icon(Icons.circle,
+                  size: 10, color: _isLive ? Colors.red : const Color(0xFF737373)),
+              label: const Text('Live'),
+            ),
+            const SizedBox(width: 8),
+          ],
+        ),
       ),
     );
   }

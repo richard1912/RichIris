@@ -98,6 +98,8 @@ class Camera {
   final bool faceRecognition;
   final int faceMatchThreshold;
   final int zoneCount;
+  /// True when the server can drive this camera's pan/tilt/zoom.
+  final bool hasPtz;
   final String createdAt;
 
   Camera({
@@ -125,6 +127,7 @@ class Camera {
     this.faceRecognition = false,
     this.faceMatchThreshold = 60,
     this.zoneCount = 0,
+    this.hasPtz = false,
     required this.createdAt,
   });
 
@@ -156,6 +159,7 @@ class Camera {
         faceRecognition: json['face_recognition'] as bool? ?? false,
         faceMatchThreshold: json['face_match_threshold'] as int? ?? 60,
         zoneCount: json['zone_count'] as int? ?? 0,
+        hasPtz: json['ptz'] as bool? ?? false,
         createdAt: json['created_at'] as String,
       );
 

@@ -86,20 +86,49 @@ def _build_quality_profiles(
     return profiles
 
 
+def _direct_source(raw_url: str) -> str:
+    """Camera URL as go2rtc should open it for a direct (passthrough) stream.
+
+    go2rtc's RTSP client asks every camera for the ONVIF audio backchannel
+    (two-way talk) by default. RichIris never talks through a camera, and
+    holding that channel has a cost: on the Dahua SDT3E410 it occupies the
+    speaker, so the camera refuses its own siren and alarm tones ("Bad
+    Request") for as long as go2rtc is connected. Found 2026-11-17 after a
+    factory reset "fixed" the siren only until RichIris reconnected.
+    """
+    if raw_url.lower().startswith(("rtsp://", "rtsps://")) and "#backchannel=" not in raw_url:
+        return f"{raw_url}#backchannel=0"
+    return raw_url
+
+
+def riv_audio_source(stream_name: str) -> str:
+    """Second source for ``<stream>_s1_direct`` on cameras recorded as RIV.
+
+    go2rtc's fMP4 output cannot carry G.711, so those cameras' live/RIV feed
+    had no audio. Listed AFTER the camera, so go2rtc only starts this audio-only
+    ffmpeg (reading go2rtc's own RTSP relay, never the camera) when the camera's
+    own audio does not satisfy an MP4 consumer; AAC cameras never start it.
+    Verified 2026-11-24 on Alfresco 44: AAC 8 kHz mono, aligned with video.
+    """
+    return f"ffmpeg:{stream_name}_s1_direct#audio=aac"
+
+
 def build_streams_config(
     cameras: list[tuple[str, str, str | None]],
     probed_bitrates: dict[str, tuple[int, int, str, str]] | None = None,
 ) -> dict[str, list[str]]:
     """Build the streams dict for go2rtc.yaml from camera list.
 
-    cameras: list of (name, rtsp_url, sub_stream_url)
+    cameras: list of (name, rtsp_url, sub_stream_url[, add_aac_audio])
     probed_bitrates: optional dict of camera_name -> (main_kbps, sub_kbps, main_codec, sub_codec)
 
     Returns dict mapping stream names to source URL lists (go2rtc config format).
     """
     streams: dict[str, list[str]] = {}
 
-    for name, rtsp_url, sub_url in cameras:
+    for cam in cameras:
+        name, rtsp_url, sub_url = cam[0], cam[1], cam[2]
+        add_aac = bool(cam[3]) if len(cam) > 3 else False
         stream_name = get_stream_name(name)
         has_sub = bool(sub_url)
         sources = {"main": rtsp_url, "sub": sub_url or rtsp_url}
@@ -138,12 +167,14 @@ def build_streams_config(
                 # FrameBroker's ffmpeg gets 404.  Using the real URL means a
                 # second RTSP connection to the camera, but it actually works.
                 raw_url = sources["main"]
-                source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
+                source_url = _direct_source(raw_url) if params is None else f"ffmpeg:{raw_url}{params}"
             else:
                 # Direct: point to camera RTSP URL
                 raw_url = sources[source_key]
-                source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
+                source_url = _direct_source(raw_url) if params is None else f"ffmpeg:{raw_url}{params}"
             streams[key] = [source_url]
+            if add_aac and suffix == "_s1_direct":
+                streams[key].append(riv_audio_source(stream_name))
 
     return streams
 
@@ -160,7 +191,8 @@ class Go2rtcClient:
         return self._port
 
     async def register_stream(
-        self, camera_name: str, rtsp_url: str, sub_stream_url: str | None = None
+        self, camera_name: str, rtsp_url: str, sub_stream_url: str | None = None,
+        add_aac_audio: bool = False,
     ) -> None:
         """Register camera streams with go2rtc at all quality levels.
 
@@ -202,6 +234,8 @@ class Go2rtcClient:
 
         async def _register_one(client: httpx.AsyncClient, key: str, source_url: str) -> None:
             url = f"{self._base_url}/api/streams?name={quote(key)}&src={quote(source_url)}"
+            if add_aac_audio and key == f"{stream_name}_s1_direct":
+                url += f"&src={quote(riv_audio_source(stream_name))}"
             logger.info("Registering stream with go2rtc", extra={"stream_name": key, "source": source_url})
             try:
                 resp = await client.put(url)
@@ -226,10 +260,10 @@ class Go2rtcClient:
                     # No sub-stream: use main RTSP URL directly (go2rtc
                     # internal chain refs aren't served via RTSP listener)
                     raw_url = sources["main"]
-                    source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
+                    source_url = _direct_source(raw_url) if params is None else f"ffmpeg:{raw_url}{params}"
                 else:
                     raw_url = sources[source_key]
-                    source_url = raw_url if params is None else f"ffmpeg:{raw_url}{params}"
+                    source_url = _direct_source(raw_url) if params is None else f"ffmpeg:{raw_url}{params}"
                 tasks.append(_register_one(client, key, source_url))
             await asyncio.gather(*tasks)
 

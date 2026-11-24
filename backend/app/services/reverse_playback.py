@@ -33,6 +33,7 @@ import logging
 import time
 from pathlib import Path
 
+from app.services.ffmpeg import TS_INPUT_ARGS
 from app.services.job_object import assign_to_job
 
 logger = logging.getLogger(__name__)
@@ -91,13 +92,20 @@ class ReverseRenderer:
     def __init__(
         self, *, ffmpeg: str, hwaccel: str, source: str,
         end_offset: float, output_path: Path,
+        plan: list[tuple[float, float]] | None = None,
+        input_for=None,
     ) -> None:
+        """``plan``/``input_for`` (RIV): explicit (seek, duration) chunks,
+        latest first, and a function giving the ffmpeg input args for one
+        chunk. RIV chunks start exactly on keyframes, so no ``-ss`` is needed
+        and the hardware decoder never starts mid-GOP."""
         self._ffmpeg = ffmpeg
         self._hwaccel = hwaccel
         self._source = source
         self._end_offset = end_offset
         self._output_path = output_path
-        self._plan = _chunk_plan(end_offset)
+        self._plan = plan if plan is not None else _chunk_plan(end_offset)
+        self._input_for = input_for
         self._procs: set[asyncio.subprocess.Process] = set()
         self._stopped = False
         self.mux: asyncio.subprocess.Process | None = None
@@ -201,11 +209,14 @@ class ReverseRenderer:
 
     async def _encode(self, seek: float, duration: float, *, use_hw: bool) -> tuple[bytes, str]:
         pre, vf = _decode_args(self._hwaccel, use_hw)
+        if self._input_for is not None:
+            src_args = self._input_for(seek, duration)
+        else:
+            src_args = ["-ss", f"{seek:.3f}", "-t", f"{duration:.3f}", "-i", self._source]
         cmd = [
             self._ffmpeg, "-v", "error", "-nostdin",
-            *pre,
-            "-ss", f"{seek:.3f}", "-t", f"{duration:.3f}",
-            "-i", self._source,
+            *pre, *TS_INPUT_ARGS,
+            *src_args,
             "-an", "-sn", "-dn",
             "-vf", vf,
             "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-threads", "2",
